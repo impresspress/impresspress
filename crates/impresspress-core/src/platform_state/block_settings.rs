@@ -200,12 +200,13 @@ fn settings_from_rows(rows: &[BlockSettingsRow]) -> BlockSettings {
 /// [`crate::platform_state::wrap_grants::load`] — the other read on this
 /// same pre-migration path — probes the same way.
 ///
-/// It runs only AFTER a failed read, where `wrap_grants` probes first,
-/// because this read is the one the Cloudflare KV row cache is built to
-/// serve (`cache_key::read_key`): probing first would spend a database
-/// round-trip on every cold isolate start even when the cache could answer
-/// the list without one. On a healthy deployment the table exists, the list
-/// succeeds, and the probe never runs at all.
+/// Both run the probe only AFTER a failed read. Probing first would spend a
+/// round trip on every cold build to answer a question the list answers by
+/// succeeding — here even when the Cloudflare KV row cache could have served
+/// the list without reaching the database at all (`cache_key::read_key`),
+/// and on D1 the probe is a `sqlite_master` scan rather than an index
+/// lookup. On a healthy deployment the table exists, the list succeeds, and
+/// the probe never runs at all.
 async fn read_rows(db: &Arc<dyn DatabaseService>) -> Result<Vec<BlockSettingsRow>, DatabaseError> {
     let opts = crate::cache_key::full_table_list_opts();
     let listed = match db.list(TABLE, &opts).await {
@@ -264,13 +265,10 @@ pub async fn load(db: &Arc<dyn DatabaseService>) -> Result<BlockSettings, Databa
 ///
 /// # Error semantics
 ///
-/// A missing `block_settings` table (fresh DB, or a cold Cloudflare isolate
-/// whose first request races admin's `Init`) is **not** an error condition
-/// here at all: [`DatabaseService::list`]'s shared `DbExec` implementation
-/// already guards on table existence and returns `Ok(RecordList::default())`
-/// for a table that doesn't exist yet (see `DbExec::list` in
-/// `wafer-core/src/interfaces/database/exec.rs`). That is the one and only
-/// place the "tolerant" cold-start case is handled.
+/// A missing `block_settings` table (a fresh database, before admin's
+/// migration has created it) is **not** an error here: `read_rows`, the
+/// read this shares with [`load`], answers it with no rows (its doc, "The
+/// missing table is this function's own problem", says how).
 ///
 /// Consequently, an `Err` reaching this function is **always** a genuine
 /// operational failure (backend outage, corruption, permissions) — never the

@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use wafer_block::{db::ListOptions, GrantWrite};
 use wafer_core::{
     clients::database::{self as db, RecordData},
-    interfaces::database::service::DatabaseService,
+    interfaces::database::service::{DatabaseError, DatabaseService},
 };
 use wafer_run::{context::Context, ErrorCode, ResourceGrant, ResourceType, WaferError};
 
@@ -219,30 +219,40 @@ fn decode_error(e: String) -> WaferError {
 /// Load the admin-created grants for a runtime build.
 ///
 /// DB-service reader shared by every target (the native CLI, the Cloudflare
-/// adapter's per-isolate cache and its `/_deploy/init`), so dynamic grants
-/// are injected the same way everywhere. Missing table / read errors degrade
-/// to an empty vec — dynamic grants are additive — and a row that does not
+/// adapter's per-isolate cache and its `/_deploy/*` funnel, the browser), so
+/// dynamic grants are injected the same way everywhere. A row that does not
 /// decode or names an unknown resource type is warned about and dropped,
 /// never widened.
-pub async fn load(db: &Arc<dyn DatabaseService>) -> Vec<ResourceGrant> {
-    // Structured fresh-boot signal: on a first-ever deploy the table does
-    // not exist yet (deploy-init builds the runtime BEFORE migrations run)
-    // — that's expected and quiet. Any error after the existence check is a
-    // real read failure and yields a grant-less, WRAP-denying runtime on
-    // the Cloudflare path, so it warns.
-    match db.schema_table_exists(TABLE).await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::debug!(
-                "wrap_grants table absent (fresh boot before migrations); no dynamic grants"
-            );
-            return Vec::new();
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "wrap_grants existence check failed; dynamic grants skipped");
-            return Vec::new();
-        }
-    }
+///
+/// # A failed read is an error, never "no grants"
+///
+/// A runtime built without the admin-created grants denies every access they
+/// exist to allow, and nothing about it looks broken: it serves, it is cached
+/// as healthy, and the blocks those grants were for fail one request at a
+/// time. So a read that could not answer is the caller's `Err` to act on —
+/// the boot funnel aborts or reports it by policy (`builder::boot`), native
+/// refuses to start, and `/_deploy/prepare` refuses to seal a plan.
+///
+/// # The missing table is this function's own problem
+///
+/// A first-ever deploy reads this table BEFORE anything has created it:
+/// `/_deploy/init` and `/_deploy/prepare` build their runtime, and only then
+/// do the blocks' `Init`s migrate. So "table absent" is an ordinary cold
+/// start here and answers no grants. The executor has no table-existence
+/// guard — a `list` of a missing table runs and the backend answers "no such
+/// table" — so the tolerance is this function's, through
+/// [`DatabaseService::schema_table_exists`].
+///
+/// It lists first and asks only after the list failed, the same order as
+/// [`crate::platform_state::block_settings::load`]: on a healthy database
+/// the table is there, the list succeeds and the probe never runs. On D1
+/// that probe is a `sqlite_master` scan of every schema row up to this
+/// table, which admin's migration creates last — about thirty rows on every
+/// database-built runtime when it ran first. Only a definite "absent" turns
+/// a failed list into no grants; a probe that also failed, or that found the
+/// table, is no evidence the failure was the cold start, so the list's own
+/// error is returned.
+pub async fn load(db: &Arc<dyn DatabaseService>) -> Result<Vec<ResourceGrant>, DatabaseError> {
     let opts = ListOptions {
         limit: Some(10_000),
         skip_count: true,
@@ -251,18 +261,29 @@ pub async fn load(db: &Arc<dyn DatabaseService>) -> Vec<ResourceGrant> {
     let rows = match db.list(TABLE, &opts).await {
         Ok(list) => list.records,
         Err(e) => {
-            tracing::warn!(error = %e, "wrap_grants read failed; dynamic grants skipped");
-            return Vec::new();
+            if let Ok(false) = db.schema_table_exists(TABLE).await {
+                tracing::debug!(
+                    "wrap_grants table absent (fresh boot before migrations); no dynamic grants"
+                );
+                return Ok(Vec::new());
+            }
+            tracing::error!(
+                error = %e,
+                "wrap_grants list failed (operational error, not a missing table); \
+                 refusing to build a runtime without its admin-created grants"
+            );
+            return Err(e);
         }
     };
-    rows.into_iter()
+    Ok(rows
+        .into_iter()
         .filter_map(|r| {
             WrapGrantRow::from_record(&r.id, &r.data)
                 .and_then(WrapGrantRow::into_resource_grant)
                 .map_err(|e| tracing::warn!(error = %e, "wrap_grants row dropped"))
                 .ok()
         })
-        .collect()
+        .collect())
 }
 
 /// The resource one test fixture grants over: a real table name on the wire,
@@ -292,6 +313,37 @@ pub(crate) async fn seed_fixture_grant(db: &Arc<dyn DatabaseService>) {
     db.create(TABLE, row.to_data())
         .await
         .expect("seed fixture grant");
+}
+
+/// Test-only: a migrated database holding the [`seed_fixture_grant`] row,
+/// whose every statement naming [`TABLE`] then fails as a D1 outage does
+/// ([`Fault::Unavailable`](crate::test_support::d1_shaped::Fault)) — the
+/// failed read [`load`]'s callers must treat as an error.
+///
+/// Here rather than in each caller's tests for the reason
+/// [`seed_fixture_grant`] is: the fault switch names the table.
+#[cfg(test)]
+pub(crate) async fn fixture_with_failing_reads() -> Arc<dyn DatabaseService> {
+    use crate::test_support::d1_shaped::{D1Shaped, Fault, Ledger};
+    let shaped = Arc::new(D1Shaped::new(
+        wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+            .expect("open in-memory sqlite"),
+        Arc::new(Ledger::default()),
+    ));
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    crate::test_support::migrate_sqlite(
+        &db,
+        crate::blocks::admin::ADMIN_BLOCK_ID,
+        crate::blocks::admin::migrations::SQLITE_MIGRATIONS,
+    )
+    .await
+    .expect("apply admin migrations");
+    seed_fixture_grant(&db).await;
+    load(&db)
+        .await
+        .expect("the fixture database reads before its fault is switched on");
+    shaped.fail_table(TABLE, Fault::Unavailable);
+    db
 }
 
 // ---------------------------------------------------------------------------
@@ -736,7 +788,7 @@ mod migration_005_tests {
 mod boot_tests {
     use wafer_block::db::Filter;
     use wafer_core::interfaces::database::service::{
-        AggregateSpec, Column, DatabaseError, Record, RecordList, Table, UpsertSpec,
+        AggregateSpec, Column, Record, RecordList, Table, UpsertSpec,
     };
 
     use super::*;
@@ -773,7 +825,10 @@ mod boot_tests {
         let db = bare_db().await;
 
         // Missing table → empty, no error.
-        assert!(load(&db).await.is_empty());
+        assert!(load(&db)
+            .await
+            .expect("a missing table is a cold start")
+            .is_empty());
 
         // Apply admin migrations (creates the wrap_grants table among the
         // other admin tables) through the real migration runner — the
@@ -797,7 +852,7 @@ mod boot_tests {
         .await;
         seed(&db, "wafer-run/auth", "bucket/x", GrantWrite::None, "").await;
 
-        let grants = load(&db).await;
+        let grants = load(&db).await.expect("load");
         assert_eq!(grants.len(), 2);
         let g1 = grants
             .iter()
@@ -836,7 +891,7 @@ mod boot_tests {
         )
         .await;
 
-        let grants = load(&db).await;
+        let grants = load(&db).await.expect("load");
         assert_eq!(
             grants.len(),
             3,
@@ -895,7 +950,7 @@ mod boot_tests {
             .await
             .expect("seed a write = 2 row");
         assert!(
-            load(&db).await.is_empty(),
+            load(&db).await.expect("load").is_empty(),
             "before 005 the codec refuses `write = 2`"
         );
 
@@ -906,18 +961,54 @@ mod boot_tests {
             let stored = db.get(TABLE, "wg_legacy").await.expect("read the row");
             assert_eq!(stored.data["write"], json!(0), "{boot} run");
             assert_eq!(stored.data["append"], json!(1), "{boot} run");
-            let grants = load(&db).await;
+            let grants = load(&db).await.expect("load");
             assert_eq!(grants.len(), 1, "{boot} run");
             assert_eq!(grants[0].write, GrantWrite::Append, "{boot} run");
         }
     }
 
-    /// A [`DatabaseService`] whose existence check fails hard and whose every
-    /// other method is [`unreachable!`]. Isolates the fail-closed `Err` arm of
-    /// [`load`]: the only method it should reach is `schema_table_exists`, so
-    /// a real read error there must short-circuit to an empty grant set
-    /// without ever touching `list`.
-    struct ErroringDb;
+    /// A [`DatabaseService`] that answers [`load`]'s two questions from a
+    /// script — `list` with no rows or the error `list` builds, the existence
+    /// check with what `exists` builds — counts the existence checks it is
+    /// asked, and is [`unreachable!`] everywhere else, so any other read
+    /// `load` made would fail the test.
+    struct ErroringDb {
+        /// `None` lists no rows; `Some(f)` fails the list with `f()`.
+        list: Option<fn() -> DatabaseError>,
+        exists: fn() -> Result<bool, DatabaseError>,
+        probes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ErroringDb {
+        fn new(
+            list: Option<fn() -> DatabaseError>,
+            exists: fn() -> Result<bool, DatabaseError>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                list,
+                exists,
+                probes: Default::default(),
+            })
+        }
+
+        fn probes(&self) -> usize {
+            self.probes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn outage() -> DatabaseError {
+        DatabaseError::Unavailable("D1_ERROR: simulated wrap_grants outage".into())
+    }
+
+    fn probe_failed() -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Internal(
+            "simulated wrap_grants existence-check failure".into(),
+        ))
+    }
+
+    fn no_such_table() -> DatabaseError {
+        DatabaseError::Internal(format!("no such table: {TABLE}"))
+    }
 
     #[async_trait::async_trait]
     impl DatabaseService for ErroringDb {
@@ -928,9 +1019,9 @@ mod boot_tests {
             Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
         }
         async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
-            Err(DatabaseError::Internal(
-                "simulated wrap_grants existence-check failure".into(),
-            ))
+            self.probes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.exists)()
         }
 
         async fn schema_columns(&self, _table: &str) -> Result<Vec<String>, DatabaseError> {
@@ -938,7 +1029,7 @@ mod boot_tests {
         }
 
         async fn get(&self, _collection: &str, _id: &str) -> Result<Record, DatabaseError> {
-            unreachable!("load must not read rows after an existence-check error")
+            unreachable!("load reads the table through `list` only")
         }
 
         async fn list(
@@ -946,7 +1037,15 @@ mod boot_tests {
             _collection: &str,
             _opts: &ListOptions,
         ) -> Result<RecordList, DatabaseError> {
-            unreachable!("load must not list rows after an existence-check error")
+            match self.list {
+                None => Ok(RecordList {
+                    records: Vec::new(),
+                    total_count: 0,
+                    page: 1,
+                    page_size: 10_000,
+                }),
+                Some(fail) => Err(fail()),
+            }
         }
 
         async fn create(
@@ -1113,16 +1212,59 @@ mod boot_tests {
         }
     }
 
-    /// A hard read error from the existence check is fail-closed: dynamic
-    /// grants are additive, so a runtime that cannot confirm the table exists
-    /// must build WRAP-denying (empty grants) rather than risk widening access
-    /// on a bad read.
+    /// A list that failed is an error, never "no grants": a runtime built
+    /// without its admin-created grants serves, is cached as healthy, and
+    /// denies every access they exist to allow. When the existence check
+    /// cannot answer either, the error returned is the list's — the read
+    /// that failed — not the probe's.
     #[tokio::test]
-    async fn load_existence_check_error_fails_closed() {
-        let db: Arc<dyn DatabaseService> = Arc::new(ErroringDb);
+    async fn a_failed_read_is_an_error_not_an_empty_grant_set() {
+        let scripted = ErroringDb::new(Some(outage), probe_failed);
+        let db: Arc<dyn DatabaseService> = scripted.clone();
+        let error = load(&db)
+            .await
+            .expect_err("a failed list must not answer no grants");
         assert!(
-            load(&db).await.is_empty(),
-            "a schema_table_exists error must degrade to an empty grant set"
+            matches!(error, DatabaseError::Unavailable(ref m) if m.contains("simulated wrap_grants outage")),
+            "the list's own error comes back: {error:?}"
         );
+        assert_eq!(scripted.probes(), 1, "the probe ran once, after the list");
+    }
+
+    /// A probe that finds the table says the failure was not the cold start,
+    /// so the list's error stands.
+    #[tokio::test]
+    async fn a_failed_read_of_a_present_table_is_an_error() {
+        let db: Arc<dyn DatabaseService> = ErroringDb::new(Some(outage), || Ok(true));
+        let error = load(&db)
+            .await
+            .expect_err("the table is there, so the failed list is an outage");
+        assert!(matches!(error, DatabaseError::Unavailable(_)), "{error:?}");
+    }
+
+    /// Only a definite "absent" makes a failed list the fresh-install cold
+    /// start, which answers no grants.
+    #[tokio::test]
+    async fn a_failed_read_of_an_absent_table_is_the_cold_start() {
+        let scripted = ErroringDb::new(Some(no_such_table), || Ok(false));
+        let db: Arc<dyn DatabaseService> = scripted.clone();
+        assert!(load(&db)
+            .await
+            .expect("an absent table is a fresh install, not a failure")
+            .is_empty());
+        assert_eq!(scripted.probes(), 1);
+    }
+
+    /// A list that succeeds never asks whether the table exists: on D1 that
+    /// question is a `sqlite_master` scan, and every database-built runtime
+    /// used to pay it before listing.
+    #[tokio::test]
+    async fn a_healthy_list_never_probes() {
+        let scripted = ErroringDb::new(None, || {
+            unreachable!("a list that answered needs no existence check")
+        });
+        let db: Arc<dyn DatabaseService> = scripted.clone();
+        assert!(load(&db).await.expect("an empty table lists").is_empty());
+        assert_eq!(scripted.probes(), 0);
     }
 }

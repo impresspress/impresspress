@@ -439,7 +439,11 @@ pub async fn build_native_runtime(
     //     backend is covered. (Reading `infra.db_path` as a SQLite file
     //     found nothing on Postgres, where that path is just the unused
     //     default.) The builder installs them before the runtime is sealed.
-    let db_grants = impresspress_core::platform_state::wrap_grants::load(&database).await;
+    //     A read that failed refuses the boot: a server without its
+    //     admin-created grants would deny every access they allow.
+    let db_grants = impresspress_core::platform_state::wrap_grants::load(&database)
+        .await
+        .context("load the admin-created WRAP grants")?;
     if !db_grants.is_empty() {
         tracing::info!(
             count = db_grants.len(),

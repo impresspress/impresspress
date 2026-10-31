@@ -26,13 +26,23 @@ use wafer_run::{RuntimeError, Wafer};
 /// until the prepared candidate has passed verification and promotion.
 pub const PREPARE_RUNTIME_PLAN_KEY: &str = "IMPRESSPRESS_PREPARE_RUNTIME_PLAN";
 
-/// What a block `Init` failure (or a seed-hook failure) *does*. The ordering
-/// [`boot`] runs is identical under all three; only the consequence differs.
+/// What a block `Init` failure, a seed-hook failure or a failed
+/// [`GrantSource::Database`] read *does*. The ordering [`boot`] runs is
+/// identical under all three; only the consequence differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPolicy {
     /// Log and continue. The runtime is published even with a broken block, so
     /// one misconfigured block cannot wedge a whole page. Used by the browser,
     /// whose runtime is long-lived, inspectable and rebuilt on demand.
+    ///
+    /// Two failures are treated differently here, deliberately. A failed seed
+    /// hook still aborts: it leaves the config and enablement snapshots the
+    /// runtime would serve from unknown. A failed grants read boots on: the
+    /// admin-created grants only ever *add* access (`Wafer::add_wrap_grants`
+    /// is additive), so a runtime without them denies what they would have
+    /// allowed and never allows more — the fail-safe direction, and the page
+    /// stays usable to repair the database. The failure is logged and is in
+    /// [`BootReport::grants`].
     Tolerant,
     /// Fail closed on the first failure. Used by the Cloudflare request path:
     /// publishing a runtime with a failed lazy-init slot would let concurrent
@@ -55,7 +65,8 @@ pub enum InitPolicy {
 /// and nothing but a comment recorded that the omission was deliberate.
 pub enum GrantSource<'a> {
     /// Load admin-created grants from the platform database and register them
-    /// before seal. Missing table / read errors degrade to no dynamic grants —
+    /// before seal. A table that does not exist yet is no grants; a read that
+    /// failed is a failed step, which [`boot`] handles by its [`InitPolicy`] —
     /// see [`crate::platform_state::wrap_grants::load`].
     Database(&'a Arc<dyn DatabaseService>),
     /// Every grant this runtime gets was already installed by the builder,
@@ -83,8 +94,9 @@ pub enum GrantSource<'a> {
 /// A change to either response that the other side cannot read bumps it, so
 /// a mismatched CLI and Worker meet a schema refusal rather than a decode
 /// error. At 2, `/_deploy/verify` carries the password-hasher probe's
-/// required `password_hasher` field.
-pub const DEPLOY_RESPONSE_SCHEMA_VERSION: u32 = 2;
+/// required `password_hasher` field. At 3, the prepare response's
+/// [`BootReport`] carries the required `grants` step.
+pub const DEPLOY_RESPONSE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepOutcome {
@@ -115,7 +127,7 @@ pub struct BlockInitOutcome {
 /// *deserialized* is the `init_report` field of the `/_deploy/prepare`
 /// envelope, and that envelope carries [`DEPLOY_RESPONSE_SCHEMA_VERSION`],
 /// which is what gates a skew the consumer cannot survive. An added step
-/// cannot change the meaning of the four flags the deploy is gated on, so
+/// cannot change the meaning of the flags the deploy is gated on, so
 /// refusing it would force a lockstep CLI upgrade for a purely additive
 /// change. The envelope itself stays strict.
 ///
@@ -131,6 +143,9 @@ pub struct BlockInitOutcome {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootReport {
     pub sealed: bool,
+    /// Loading the deployment-owned WRAP grants ([`GrantSource`]). Always
+    /// `ok` for [`GrantSource::PreInstalled`], which reads nothing.
+    pub grants: StepOutcome,
     pub seed: StepOutcome,
     pub blocks: Vec<BlockInitOutcome>,
     /// True iff every step and every block init succeeded.
@@ -183,6 +198,10 @@ pub trait BootHooks {
 /// The one post-`build()` lifecycle, for every target:
 ///
 /// 1. `grants` — register deployment-owned WRAP grants. MUST precede `seal`.
+///    A failed [`GrantSource::Database`] read aborts the boot under
+///    [`InitPolicy::Strict`], is captured in [`BootReport::grants`] under
+///    [`InitPolicy::Reported`], and is logged under [`InitPolicy::Tolerant`];
+///    the runtime then seals without the admin-created grants.
 /// 2. `seal()` — finalize composite/uses/capability/snapshot wiring.
 /// 3. `init_block(admin)` FIRST — admin's migrations create the variables /
 ///    block_settings tables before any other block's `Init` writes to them,
@@ -192,7 +211,7 @@ pub trait BootHooks {
 ///    sequence is identical across processes and platforms).
 ///
 /// `policy` changes none of that ordering; it decides only what a failure at
-/// step 3, 4 or 5 does. See [`InitPolicy`].
+/// step 1, 3, 4 or 5 does. See [`InitPolicy`].
 ///
 /// The caller must have already wired the pre-seal bits its platform needs
 /// (`set_asset_loader`, any post-build block registration) onto `wafer` before
@@ -213,16 +232,46 @@ pub async fn boot(
 ) -> Result<BootReport, RuntimeError> {
     // 1. Deployment-owned WRAP grants, before seal — `add_wrap_grants` after
     //    seal is silently ignored.
-    match grants {
-        GrantSource::Database(db) => {
-            let loaded = crate::platform_state::wrap_grants::load(db).await;
-            if !loaded.is_empty() {
-                tracing::info!(count = loaded.len(), "registering database WRAP grants");
-                wafer.add_wrap_grants(loaded)?;
+    let grants = match grants {
+        GrantSource::Database(db) => match crate::platform_state::wrap_grants::load(db).await {
+            Ok(loaded) => {
+                if !loaded.is_empty() {
+                    tracing::info!(count = loaded.len(), "registering database WRAP grants");
+                    wafer.add_wrap_grants(loaded)?;
+                }
+                StepOutcome {
+                    ok: true,
+                    error: None,
+                }
             }
-        }
-        GrantSource::PreInstalled(_because) => {}
-    }
+            Err(e) => {
+                let error = format!("load the admin-created WRAP grants: {e}");
+                match policy {
+                    // Stringified like the seed and init arms. D1-OUTAGE IP-B
+                    // replaces this with `BootError::Grants`, which must
+                    // carry `e` itself so `Unavailable` (transient, 503) and
+                    // anything else (500) stay distinguishable — never
+                    // classified from this string.
+                    InitPolicy::Strict => return Err(RuntimeError::Config(error)),
+                    InitPolicy::Tolerant => {
+                        tracing::error!(
+                            error = %error,
+                            "booting without the admin-created WRAP grants",
+                        );
+                    }
+                    InitPolicy::Reported => {}
+                }
+                StepOutcome {
+                    ok: false,
+                    error: Some(error),
+                }
+            }
+        },
+        GrantSource::PreInstalled(_because) => StepOutcome {
+            ok: true,
+            error: None,
+        },
+    };
 
     // 2. Seal.
     wafer.seal().await?;
@@ -264,9 +313,10 @@ pub async fn boot(
         blocks.push(init_one(wafer, name, policy).await?);
     }
 
-    let ok = seed.ok && blocks.iter().all(|b| b.ok);
+    let ok = grants.ok && seed.ok && blocks.iter().all(|b| b.ok);
     Ok(BootReport {
         sealed: true,
+        grants,
         seed,
         blocks,
         ok,
@@ -754,7 +804,9 @@ mod tests {
         .await
         .expect("boot from database grants");
 
-        let expected = crate::platform_state::wrap_grants::load(&db).await;
+        let expected = crate::platform_state::wrap_grants::load(&db)
+            .await
+            .expect("load the fixture grant");
         assert_eq!(expected.len(), 1, "fixture seeds exactly one grant");
 
         let order2 = Arc::new(Mutex::new(Vec::new()));
@@ -817,10 +869,89 @@ mod tests {
         );
     }
 
+    /// A grants read that failed is a failed step, never "no grants": the
+    /// request path's `Strict` boot refuses to build a runtime that would
+    /// deny every access the admin-created grants allow.
+    #[tokio::test]
+    async fn a_failed_grants_read_fails_a_strict_boot() {
+        let db = crate::platform_state::wrap_grants::fixture_with_failing_reads().await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut wafer = wafer_with_probes(&order, None);
+        let error = boot(
+            &mut wafer,
+            &ProbeHooks {
+                order: order.clone(),
+                fail: false,
+            },
+            GrantSource::Database(&db),
+            InitPolicy::Strict,
+        )
+        .await
+        .expect_err("a Strict boot must not build without its grants");
+        assert!(
+            error
+                .to_string()
+                .contains("load the admin-created WRAP grants")
+                && error.to_string().contains("injected outage"),
+            "{error}"
+        );
+        assert!(
+            order.lock().unwrap().is_empty(),
+            "the boot stops before any block initializes: {:?}",
+            order.lock().unwrap()
+        );
+    }
+
+    /// Under `Reported` the failure is captured in its own step and fails
+    /// the report, so `/_deploy/init` and `/_deploy/prepare` answer 500 and
+    /// the CLI refuses the deploy; under `Tolerant` (the browser) it is
+    /// recorded too and the runtime serves on without the grants.
+    #[tokio::test]
+    async fn a_failed_grants_read_is_reported_or_tolerated_by_policy() {
+        for policy in [InitPolicy::Reported, InitPolicy::Tolerant] {
+            let db = crate::platform_state::wrap_grants::fixture_with_failing_reads().await;
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let mut wafer = wafer_with_probes(&order, None);
+            let report = boot(
+                &mut wafer,
+                &ProbeHooks {
+                    order: order.clone(),
+                    fail: false,
+                },
+                GrantSource::Database(&db),
+                policy,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{policy:?} captures the failure: {e}"));
+            assert!(!report.grants.ok, "{policy:?}: {report:?}");
+            assert!(
+                report
+                    .grants
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("injected outage")),
+                "{policy:?}: {report:?}"
+            );
+            assert!(
+                !report.ok,
+                "{policy:?}: a failed grants step fails the report"
+            );
+            assert!(
+                report.sealed && report.blocks.iter().all(|b| b.ok),
+                "{policy:?}"
+            );
+            assert!(
+                !format!("{:?}", wafer.wrap_grants())
+                    .contains(crate::platform_state::wrap_grants::FIXTURE_RESOURCE),
+                "{policy:?}: no grant was read, so none is installed",
+            );
+        }
+    }
+
     /// The `/_deploy/init` response body is a wire contract with
     /// `impresspress deploy`, which deserializes this very type. Field names
     /// are therefore checked by the compiler; what still needs asserting is
-    /// the *shape* — the four keys and the `skip_serializing_if` that keeps a
+    /// the *shape* — the five keys and the `skip_serializing_if` that keeps a
     /// successful step's `error` off the wire entirely.
     #[tokio::test]
     async fn report_serializes_the_deploy_wire_shape() {
@@ -839,7 +970,7 @@ mod tests {
         let object = json.as_object().expect("report is a JSON object");
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, vec!["blocks", "ok", "sealed", "seed"]);
+        assert_eq!(keys, vec!["blocks", "grants", "ok", "sealed", "seed"]);
         assert_eq!(
             json["seed"]
                 .as_object()

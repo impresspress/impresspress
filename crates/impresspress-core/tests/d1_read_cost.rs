@@ -1048,15 +1048,6 @@ const ALLOWED: &[Allowed] = &[
     },
     Allowed {
         phase: PHASE_DATABASE,
-        table: "impresspress__admin__wrap_grants",
-        class: Class::Exists,
-        mixed: 1,
-        shared: 1,
-        because: "`wrap_grants::load` probes before it lists; D1-READ-COST PR 5 (list \
-                  first, probe only after a failure) removes it",
-    },
-    Allowed {
-        phase: PHASE_DATABASE,
         table: "impresspress__admin__variables",
         class: Class::Scan,
         mixed: 2,
