@@ -294,6 +294,7 @@ pub fn parse_prepare_response(bytes: &[u8]) -> Result<PrepareResponse> {
     }
     if !response.init_report.ok
         || !response.init_report.sealed
+        || !response.init_report.grants.ok
         || !response.init_report.seed.ok
         || response.init_report.blocks.iter().any(|block| !block.ok)
     {
@@ -477,6 +478,7 @@ mod tests {
             "schema_version": DEPLOY_RESPONSE_SCHEMA_VERSION,
             "init_report": {
                 "sealed": true,
+                "grants": { "ok": true },
                 "seed": { "ok": true },
                 "blocks": [{ "block": "impresspress/admin", "ok": true }],
                 "ok": true
@@ -533,6 +535,13 @@ mod tests {
         failed["init_report"]["ok"] = serde_json::json!(false);
         assert!(parse_prepare_response(&serde_json::to_vec(&failed).unwrap()).is_err());
 
+        // A plan sealed without the admin-created WRAP grants is refused on
+        // the grants step itself, not only through the summary flag.
+        let mut grantless: serde_json::Value =
+            serde_json::from_slice(&successful_prepare_json(&plan)).unwrap();
+        grantless["init_report"]["grants"] = serde_json::json!({ "ok": false, "error": "load the admin-created WRAP grants: D1_ERROR" });
+        assert!(parse_prepare_response(&serde_json::to_vec(&grantless).unwrap()).is_err());
+
         let unbound = PreparedRuntimePlan::new(
             "example",
             format!("sha256:{}", "a".repeat(64)),
@@ -563,6 +572,10 @@ mod tests {
         let plan = plan();
         let report = BootReport {
             sealed: true,
+            grants: StepOutcome {
+                ok: true,
+                error: None,
+            },
             seed: StepOutcome {
                 ok: true,
                 error: None,
@@ -588,7 +601,7 @@ mod tests {
     /// A Worker that grows a step in its boot report must not break every CLI
     /// built before it. The report is a status document nested inside an
     /// envelope that already carries `schema_version`, so an added field
-    /// cannot change the meaning of the four flags this parser gates the
+    /// cannot change the meaning of the flags this parser gates the
     /// deploy on — refusing it would force a lockstep CLI upgrade for a purely
     /// additive change.
     #[test]

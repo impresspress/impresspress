@@ -163,13 +163,15 @@ pub async fn boot_deploy_runtime(
 /// `exporter`, which the caller then turns into the plan.
 ///
 /// These are the last reads a deploy makes, and the plan they seal is what
-/// every prepared cold build hydrates from without reading either table.
+/// every prepared cold build hydrates from without reading either table. So
+/// either read failing fails the prepare: a plan sealed over a failed grants
+/// read would carry no admin-created grants into every runtime built from it.
 pub async fn seal_prepared_plan(
     db: &Arc<dyn DatabaseService>,
     exporter: &PreparedPlanExporter,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let final_settings = crate::platform_state::block_settings::load(db).await?;
-    let final_grants = crate::platform_state::wrap_grants::load(db).await;
+    let final_grants = crate::platform_state::wrap_grants::load(db).await?;
     exporter.publish_block_settings(final_settings)?;
     exporter.publish_wrap_grants(&final_grants)?;
     Ok(())
@@ -630,6 +632,21 @@ pub fn request_config_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/_deploy/prepare`'s closing grants read failing fails the prepare:
+    /// sealing a plan over it would ship no admin-created grants to every
+    /// prepared runtime built from that plan, until the next deploy.
+    #[tokio::test]
+    async fn sealing_a_plan_fails_when_the_grants_read_fails() {
+        let db = crate::platform_state::wrap_grants::fixture_with_failing_reads().await;
+        let exporter = super::super::ImpresspressBuilder::new()
+            .prepared_plan_exporter()
+            .expect("an exporter");
+        let error = seal_prepared_plan(&db, &exporter)
+            .await
+            .expect_err("a failed grants read must not seal a plan");
+        assert!(error.to_string().contains("injected outage"), "{error}");
+    }
 
     /// The structural half of the hosted fill: every key reaches BOTH
     /// surfaces with the same value, and only the secrets reach the overlay.

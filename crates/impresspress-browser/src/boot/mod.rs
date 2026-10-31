@@ -323,8 +323,9 @@ impl BrowserServices {
             &hooks,
             // The admin permissions page is served in the browser too, so the
             // rows it writes are this runtime's deployment-owned grants. On a
-            // fresh profile the table does not exist yet and `load` degrades
-            // to no grants.
+            // fresh profile the table does not exist yet and `load` answers no
+            // grants; a read that failed is logged and the runtime boots
+            // without them (`Tolerant`).
             builder::GrantSource::Database(&hooks.db),
             // A browser runtime is long-lived and inspectable (and rebuilt on
             // demand), so one broken block must not wedge the whole page.
