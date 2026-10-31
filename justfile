@@ -32,3 +32,9 @@ clean:
 # ships a font update, then commit the changed binaries.
 sync-fonts:
     ./scripts/sync-fonts.sh
+
+# The D1 read-cost golden (crates/impresspress-core/tests/d1_read_cost.rs):
+# what a cold Cloudflare isolate sends D1, with the blocks a Worker compiles.
+# `BLESS=1 just d1-cost` rewrites crates/impresspress-core/tests/d1_read_cost.golden.
+d1-cost:
+    cargo test -p impresspress-core --no-default-features --features test-support,block-files,block-messages,block-vector,block-llm,block-legalpages,block-tickets,block-userportal,block-products,block-signal --test d1_read_cost

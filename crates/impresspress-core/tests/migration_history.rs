@@ -8,8 +8,8 @@
 //!   ledger release (auth 016, admin 009) make true.
 //! - **The fresh-install budget:** what a Cloudflare build's install sends
 //!   (the blocks `impresspress-cloudflare` can compile, read from its
-//!   manifest), counted through a decorator, fits half of one D1
-//!   invocation's default budget.
+//!   manifest), counted statement by statement through the D1-shaped
+//!   decorator, fits one D1 invocation's default budget.
 //! - **The history table:** every state's composition resolves to its own
 //!   hash; the table's invariants hold; every supported state, rebuilt with
 //!   the runner from before the ledger and upgraded through today's,
@@ -19,19 +19,16 @@
 //!   first state is recorded in `migration-history-crossing.txt`.
 //! - **Unknown states** are refused by name.
 
-use std::{
-    collections::BTreeSet,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use impresspress_core::{
     migration_helper::{self, Refusal},
-    test_support::migration_history as history,
+    test_support::{
+        d1_shaped::{Carrier, D1Shaped, Ledger, RoundTrip},
+        migration_history as history,
+    },
 };
-use wafer_core::interfaces::database::service::{DatabaseService, RawStatement, TransactionError};
+use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_sql_utils::Backend;
 
 /// An empty SQLite database in its own directory, file-backed as native
@@ -47,68 +44,29 @@ fn sqlite() -> (tempfile::TempDir, Arc<dyn DatabaseService>) {
     (dir, db)
 }
 
-/// Counts what reaches the database: transactions and the statements in
-/// them, and every other call that sends SQL.
-struct Counting {
-    inner: Arc<dyn DatabaseService>,
-    transactions: AtomicUsize,
-    statements_in_transactions: AtomicUsize,
-    other_calls: AtomicUsize,
+/// An empty SQLite database behind the D1-shaped decorator, recording every
+/// statement it is sent: what a Cloudflare fresh install sends D1.
+fn d1_shaped() -> (tempfile::TempDir, Arc<D1Shaped>, Arc<Ledger>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = Arc::new(Ledger::default());
+    let db = Arc::new(D1Shaped::open(
+        &dir.path().join("db.sqlite3"),
+        Arc::clone(&ledger),
+    ));
+    (dir, db, ledger)
 }
 
-impl Counting {
-    fn inner_service(&self) -> &dyn DatabaseService {
-        self.other_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.as_ref()
-    }
-}
-
-wafer_core::forward_database_service! {
-    impl DatabaseService for Counting {
-        forward_to inner_service();
-
-        ops {
-            get: forward,
-            list: forward,
-            create: forward,
-            create_many: forward,
-            update: forward,
-            delete: forward,
-            count: forward,
-            sum: forward,
-            query_raw: forward,
-            exec_raw: forward,
-            exec_raw_transaction: custom,
-            delete_where: forward,
-            delete_where_count: forward,
-            take_where: forward,
-            update_where: forward,
-            update_where_count: forward,
-            increment_field_where: forward,
-            upsert: forward,
-            aggregate: forward,
-            batch: forward,
-            insert_guarded: forward,
-            update_guarded: forward,
-            ensure_schema_table: forward,
-            ensure_schema_tables: forward,
-            schema_table_exists: forward,
-            schema_columns: forward,
-            schema_drop_table: forward,
-            schema_add_column: forward,
-            statement_budget: forward,
-        }
-
-        async fn exec_raw_transaction(
-            &self,
-            statements: &[RawStatement],
-        ) -> Result<Vec<i64>, TransactionError> {
-            self.transactions.fetch_add(1, Ordering::SeqCst);
-            self.statements_in_transactions
-                .fetch_add(statements.len(), Ordering::SeqCst);
-            self.inner.exec_raw_transaction(statements).await
-        }
-    }
+/// The round trips that were transactions (each migration file is one), and
+/// the statements they carried.
+fn transactions(trips: &[RoundTrip]) -> (usize, usize) {
+    let transactions: Vec<&RoundTrip> = trips
+        .iter()
+        .filter(|trip| trip.carrier == Carrier::Transaction)
+        .collect();
+    (
+        transactions.len(),
+        transactions.iter().map(|trip| trip.statements()).sum(),
+    )
 }
 
 /// Each block's whole list applies to an empty database, admin first, each
@@ -117,18 +75,14 @@ wafer_core::forward_database_service! {
 /// included, is counted.
 #[tokio::test]
 async fn every_block_applies_fresh_atomically() {
-    let (_dir, inner) = sqlite();
-    let counting = counting(inner);
-    let db: Arc<dyn DatabaseService> = counting.clone();
+    let (_dir, shaped, ledger) = d1_shaped();
+    let db: Arc<dyn DatabaseService> = shaped;
     let results = history::apply_fresh(&db, Backend::Sqlite).await;
     let (files, statements) = assert_applied(results);
+    let (transactions, in_transactions) = transactions(&ledger.take());
+    assert_eq!(transactions, files, "one transaction per file");
     assert_eq!(
-        counting.transactions.load(Ordering::SeqCst),
-        files,
-        "one transaction per file"
-    );
-    assert_eq!(
-        counting.statements_in_transactions.load(Ordering::SeqCst),
+        in_transactions,
         statements + files,
         "each file's statements and its ledger row, in its transaction"
     );
@@ -238,11 +192,17 @@ fn every_registered_block_names_its_feature() {
 /// The budget: `/_deploy/prepare` applies a fresh install in ONE Worker
 /// invocation, and until a D1 batch is admitted as one call the adapter
 /// admits each statement, so the statements sent — every file's statements
-/// and its ledger row, plus each block's own calls (the ledger table, the
-/// ledger read, the record's read and write, the fast-path read) — must fit
-/// half of the default budget ([`D1_QUERIES_PER_INVOCATION_DEFAULT`]), with
-/// the funnel's seeds and config reads in what is left. Counted here through
-/// a decorator, not computed, so the runner's next change is measured.
+/// and its ledger row, plus the runner's own (the ledger table, the ledger
+/// read, the record's read and write, the fast-path read, and the
+/// executor's introspection of each table it touches) — must fit the
+/// default per-invocation limit ([`D1_QUERIES_PER_INVOCATION_DEFAULT`]).
+/// Counted through the D1-shaped decorator, statement by statement as D1
+/// receives them, not computed, so the runner's next change is measured.
+///
+/// This is the migrations' share alone. The whole invocation — these plus
+/// the funnel's seeds, config reads and closing reads — is
+/// `tests/d1_read_cost.rs`'s provision phase, which asserts the same limit
+/// over all of it.
 ///
 /// It counts what a Cloudflare build migrates ([`cloudflare_blocks`]): a
 /// block the Worker cannot compile never runs in its prepare. Every one of
@@ -250,7 +210,7 @@ fn every_registered_block_names_its_feature() {
 ///
 /// [`D1_QUERIES_PER_INVOCATION_DEFAULT`]: impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT
 #[tokio::test]
-async fn a_cloudflare_fresh_install_fits_half_the_d1_budget() {
+async fn a_cloudflare_fresh_install_fits_the_d1_budget() {
     let on_cloudflare = cloudflare_blocks();
     let selected: Vec<_> = history::blocks()
         .into_iter()
@@ -263,35 +223,31 @@ async fn a_cloudflare_fresh_install_fits_half_the_d1_budget() {
          count would be short; run it with impresspress-core's default features"
     );
 
-    let (_dir, inner) = sqlite();
-    let counting = counting(inner);
-    let db: Arc<dyn DatabaseService> = counting.clone();
+    let (_dir, shaped, ledger) = d1_shaped();
+    let db: Arc<dyn DatabaseService> = shaped;
     let results = history::apply_fresh_blocks(&db, Backend::Sqlite, &selected).await;
     let (files, statements) = assert_applied(results);
 
-    let sent = statements + files + counting.other_calls.load(Ordering::SeqCst);
+    let trips = ledger.take();
+    let (_, in_transactions) = transactions(&trips);
+    assert_eq!(
+        in_transactions,
+        statements + files,
+        "each file's statements and its ledger row, in its transaction"
+    );
+    let sent: usize = trips.iter().map(RoundTrip::statements).sum();
     println!(
         "a Cloudflare fresh install sends {sent}: {statements} file statements, {files} \
-         ledger rows, {} other calls",
+         ledger rows, {} of the runner's own",
         sent - statements - files
     );
     let limit = impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
     assert!(
-        sent <= limit / 2,
+        sent <= limit,
         "a Cloudflare fresh install sends {sent} statements ({statements} in files, {files} \
-         ledger rows, the rest the runner's own calls), more than half of the {limit} D1 \
-         queries `/_deploy/prepare` may run in its one invocation"
+         ledger rows, the rest the runner's own), more than the {limit} D1 queries \
+         `/_deploy/prepare` may run in its one invocation"
     );
-}
-
-/// A [`Counting`] decorator over `inner`, every counter at zero.
-fn counting(inner: Arc<dyn DatabaseService>) -> Arc<Counting> {
-    Arc::new(Counting {
-        inner,
-        transactions: AtomicUsize::new(0),
-        statements_in_transactions: AtomicUsize::new(0),
-        other_calls: AtomicUsize::new(0),
-    })
 }
 
 /// Assert a fresh install had no failure; the files and statements it sent.

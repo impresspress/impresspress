@@ -28,13 +28,13 @@ pub const DEPLOY_TOKEN_KEY: &str = "IMPRESSPRESS_DEPLOY_TOKEN";
 /// D1's own limits page still lists 50 for Free
 /// (<https://developers.cloudflare.com/d1/platform/limits/>), but a Free-plan
 /// Worker runs a fresh database's `/_deploy/prepare` in one invocation, and
-/// its migrations alone send 454 statements (on 2026-10-27: 336 in the files,
-/// 63 ledger rows, 55 of the runner's own calls), so 50 is not what D1
-/// enforces there. The adapter admits every statement of a batch against the
-/// budget, though D1 counts a batch as one call; `every_block_applies_fresh_atomically`
-/// (`tests/migration_history.rs`) counts what a fresh install sends and keeps
-/// it within half of the default, leaving the rest for the funnel's seeds
-/// and reads.
+/// its migrations alone send 534 statements (on 2026-11-01: 362 in the files,
+/// 69 ledger rows, 103 of the runner's own), so 50 is not what D1 enforces
+/// there. The adapter admits every statement of a batch against the budget,
+/// though D1 counts a batch as one call; `a_cloudflare_fresh_install_fits_the_d1_budget`
+/// (`tests/migration_history.rs`) counts what a fresh install's migrations
+/// send, and `tests/d1_read_cost.rs` the whole `/_deploy/prepare` (585 on
+/// 2026-11-01), and both keep it within the default.
 /// The default, [`D1_QUERIES_PER_INVOCATION_DEFAULT`], therefore fits every
 /// plan. A lower value is for a Worker whose `limits.subrequests` is set
 /// below 1,000, and it bounds `/_deploy/prepare` too, which applies every

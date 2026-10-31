@@ -62,6 +62,22 @@ invocation that read a row). A value that is not a whole number is logged
 as a warning on every invocation (`metric=d1_rows_log_threshold_invalid`),
 and the default applies.
 
+### Cloudflare budget: counted statement by statement
+
+**What changes.** The fresh-install budget is now counted as D1 receives it:
+every statement, the executor's introspection of each table it touches
+included. The figures in the entries below counted calls, and a call can send
+more than one statement. Counted this way, a fresh Worker database sends 534
+statements for its migrations (362 in the files, 69 ledger rows, 103 of the
+runner's own), and the whole `/_deploy/prepare` 585 with every block a Worker
+can compile — within the default 1000 per invocation, though no longer within
+half of it. The budget test now holds the migrations to the limit
+(`tests/migration_history.rs`), and a new harness holds the whole
+`/_deploy/prepare` to it (`tests/d1_read_cost.rs`).
+
+**What to do.** Nothing. Leave `[cloudflare].d1_queries_per_invocation` at its
+default.
+
 ### Admin: the system roles come from a migration (admin 010)
 
 **What changes.** Admin's new migration `010_default_roles` seeds the two
@@ -104,9 +120,10 @@ because the request path never plans migrations; that version's `Init`
 counts the roles table on every cold isolate again, and seeds the roles
 only into an empty table.
 
-**Cloudflare budget.** A fresh Worker database now sends 487 statements for
-its migrations, two more than the 485 before it (010's statement and its
-ledger row), within half of the default 1000.
+**Cloudflare budget.** A fresh Worker database sent 487 statements for its
+migrations at this release, two more than the 485 before it (010's statement
+and its ledger row; 534 counted per statement since the D1 cost harness,
+above), within half of the default 1000.
 
 ### Legalpages: the default documents come from a migration (legalpages 003)
 
@@ -150,8 +167,8 @@ only into an empty table.
 
 **Cloudflare budget.** A fresh Worker database sent 485 statements for its
 migrations at this release, two more than the 483 before it (003's statement
-and its ledger row; 487 since admin 010, above), within half of the default
-1000.
+and its ledger row; 487 since admin 010 and 534 counted per statement since
+the D1 cost harness, both above), within half of the default 1000.
 
 ### Cloudflare: D1's daily limits and resets are reported as temporary
 
@@ -297,8 +314,9 @@ migrations is not supported.
 
 **Cloudflare budget.** A fresh Worker database sent 483 statements for its
 migrations at this release, two more than the 481 before it (018's statement
-and its ledger row; 485 since legalpages 003 and 487 since admin 010, both
-above), within half of the default 1000.
+and its ledger row; 485 since legalpages 003, 487 since admin 010 and 534
+counted per statement since the D1 cost harness, all above), within half of
+the default 1000.
 
 ### Native: an env file that cannot be loaded stops the boot; `serve --port` works
 
@@ -544,8 +562,9 @@ a Worker that compiles those blocks. Dev never runs on a Worker. The
 fresh-install budget test now counts only the blocks
 `impresspress-cloudflare` can compile, read from its `Cargo.toml`: a fresh
 Worker database sent 480 statements at that release (481 since wafer-run
-1272fd63, 483 since auth 018, 485 since legalpages 003 and 487 since admin
-010, all above), within half of the default 1000.
+1272fd63, 483 since auth 018, 485 since legalpages 003, 487 since admin 010
+and 534 counted per statement since the D1 cost harness, all above), within
+half of the default 1000.
 
 ### Cloudflare: workers-rs 0.8.7
 
@@ -765,7 +784,8 @@ loss, or recreate the database.
 statements for its migrations at this release, 480 since the
 stamped-column migrations, 481 since wafer-run 1272fd63, 483 since auth
 018, 485 since legalpages 003 and 487 since admin 010 (counted by a test
-that keeps it within half of the default budget of 1000). Leave
+that kept it within half of the default budget of 1000), and 534 counted per
+statement since the D1 cost harness (above). Leave
 `[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
 fresh install.
 

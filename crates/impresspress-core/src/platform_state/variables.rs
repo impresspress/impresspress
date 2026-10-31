@@ -1663,13 +1663,13 @@ struct LoadedRow {
 ///
 /// Native and the browser get it inside [`seed_and_load`], which reuses rows it
 /// has already fetched. **Cloudflare never calls `seed_and_load` at all** — its
-/// `CfDeployBootHooks::seed_and_load` runs [`seed_auto_generated`] and the
+/// deploy hook, [`crate::builder::DeployBootHooks::seed_and_load`], runs [`seed_auto_generated`] and the
 /// `block_settings` seed and nothing else — so the hosted target calls this
 /// directly from that same deploy hook, at the cost of the one list this does
 /// for itself.
 ///
 /// It belongs in the DEPLOY hook specifically, not the request-path one:
-/// `CfRequestBootHooks` is documented as physically write-free, and a write
+/// [`crate::builder::RequestBootHooks`] is documented as physically write-free, and a write
 /// from it self-invalidates the fleet's config version and races concurrent
 /// isolates on insert. A repair at `/_deploy/init` time is both sufficient (the
 /// rows are legacy, not newly created) and the only safe slot.
@@ -3955,9 +3955,8 @@ mod boot_tests {
 
     /// The standalone entry point, which is what the HOSTED target calls:
     /// Cloudflare never runs `seed_and_load` (it has no process environment to
-    /// seed from), so `CfDeployBootHooks::seed_and_load` calls this directly.
-    /// That crate is wasm-only and CI does not execute its tests, so this is
-    /// the executed coverage for the function behind that call.
+    /// seed from), so `builder::DeployBootHooks::seed_and_load` calls this
+    /// directly.
     #[tokio::test]
     async fn the_standalone_repair_entry_point_fixes_an_unflagged_row() {
         let db = migrated_db().await;

@@ -139,14 +139,15 @@ tracing-subscriber = { workspace = true }
 impresspress-bundle = { path = "../impresspress-bundle", features = [
     "test-support",
 ] }
-wafer-block-sqlite = { workspace = true }
-wafer-sql-utils = { workspace = true }
 # `block-dev` for the test targets only: `tests/seed_bypass_prefix.rs` asserts
 # that the bundler's service-worker bypass prefix and the dev block's own seed
 # URL root are the same string, and the latter lives behind that feature. Not
 # a regular dependency, so no shipped binary gains the sandbox from it.
+# `test-support` for `test_support::d1_shaped`, the D1-shaped database
+# `tests/login_d1_round_trips.rs` counts a sign-in's round trips through.
 impresspress-core = { path = "../impresspress-core", default-features = false, features = [
     "block-dev",
+    "test-support",
 ] }
 
 [lints]
