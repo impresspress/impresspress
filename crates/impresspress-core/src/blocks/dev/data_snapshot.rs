@@ -145,8 +145,9 @@ pub enum Mode {
     /// **The columns are the table's real identity, not always `id`.** For
     /// most tables they are [`BY_ID`], and this is the same thing an upsert
     /// keyed on the primary key has always done. For the handful whose rows
-    /// the DESTINATION mints for itself — `roles` and `permissions` come from
-    /// admin's own migration, `variables` from its boot seeder — the id is
+    /// the DESTINATION mints for itself — the system `roles` come from
+    /// admin's migration `010_default_roles`, `permissions` from its own
+    /// admin, `variables` from its boot seeder — the id is
     /// per-install and the identity is a natural key the schema marks
     /// `UNIQUE` (`roles.name`, `permissions.name`, `variables.key`). Keyed on
     /// `id` those rows do not conflict on the id at all: they are INSERTs
@@ -254,9 +255,10 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     // wholesale — most admin variables are ordinary site config (`APP_NAME`,
     // feature flags), exactly what a re-hosted copy needs to keep working.
     // These three are keyed on their NATURAL key, not on `id`: the
-    // destination seeds its own `roles`/`permissions` rows from admin's
-    // migration and its own `variables` rows from the boot seeder, each with
-    // a freshly minted id, and each table marks the natural key `UNIQUE`. An
+    // destination seeds its own system `roles` from admin's migration 010,
+    // may hold `permissions` its own admin defined, and seeds its own
+    // `variables` rows from the boot seeder, each with an id of its own, and
+    // each table marks the natural key `UNIQUE`. An
     // upsert keyed on `id` inserts a second `admin` role / a second
     // `APP_NAME` variable and dies on that index. See [`Mode::Upsert`].
     (ROLES_TABLE, Mode::Upsert(&["name"])),

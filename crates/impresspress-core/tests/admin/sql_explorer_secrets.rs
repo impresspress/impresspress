@@ -406,18 +406,9 @@ async fn postgres_unicode_escaped_identifiers_are_refused() {
 
 #[tokio::test]
 async fn ordinary_tables_are_still_queryable() {
+    // A fresh install's roles table holds the two system roles admin's
+    // migration 010 seeds.
     let ctx = explorer_ctx().await;
-    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-    data.insert("id".into(), json!("role-1"));
-    data.insert("name".into(), json!("admin"));
-    data.insert("description".into(), json!(""));
-    data.insert("permissions".into(), json!("[]"));
-    data.insert("is_system".into(), json!(1));
-    data.insert("created_at".into(), json!("2026-01-01T00:00:00Z"));
-    data.insert("updated_at".into(), json!("2026-01-01T00:00:00Z"));
-    db::create(&ctx.fixture(), "impresspress__admin__roles", data)
-        .await
-        .expect("stage a roles row");
 
     let (status, body) = run_json(&ctx, "SELECT name FROM impresspress__admin__roles").await;
     assert_eq!(status, 200, "body: {body}");

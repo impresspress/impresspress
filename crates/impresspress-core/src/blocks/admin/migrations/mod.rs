@@ -249,6 +249,46 @@ const SQL_009_SQLITE: &str = include_str!("009_block_settings_clear_blessed_hash
 #[cfg(feature = "postgres")]
 const SQL_009_POSTGRES: &str = include_str!("009_block_settings_clear_blessed_hash.postgres.sql");
 
+// 010 seeds the two system roles, `admin` and `user`.
+//
+// Until this file, admin's `Init` seeded them: `iam::seed_defaults` counted
+// the roles table and created both when the count was 0. Cloudflare runs
+// every block's `Init` on every cold isolate, so that was one `COUNT(*)` per
+// cold isolate for the life of the deployment, and it failed open: the count
+// was read through `unwrap_or(0)`, so a count that failed read as an empty
+// table and the seed went on to write. The ledger runs this file once per
+// database instead, and `Init` reads nothing from the table.
+//
+// The guard is the WHOLE table, in one statement, as the `Init` seed's count
+// was: a database holding any role, system or not, gets nothing. A guard per
+// name (`ON CONFLICT (name) DO NOTHING` against
+// `impresspress__admin__roles_name_uniq`) would differ from it in exactly one
+// case, a table with roles but without `admin` or `user`, and there it would
+// insert where the seed did not. No route reaches that state (the two are
+// `is_system`, and role CRUD refuses to delete or rename a system role), so
+// the whole-table guard is the pure move. Under it, one statement against an
+// empty table, the unique index has nothing to conflict with.
+//
+// The rows are the ones the seed wrote: the same descriptions, `permissions`
+// `[]` (the seed's JSON array as the executor stores it), `is_system` 1. The
+// ids are fixed (`seed-admin`, `seed-user`); the executor validates no id
+// format, and nothing addresses a system role by id except role CRUD, which
+// takes it from a listing. Both timestamps are one stamp in the executor's
+// `+00:00` form, whole seconds, as legalpages' `003_default_documents` stamps
+// its rows.
+//
+// Who reads the rows: the IAM page's role catalog, role CRUD, and the dev
+// snapshot import, which upserts roles by `name`. Sign-in roles come from
+// `user_roles`, so no request path depends on them. Admin's list runs before
+// every other block's on every target, so the roles exist before auth
+// bootstraps the first admin.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_010_SQLITE: &str = include_str!("010_default_roles.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_010_POSTGRES: &str = include_str!("010_default_roles.postgres.sql");
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 /// Order here is the apply order.
@@ -262,6 +302,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     (REQUEST_LOGS_HTTP_METHOD, SQL_007_SQLITE),
     (REQUEST_LOGS_BLOCK, SQL_008_SQLITE),
     (BLOCK_SETTINGS_CLEAR_BLESSED_HASH, SQL_009_SQLITE),
+    (DEFAULT_ROLES, SQL_010_SQLITE),
 ];
 
 /// Basename of the request-log method rewrite, named once so the migration
@@ -275,6 +316,10 @@ pub(crate) const REQUEST_LOGS_BLOCK: &str = "008_request_logs_block";
 /// Basename of the `blessed_hash` retirement, named once so the migration list and
 /// the tests that slice it — here and in other crates — cannot drift apart.
 pub const BLOCK_SETTINGS_CLEAR_BLESSED_HASH: &str = "009_block_settings_clear_blessed_hash";
+
+/// Basename of the migration that seeds the two system roles, named once so
+/// the migration list and the tests that drive it cannot drift apart.
+pub(crate) const DEFAULT_ROLES: &str = "010_default_roles";
 
 /// Basename of the `variables.block` column + backfill, named once so the
 /// migration list and the test that slices it cannot drift apart.
@@ -304,6 +349,7 @@ pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     (REQUEST_LOGS_HTTP_METHOD, SQL_007_POSTGRES),
     (REQUEST_LOGS_BLOCK, SQL_008_POSTGRES),
     (BLOCK_SETTINGS_CLEAR_BLESSED_HASH, SQL_009_POSTGRES),
+    (DEFAULT_ROLES, SQL_010_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

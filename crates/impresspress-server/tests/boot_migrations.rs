@@ -889,7 +889,8 @@ async fn has_blessed_hash(database: &Database) -> bool {
 
 /// Admin on 2026-10-07's list and auth on its newest list before 016, both
 /// recorded by the old runner: the boot runs admin's 009 and auth's 016 (and
-/// the auth files added after 016), and every other block installs fresh.
+/// the files each block added after them), and every other block installs
+/// fresh.
 async fn a_database_from_main_runs_only_what_it_lacks(
     database: &Database,
     storage_root: &str,
@@ -909,11 +910,15 @@ async fn a_database_from_main_runs_only_what_it_lacks(
         .shutdown()
         .await;
 
-    let admin_files = admin_m.for_backend(backend).0.len();
     assert_eq!(
         ledger_from(database, admin_m.block).await,
-        adopted_then_ran(admin_m, backend, admin_files - 1, admin_hash),
-        "admin adopted 001-008 and ran 009"
+        adopted_then_ran(
+            admin_m,
+            backend,
+            applied_by_entry(admin_m, backend, &admin_hash[..8]),
+            admin_hash
+        ),
+        "admin adopted 001-008 and ran 009 and every later file"
     );
     assert_eq!(
         ledger_from(database, auth_m.block).await,
@@ -930,8 +935,9 @@ async fn a_database_from_main_runs_only_what_it_lacks(
 
 /// Admin on the list with 009's first text, which added and emptied
 /// `blessed_hash`, and auth on the list with 016's first text: auth adopts
-/// every file through 016 and runs the later ones, and admin adopts 001-008 and runs today's 009, which drops the
-/// column — the history marks the first 009 as not applied.
+/// every file through 016 and runs the later ones, and admin adopts 001-008
+/// and runs today's 009, which drops the column — the history marks the
+/// first 009 as not applied — and the files after it.
 async fn a_database_that_ran_the_first_016_and_009_runs_009_and_the_newer_files(
     database: &Database,
     storage_root: &str,
@@ -955,10 +961,14 @@ async fn a_database_that_ran_the_first_016_and_009_runs_009_and_the_newer_files(
         .shutdown()
         .await;
 
-    let admin_files = admin_m.for_backend(backend).0.len();
     assert_eq!(
         ledger_from(database, admin_m.block).await,
-        adopted_then_ran(admin_m, backend, admin_files - 1, admin_hash)
+        adopted_then_ran(
+            admin_m,
+            backend,
+            applied_by_entry(admin_m, backend, &admin_hash[..8]),
+            admin_hash
+        )
     );
     assert_eq!(
         ledger_from(database, auth_m.block).await,
@@ -1057,10 +1067,14 @@ async fn both_populations_of_admins_record_lose_blessed_hash(
         enabled == &serde_json::json!(0) || enabled == &serde_json::json!(false),
         "the row stays disabled: {enabled}"
     );
-    let admin_files = admin_m.for_backend(backend).0.len();
     assert_eq!(
         ledger_from(database, admin_m.block).await,
-        adopted_then_ran(admin_m, backend, admin_files - 1, admin_hash)
+        adopted_then_ran(
+            admin_m,
+            backend,
+            applied_by_entry(admin_m, backend, &admin_hash[..8]),
+            admin_hash
+        )
     );
 }
 

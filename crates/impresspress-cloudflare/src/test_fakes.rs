@@ -353,6 +353,24 @@ pub(crate) fn admin_009_transaction_len() -> usize {
     executable_statements(sql).len() + 1
 }
 
+/// How many statements each admin file after 009 sends, in list order: the
+/// transactions the runner sends between 009's and its stamp of the list.
+pub(crate) fn admin_transaction_lens_after_009() -> Vec<usize> {
+    use impresspress_core::{
+        blocks::admin::migrations::{BLOCK_SETTINGS_CLEAR_BLESSED_HASH, MIGRATIONS},
+        migration_helper::executable_statements,
+    };
+    let at = MIGRATIONS
+        .sqlite
+        .iter()
+        .position(|(name, _)| *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH)
+        .expect("009 is wired into admin's SQLite list");
+    MIGRATIONS.sqlite[at + 1..]
+        .iter()
+        .map(|(_, sql)| executable_statements(sql).len() + 1)
+        .collect()
+}
+
 /// A D1 stand-in for a database an earlier deploy migrated: it holds
 /// `block_settings` rows in memory, answers reads of that table with them
 /// (honouring equality filters and a limit) and applies typed writes to them.

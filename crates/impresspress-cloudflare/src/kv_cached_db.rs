@@ -1290,8 +1290,8 @@ mod tests {
 /// reads after admin's `Init` rewrite it from D1 (`boot_hooks`'s
 /// `the_deploy_funnel_leaves_the_all_rows_key_holding_d1_s_rows` holds the
 /// value that results). This module holds the first: the stamp follows the
-/// file's transaction (its ledger row inside it), and its write drops the
-/// key.
+/// last file's transaction (each file's ledger row inside its own), and its
+/// write drops the key.
 #[cfg(test)]
 mod admin_migration_009_tests {
     use std::{collections::HashMap, rc::Rc, sync::Arc};
@@ -1301,8 +1301,8 @@ mod admin_migration_009_tests {
 
     use super::{CacheMode, KvCachedD1DatabaseService};
     use crate::test_fakes::{
-        admin_009_transaction_len, admin_record_before_009, deploy_admin_runtime, settings_row,
-        BlockSettingsD1, Log, MemoryKv,
+        admin_009_transaction_len, admin_record_before_009, admin_transaction_lens_after_009,
+        deploy_admin_runtime, settings_row, BlockSettingsD1, Log, MemoryKv,
     };
 
     /// The KV key holding every `block_settings` row: what an older version's
@@ -1310,18 +1310,20 @@ mod admin_migration_009_tests {
     /// rather than derived, because the old version reads this exact key.
     const ALL_ROWS_KEY: &str = "cfg:v1:block_settings:__all__";
 
-    /// **Admin's `Init`, applying 009, stamps admin's list right after 009's
-    /// transaction reached D1, and that stamp drops the all-rows key.** The
+    /// **Admin's `Init`, applying 009, stamps admin's list right after the
+    /// list's last transaction reached D1 (009's, then each later file's),
+    /// and that stamp drops the all-rows key.** The
     /// wiring is the deploy funnel's (`/_deploy/prepare` and
     /// `/_deploy/init`): the KV row cache in front of D1, reading through,
     /// with the per-write config stamp off, and `IMPRESSPRESS_RUN_MIGRATIONS`
     /// set. Admin's row records main's 2026-10-07 list from before the
     /// ledger, so the runner adopts 001-008 from the history table and runs
-    /// 009, as on every deployment last migrated between 2026-10-07 and the
-    /// ledger release.
+    /// 009 and the files after it, as on every deployment last migrated
+    /// between 2026-10-07 and the ledger release.
     ///
     /// Fails if `apply_pending` stamps the list before running it, if anything
-    /// reaches D1 between 009's transaction and the stamp, or if the stamp
+    /// but the later files' transactions reaches D1 between 009's transaction
+    /// and the stamp, or if the stamp
     /// stops being a typed write the row cache invalidates on.
     #[wasm_bindgen_test]
     async fn applying_admins_list_drops_the_all_rows_key_after_009() {
@@ -1355,23 +1357,35 @@ mod admin_migration_009_tests {
             .iter()
             .position(|entry| *entry == file)
             .unwrap_or_else(|| panic!("009's transaction reached D1: {log:#?}"));
+        // The files after 009 run next, each its own transaction, in list
+        // order.
+        let later: Vec<String> = admin_transaction_lens_after_009()
+            .into_iter()
+            .map(|len| format!("d1 tx {len} statements"))
+            .collect();
+        let ran = &log[applied_at + 1..];
+        assert_eq!(
+            ran.get(..later.len()),
+            Some(&later[..]),
+            "the files after 009 run right after it: {log:#?}"
+        );
         // Admin's `Init` goes on to seed, and a seed that stamps its hash
         // writes `block_settings` too — on a deployment whose seed is
         // unchanged it does not. So the claim is about the writes that come
         // first: the next thing to reach D1 is the stamp of the list, and the
         // all-rows key leaves KV before anything else reaches D1.
-        let after = &log[applied_at + 1..];
+        let after = &ran[later.len()..];
         let d1_at = |from: usize| {
             after[from..]
                 .iter()
                 .position(|entry| entry.starts_with("d1 "))
                 .map(|at| from + at)
         };
-        let record_at = d1_at(0).unwrap_or_else(|| panic!("a stamp follows 009: {log:#?}"));
+        let record_at = d1_at(0).unwrap_or_else(|| panic!("a stamp follows the list: {log:#?}"));
         assert_eq!(
             after[record_at],
             format!("d1 update {}/bs_admin", block_settings::TABLE),
-            "the write after 009's transaction stamps admin's list: {log:#?}"
+            "the write after the list's last transaction stamps admin's list: {log:#?}"
         );
         let next_d1 = d1_at(record_at + 1).unwrap_or(after.len());
         assert!(
