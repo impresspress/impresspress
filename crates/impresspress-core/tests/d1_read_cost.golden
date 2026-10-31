@@ -23,11 +23,13 @@
 #   READ        a read whose plan could not be taken (its table is gone by the end
 #               of the phase); provisioning only.
 # rows≈ is a model, not D1's own rows_read: a SCAN reads every row of its table,
-# or only the rows it returns when a LIMIT stops it with nothing to filter or
-# sort first; a COUNT every row it counts (the whole table unless an index
-# narrows it); a SEARCH the rows it matches; pragma_table_info the rows it
-# returns; EXISTS the schema rows up to the table it looks for (all of them when
-# it is absent); ID-PROBE those plus the table's columns. A WRITE reads none.
+# unless a LIMIT stops it — only when the plan is that one scan alone and the
+# statement has no WHERE, JOIN, GROUP BY, DISTINCT or aggregate — and then the
+# rows it skips (OFFSET) and returns, at most the table. A COUNT reads every row
+# it counts (the whole table unless an index narrows it); a SEARCH the rows it
+# matches; pragma_table_info the rows it returns; EXISTS the schema rows up to
+# the table it looks for (all of them when it is absent); ID-PROBE those plus the
+# table's columns. A WRITE reads none.
 # Counted against the database as it stands at the end of each phase
 # (provisioning: before the seed).
 #

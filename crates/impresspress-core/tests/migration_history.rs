@@ -204,14 +204,16 @@ fn every_registered_block_names_its_feature() {
 /// `tests/d1_read_cost.rs`'s provision phase, which asserts the same limit
 /// over all of it.
 ///
-/// **The line is interim.** It used to be half the limit, counted per call,
-/// and the ledger plan's decision U-IP5-2 was that crossing it schedules
-/// batch accounting rather than a higher line. Counted per statement, the
-/// install had already crossed it (534 > 500), so batch accounting is the
-/// next producer-first change (PR267-review M1): wafer-run counts a
-/// `db.batch()` as the one call D1 counts, then the adapter's guard — and
-/// this test, `config_vars.rs`'s budget doc and the harness's — re-derive in
-/// calls (172 for the migrations and 214 for the whole prepare, as measured today).
+/// **The line is interim.** It used to be half the limit, under an older
+/// count (each migration statement, plus one per other database call, without
+/// the introspection those calls send), and the ledger plan's decision U-IP5-2
+/// was that crossing it schedules batch accounting rather than a higher line.
+/// Counted in adapter statements, the install had already crossed it
+/// (534 > 500), so batch accounting is the next producer-first change
+/// (PR267-review M1): wafer-run counts a `db.batch()` as the one call D1
+/// counts, then the adapter's guard — and this test, `config_vars.rs`'s budget
+/// doc and the harness's — re-derive in D1 calls (172 for the migrations and
+/// 214 for the whole prepare, as measured today).
 /// Until then the line is the adapter's own refusal point, the limit itself.
 ///
 /// It counts what a Cloudflare build migrates ([`cloudflare_blocks`]): a

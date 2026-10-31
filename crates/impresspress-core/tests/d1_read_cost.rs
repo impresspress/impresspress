@@ -18,7 +18,9 @@
 //!    the plan is exported. Recorded once (the `mixed` run's).
 //! 2. **seed** — fixture rows, uncounted: legal documents, users, variables,
 //!    grants, an admin session. `shared` deletes every block-scoped variables
-//!    row, the auto-generated secrets included (see the golden's header).
+//!    row — products' auto-generated webhook secret and the three auth
+//!    defaults admin's settings seed stores under their blocks — and forwards
+//!    them as request config (see the golden's header).
 //! 3. **database build** — `boot_request_runtime(RequestBuild::Database)`,
 //!    with the build's own pre-`build()` `block_settings` read.
 //! 4. **prepared build** — `boot_request_runtime(RequestBuild::Prepared)`,
@@ -493,9 +495,11 @@ async fn seed(path: &Path, variant: Variant) -> (String, HashMap<String, String>
             }
         }
         Variant::Shared => {
-            // Every block-scoped row goes, the auto-generated secrets
-            // included; the site forwards those instead (a block's required
-            // secret must come from somewhere, or its Init fails).
+            // Every block-scoped row goes: products' auto-generated webhook
+            // secret and the three auth defaults admin's settings seed stores
+            // under their blocks. The site forwards all four as request
+            // config instead (products requires its secret, or its Init
+            // fails).
             for scoped in existing.iter().filter(|r| r.block.is_some()) {
                 db.delete(variables::TABLE, &scoped.id)
                     .await
@@ -661,6 +665,10 @@ struct Classified {
     sql: String,
 }
 
+/// A query plan: its `(SCAN|SEARCH, table)` rows, and every line as SQLite
+/// gives it.
+type Plan = (Vec<(String, String)>, Vec<String>);
+
 /// Classifies statements against the database file through a second,
 /// read-only connection, as it stands at the end of the phase.
 struct Classifier {
@@ -748,9 +756,8 @@ impl Classifier {
     }
 
     /// The `SCAN`/`SEARCH` rows of `sql`'s query plan, as `(verb, table)`,
-    /// and whether the plan sorts through a temporary B-tree (so a `LIMIT`
-    /// cannot stop the scan early).
-    fn plan(&self, sent: &Sent) -> Option<(Vec<(String, String)>, bool)> {
+    /// and every line of the plan as SQLite gives it.
+    fn plan(&self, sent: &Sent) -> Option<Plan> {
         let mut stmt = self
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", sent.sql))
@@ -763,7 +770,6 @@ impl Classifier {
             .ok()?
             .collect::<Result<_, _>>()
             .ok()?;
-        let sorts = details.iter().any(|d| d.contains("TEMP B-TREE"));
         Some((
             details
                 .iter()
@@ -775,7 +781,7 @@ impl Classifier {
                         .then(|| (verb.to_string(), unquote(table)))
                 })
                 .collect(),
-            sorts,
+            details,
         ))
     }
 
@@ -835,7 +841,7 @@ impl Classifier {
                 .unwrap_or_else(|| "?".to_string());
             return verbatim(table, Class::Write, 0);
         }
-        let Some((plan, sorts)) = self.plan(sent) else {
+        let Some((plan, details)) = self.plan(sent) else {
             let table = table_after(sql, &["FROM"]).unwrap_or_else(|| "?".to_string());
             return verbatim(table, Class::Read, 0);
         };
@@ -855,14 +861,15 @@ impl Classifier {
             return verbatim(table, Class::Count, rows);
         }
         if verb == "SCAN" {
-            // A scan reads the whole table, unless a `LIMIT` with nothing to
-            // filter or sort ahead of it stops it after the rows it returns.
-            let stops_early = upper.contains(" LIMIT ") && !upper.contains(" WHERE ") && !sorts;
-            let rows = if stops_early {
-                self.scalar(&format!("SELECT COUNT(*) FROM ({sql})"), &sent.params)
-                    .unwrap_or(0)
+            let all = self.table_rows(&table);
+            let rows = if limit_stops_scan(&upper, &details) {
+                // It steps over the rows it skips, then the rows it returns.
+                let returned = self
+                    .scalar(&format!("SELECT COUNT(*) FROM ({sql})"), &sent.params)
+                    .unwrap_or(0);
+                all.min(returned + offset(sql, &sent.params))
             } else {
-                self.table_rows(&table)
+                all
             };
             verbatim(table, Class::Scan, rows)
         } else {
@@ -872,6 +879,55 @@ impl Classifier {
             verbatim(table, Class::Search, rows)
         }
     }
+}
+
+/// Whether a `LIMIT` stops a scan early: only when the plan is that one scan
+/// and nothing else (no temporary B-tree to sort through, no second table)
+/// and the statement has nothing to do before it can return a row — no
+/// `WHERE`, `JOIN`, `GROUP BY`, `DISTINCT` or aggregate. Otherwise the scan
+/// reads the whole table whatever the `LIMIT` says.
+fn limit_stops_scan(upper: &str, plan: &[String]) -> bool {
+    const AGGREGATES: [&str; 7] = [
+        "COUNT(",
+        "SUM(",
+        "TOTAL(",
+        "AVG(",
+        "MIN(",
+        "MAX(",
+        "GROUP_CONCAT(",
+    ];
+    upper.contains(" LIMIT ")
+        && plan.len() == 1
+        && plan[0].starts_with("SCAN ")
+        && ![" WHERE ", " JOIN ", " GROUP BY ", "DISTINCT"]
+            .iter()
+            .any(|clause| upper.contains(clause))
+        && !AGGREGATES.iter().any(|aggregate| upper.contains(aggregate))
+}
+
+/// The rows `sql`'s `OFFSET` skips: a literal, or the parameter it binds
+/// (`?N`, or the plain `?` at its position).
+fn offset(sql: &str, params: &[Value]) -> u64 {
+    let upper = sql.to_ascii_uppercase();
+    let Some(at) = upper.find(" OFFSET ") else {
+        return 0;
+    };
+    let token = sql[at + " OFFSET ".len()..]
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
+    let value = if let Some(n) = token.strip_prefix('?') {
+        let index = if n.is_empty() {
+            sql[..at].matches('?').count()
+        } else {
+            n.parse::<usize>()
+                .map_or(usize::MAX, |n| n.saturating_sub(1))
+        };
+        params.get(index).and_then(Value::as_u64)
+    } else {
+        token.parse::<u64>().ok()
+    };
+    value.unwrap_or(0)
 }
 
 /// One phase's recorded statements, classified.
@@ -1264,11 +1320,13 @@ const HEADER: &str = "\
 #   READ        a read whose plan could not be taken (its table is gone by the end
 #               of the phase); provisioning only.
 # rows≈ is a model, not D1's own rows_read: a SCAN reads every row of its table,
-# or only the rows it returns when a LIMIT stops it with nothing to filter or
-# sort first; a COUNT every row it counts (the whole table unless an index
-# narrows it); a SEARCH the rows it matches; pragma_table_info the rows it
-# returns; EXISTS the schema rows up to the table it looks for (all of them when
-# it is absent); ID-PROBE those plus the table's columns. A WRITE reads none.
+# unless a LIMIT stops it — only when the plan is that one scan alone and the
+# statement has no WHERE, JOIN, GROUP BY, DISTINCT or aggregate — and then the
+# rows it skips (OFFSET) and returns, at most the table. A COUNT reads every row
+# it counts (the whole table unless an index narrows it); a SEARCH the rows it
+# matches; pragma_table_info the rows it returns; EXISTS the schema rows up to
+# the table it looks for (all of them when it is absent); ID-PROBE those plus the
+# table's columns. A WRITE reads none.
 # Counted against the database as it stands at the end of each phase
 # (provisioning: before the seed).
 #
@@ -1491,5 +1549,83 @@ fn the_harness_compiles_exactly_what_a_worker_can() {
     assert_eq!(
         compiled, expected,
         "this run must compile exactly what a Worker with every block it can compile has"
+    );
+}
+
+/// A classifier over a fresh file with `x` (500 rows, a text primary key, as
+/// every platform table has) and `y` (500 rows pointing at `x`).
+fn model_fixture() -> (tempfile::TempDir, Classifier) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("model.sqlite3");
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.execute_batch(
+        "CREATE TABLE x (id TEXT PRIMARY KEY, a INTEGER);
+         CREATE TABLE y (id TEXT PRIMARY KEY, xid TEXT);
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500)
+         INSERT INTO x SELECT printf('x%04d', i), i FROM n;
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 500)
+         INSERT INTO y SELECT printf('y%04d', i), printf('x%04d', i) FROM n;",
+    )
+    .expect("fixture");
+    drop(conn);
+    let classifier = Classifier::open(&path);
+    (dir, classifier)
+}
+
+fn modelled(classifier: &Classifier, sql: &str, params: Vec<Value>) -> (Class, String, u64) {
+    let c = classifier.classify(&Sent {
+        sql: sql.to_string(),
+        params,
+    });
+    (c.class, c.table, c.rows)
+}
+
+/// **The rows model counts a `LIMIT` only where it stops the scan**: a page
+/// at an offset steps over the rows it skips, and an aggregate, a join or a
+/// filter reads the whole table whatever the `LIMIT` says.
+#[test]
+fn a_limit_shortens_a_scan_only_where_it_stops_it() {
+    let (_dir, c) = model_fixture();
+    // The executor's paged list: ordered by the primary key, one scan.
+    assert_eq!(
+        modelled(
+            &c,
+            "SELECT * FROM \"x\" ORDER BY \"id\" ASC LIMIT ?",
+            vec![json!(10)]
+        ),
+        (Class::Scan, "x".to_string(), 10),
+        "a LIMIT with nothing before it stops the scan"
+    );
+    assert_eq!(
+        modelled(
+            &c,
+            "SELECT * FROM \"x\" ORDER BY \"id\" ASC LIMIT ? OFFSET ?",
+            vec![json!(10), json!(400)]
+        ),
+        (Class::Scan, "x".to_string(), 410),
+        "a page at OFFSET 400 steps over the 400 rows it skips"
+    );
+    assert_eq!(
+        modelled(&c, "SELECT SUM(\"a\") FROM \"x\" LIMIT 1", vec![]),
+        (Class::Scan, "x".to_string(), 500),
+        "an aggregate reads every row before its one result"
+    );
+    assert_eq!(
+        modelled(
+            &c,
+            "SELECT * FROM \"y\" JOIN \"x\" ON \"x\".\"id\" = \"y\".\"xid\" LIMIT 1",
+            vec![]
+        ),
+        (Class::Scan, "y".to_string(), 500),
+        "a join filtered only by its ON reads the scanned table whole"
+    );
+    assert_eq!(
+        modelled(
+            &c,
+            "SELECT * FROM \"x\" WHERE \"a\" > ? LIMIT 1",
+            vec![json!(499)]
+        ),
+        (Class::Scan, "x".to_string(), 500),
+        "a filter may read the whole table to find its row"
     );
 }
