@@ -15,6 +15,10 @@
 //! - **a database that already has documents** (the defaults the `Init` seed
 //!   published, and an admin's draft beside them) keeps exactly the rows it
 //!   had: nothing is inserted, so nothing is duplicated.
+//! - **a table with no published document** (only an archived version, or
+//!   only a draft) gets nothing either: the guard is any row, in any
+//!   status. A guard on published rows alone would insert the defaults, and
+//!   over an archived `terms` v1 fail on 002's unique version index.
 //! - **a type an admin deleted** stays deleted: the guard is the whole
 //!   table, not one per type.
 //! - **an empty table** is seeded by the upgrade that runs 003, as the next
@@ -229,6 +233,19 @@ pub async fn check(backend: Backend, new_db: NewDatabase<'_>) -> Vec<String> {
     if let Err(e) = existing_documents_are_kept_as_they_are(backend, new_db, &mut problems).await {
         problems.push(format!("existing documents: {e}"));
     }
+    for (status, version) in [("archived", 1), ("draft", 0)] {
+        if let Err(e) = a_table_with_no_published_document_is_kept(
+            backend,
+            new_db,
+            status,
+            version,
+            &mut problems,
+        )
+        .await
+        {
+            problems.push(format!("only {status}: {e}"));
+        }
+    }
     if let Err(e) = a_deleted_type_stays_deleted(backend, new_db, &mut problems).await {
         problems.push(format!("deleted type: {e}"));
     }
@@ -330,6 +347,38 @@ async fn existing_documents_are_kept_as_they_are(
         .any(|r| r.file_name == DEFAULT_DOCUMENTS && r.origin == Origin::Ran)
     {
         problems.push("existing documents: 003 is not recorded as ran".to_string());
+    }
+    Ok(())
+}
+
+async fn a_table_with_no_published_document_is_kept(
+    backend: Backend,
+    new_db: NewDatabase<'_>,
+    status: &str,
+    version: i64,
+    problems: &mut Vec<String>,
+) -> Result<(), String> {
+    let db = new_db().await;
+    before_003(&db, backend).await?;
+    // The live terms deleted, leaving only one of its other rows.
+    let (_, doc_type, title, content) = DEFAULTS[1];
+    write_document(&db, doc_type, title, content, status, version).await?;
+    let before = rows(&db).await?;
+
+    upgrade(&db, backend).await?;
+
+    let after = rows(&db).await?;
+    if after != before {
+        problems.push(format!(
+            "only {status}: the upgrade changed the documents from {before:?} to {after:?}"
+        ));
+    }
+    if !history::ledger(&db, MIGRATIONS.block)
+        .await?
+        .iter()
+        .any(|r| r.file_name == DEFAULT_DOCUMENTS && r.origin == Origin::Ran)
+    {
+        problems.push(format!("only {status}: 003 is not recorded as ran"));
     }
     Ok(())
 }

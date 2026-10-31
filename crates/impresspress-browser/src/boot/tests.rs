@@ -732,7 +732,9 @@ mod legalpages_default_documents {
     /// **A fresh browser install publishes the two default documents, once.**
     /// Both are `published` version 1 by `system`, stamped in the executor's
     /// `+00:00` form; a second pass runs nothing, and once every document is
-    /// deleted a further pass seeds nothing.
+    /// deleted a further pass seeds nothing. Both later passes return at the
+    /// `current_hash` fast path; the ledger re-plan is covered by
+    /// `impresspress-core`'s proof on SQLite and PostgreSQL.
     #[wasm_bindgen_test]
     async fn a_fresh_install_publishes_the_defaults_once() {
         let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);

@@ -20,8 +20,10 @@
 -- `DocumentType::title()` and the same text. The ids are fixed, which the
 -- executor allows (it validates no id format; products' 002 uses `default`).
 -- The three timestamps take the form the executor writes, `…+00:00`, without
--- fractional seconds: 002 and `find_latest_draft` compare `updated_at` as
--- text, and a `…Z` stamp sorts after every `+00:00` stamp of the same second.
+-- fractional seconds. The admin document list (`repo::documents::list_page`)
+-- sorts these rows with the executor's by `updated_at` as text, and a `…Z`
+-- stamp sorts after every `+00:00` stamp of the same second, so an edit made
+-- in the seed's second would list below it.
 INSERT INTO impresspress__legalpages__documents
     (id, doc_type, title, content, status, version, created_by,
      published_at, created_at, updated_at)
