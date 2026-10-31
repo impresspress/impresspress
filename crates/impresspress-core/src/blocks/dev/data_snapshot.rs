@@ -145,16 +145,21 @@ pub enum Mode {
     /// **The columns are the table's real identity, not always `id`.** For
     /// most tables they are [`BY_ID`], and this is the same thing an upsert
     /// keyed on the primary key has always done. For the handful whose rows
-    /// the DESTINATION mints for itself — `roles` and `permissions` come from
-    /// admin's own migration, `variables` from its boot seeder — the id is
-    /// per-install and the identity is a natural key the schema marks
-    /// `UNIQUE` (`roles.name`, `permissions.name`, `variables.key`). Keyed on
-    /// `id` those rows do not conflict on the id at all: they are INSERTs
-    /// that then violate the unique index on the natural key, and the whole
-    /// import fails on it. Design §10.2's
-    /// promise that a bundle imports into a fresh instance is exactly the
-    /// case where the destination has already seeded its own copies of these
-    /// rows, so this is not a corner.
+    /// each install writes for itself, the identity is a natural key the
+    /// schema marks `UNIQUE` (`roles.name`, `permissions.name`,
+    /// `variables.key`), and the id does not identify a row across installs.
+    /// `variables` rows come from each install's boot seeder and
+    /// `permissions` from its own admin, each under an id the executor
+    /// minted. The system `roles` come from admin's migration
+    /// `010_default_roles` under the fixed ids `seed-admin` and `seed-user`,
+    /// but an install created before 010 holds them under minted ids, as
+    /// every other role is. Keyed on `id`, a row whose natural key the
+    /// destination has under another id does not conflict on the id at all:
+    /// it is an INSERT that then violates the unique index, and the whole
+    /// import fails on it. Keyed on the natural key, the row matches whether
+    /// the ids agree or not. Design §10.2's promise that a bundle imports
+    /// into a fresh instance is exactly the case where the destination has
+    /// already seeded its own copies of these rows, so this is not a corner.
     ///
     /// On a conflict the destination keeps its OWN `id` (and its own value of
     /// the conflict columns, which are equal by definition) and takes every
@@ -254,11 +259,13 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     // wholesale — most admin variables are ordinary site config (`APP_NAME`,
     // feature flags), exactly what a re-hosted copy needs to keep working.
     // These three are keyed on their NATURAL key, not on `id`: the
-    // destination seeds its own `roles`/`permissions` rows from admin's
-    // migration and its own `variables` rows from the boot seeder, each with
-    // a freshly minted id, and each table marks the natural key `UNIQUE`. An
-    // upsert keyed on `id` inserts a second `admin` role / a second
-    // `APP_NAME` variable and dies on that index. See [`Mode::Upsert`].
+    // destination seeds its own system `roles` (admin's migration 010, under
+    // fixed ids, or minted ids on an install from before it) and its own
+    // `variables` (the boot seeder, minted ids), and may hold `permissions`
+    // its own admin defined, and each table marks the natural key `UNIQUE`.
+    // An upsert keyed on `id` inserts a second `admin` role / a second
+    // `APP_NAME` variable wherever the ids differ, and dies on that index.
+    // See [`Mode::Upsert`].
     (ROLES_TABLE, Mode::Upsert(&["name"])),
     (PERMISSIONS_TABLE, Mode::Upsert(&["name"])),
     (variables::TABLE, Mode::Upsert(&["key"])),

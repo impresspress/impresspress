@@ -892,15 +892,16 @@ crate::impresspress_feature_block! {
         }
     },
     lifecycle: |_this, ctx, event| {
+        // Migration 010 seeds the two system roles once per database, so
+        // Init reads nothing from the roles table.
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
             &migrations::MIGRATIONS)
         .await?;
-        // Seed default roles/permissions + shared/default variables after the
-        // schema is in place, only on Init.
+        // Seed shared/default variables after the schema is in place, only
+        // on Init.
         if matches!(event.event_type, wafer_run::LifecycleType::Init) {
-            iam::seed_defaults(ctx).await;
             settings::seed_defaults(ctx).await;
         }
         Ok(())

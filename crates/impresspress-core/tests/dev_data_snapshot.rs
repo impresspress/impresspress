@@ -1329,13 +1329,17 @@ const STAMP: &str = "2026-09-03T00:00:00Z";
 ///
 /// This is the case design §10.2 is entirely about — a bundle importing into
 /// a fresh instance — and "fresh" does not mean empty: by the time the seed
-/// import runs, admin's migration has seeded `roles` and the boot hook has
-/// seeded `variables`, each with an id this instance minted for itself. The
-/// exporting instance minted different ids for the same rows. Both tables
-/// mark their natural key `UNIQUE` (`roles.name`, `variables.key`), so an
-/// upsert keyed on `id` does not conflict on the id at all: it is an INSERT
-/// that then violates that index, and `import` fails wholesale with a bare
-/// "internal database error".
+/// import runs, admin's migration 010 has seeded `roles` (under the fixed ids
+/// `seed-admin` and `seed-user`) and the boot hook has seeded `variables`
+/// (under ids it minted). The exporting instance can hold the same rows under
+/// other ids: every install mints its variables' ids, and one created before
+/// migration 010 minted its roles' ids too. Both tables mark their natural
+/// key `UNIQUE` (`roles.name`, `variables.key`), so an upsert keyed on `id`
+/// does not conflict on the id at all: it is an INSERT that then violates
+/// that index, and `import` fails wholesale with a bare "internal database
+/// error". The case where the ids DO agree, every export from an install
+/// since 010, is
+/// `an_import_of_the_system_roles_under_their_fixed_ids_updates_them_in_place`.
 ///
 /// It is written with two rows per table on purpose — one whose natural key
 /// the destination already has (the collision) and one it does not (a plain
@@ -1345,14 +1349,9 @@ const STAMP: &str = "2026-09-03T00:00:00Z";
 async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
     let ctx = TestContext::with_products().await.fixture();
 
-    // What the DESTINATION seeded for itself, with its own ids.
-    seed_row(
-        &ctx,
-        ADMIN_ROLES_TABLE,
-        "role_minted_here",
-        json!({ "name": "admin", "description": "this instance's own admin role" }),
-    )
-    .await;
+    // What the DESTINATION seeded for itself, with its own ids: admin's
+    // migration 010 seeded its `admin` role as `seed-admin`, and this
+    // variable stands in for the boot seeder's.
     seed_row(
         &ctx,
         variables::TABLE,
@@ -1437,7 +1436,7 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
         .filter(|r| r.data["name"] == json!("admin"))
         .collect();
     assert_eq!(admin_roles.len(), 1, "{roles:?}");
-    assert_eq!(admin_roles[0].id, "role_minted_here");
+    assert_eq!(admin_roles[0].id, "seed-admin");
     assert_eq!(
         admin_roles[0].data["description"],
         json!("the exporting instance's admin role")
@@ -1457,6 +1456,66 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
     assert_eq!(app_name[0].id, "var_minted_here");
     assert_eq!(app_name[0].data["value"], json!("The print shop"));
     assert!(vars.iter().any(|v| v.id == "var_new"), "{vars:?}");
+}
+
+/// An export from an install created since admin's migration 010 carries
+/// the system roles under the same fixed ids the destination's own 010
+/// seeded (`seed-admin`, `seed-user`): id AND name agree. Its import updates
+/// the destination's `admin` row in place, with no primary-key error and no
+/// second row, and leaves the `user` row it does not mention as it was.
+#[tokio::test]
+async fn an_import_of_the_system_roles_under_their_fixed_ids_updates_them_in_place() {
+    let ctx = TestContext::with_products().await.fixture();
+    let before = db::list_all(&ctx, ADMIN_ROLES_TABLE, Vec::new())
+        .await
+        .unwrap();
+    let user_before = before
+        .iter()
+        .find(|r| r.id == "seed-user")
+        .expect("migration 010 seeded the user role")
+        .clone();
+
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(
+        ADMIN_ROLES_TABLE.to_string(),
+        vec![json_map(json!({
+            "id": "seed-admin",
+            "name": "admin",
+            "description": "the exporting instance's admin role",
+            "permissions": "[]",
+            "is_system": 1,
+            "created_at": STAMP,
+            "updated_at": STAMP,
+        }))
+        .into_iter()
+        .collect()],
+    );
+    let snapshot = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables,
+    };
+
+    data_snapshot::import(&as_dev(&ctx), &snapshot)
+        .await
+        .expect("an export from an install since 010 imports into a fresh install");
+
+    let roles = db::list_all(&ctx, ADMIN_ROLES_TABLE, Vec::new())
+        .await
+        .unwrap();
+    let mut ids: Vec<_> = roles.iter().map(|r| r.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, ["seed-admin", "seed-user"], "{roles:?}");
+    let admin = roles.iter().find(|r| r.id == "seed-admin").unwrap();
+    assert_eq!(admin.data["name"], json!("admin"));
+    assert_eq!(
+        admin.data["description"],
+        json!("the exporting instance's admin role")
+    );
+    let user = roles.iter().find(|r| r.id == "seed-user").unwrap();
+    assert_eq!(
+        user.data, user_before.data,
+        "the unmentioned role is untouched"
+    );
 }
 
 /// Re-importing the SAME snapshot converges rather than duplicating — the
@@ -1489,10 +1548,20 @@ async fn re_importing_one_snapshot_converges_on_the_natural_key() {
         .await
         .unwrap();
 
+    // One `admin` role, the one migration 010 seeded, beside its `user`.
     let roles = db::list_all(&ctx, ADMIN_ROLES_TABLE, Vec::new())
         .await
         .unwrap();
-    assert_eq!(roles.len(), 1, "{roles:?}");
+    let mut names: Vec<_> = roles
+        .iter()
+        .map(|r| (r.id.as_str(), r.data["name"].as_str().unwrap_or_default()))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [("seed-admin", "admin"), ("seed-user", "user")],
+        "{roles:?}"
+    );
 }
 
 /// Every `Upsert` table's declared conflict columns must be columns the table

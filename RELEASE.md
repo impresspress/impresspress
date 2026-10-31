@@ -19,6 +19,52 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Admin: the system roles come from a migration (admin 010)
+
+**What changes.** Admin's new migration `010_default_roles` seeds the two
+system roles, `admin` and `user`, which admin's `Init` seeded until now.
+`Init` decided by counting the roles table on every boot, and Cloudflare
+runs every block's `Init` on every cold isolate, so each cold isolate sent
+one `COUNT(*)` over the table: on one deployment about 10,500 calls a day.
+The count was also read as 0 when it failed, so a failed read went on to
+write. `Init` now reads nothing from the table, on every target.
+
+**What 010 writes,** into an empty table only: `admin` ("Full access to all
+resources") and `user` ("Standard user access"), both system roles with no
+permissions, under the ids `seed-admin` and `seed-user`. A table holding any
+role, system or not, gets nothing, so a database that already has the roles
+gets no second set (as before: the guard is the whole table, as `Init`'s
+count was).
+
+**Behaviour change: an emptied roles table stays empty.** Until now,
+emptying the table made the next boot (on Cloudflare, the next cold isolate)
+seed both roles again. Once 010 has run, nothing does. The system roles
+cannot be deleted from the IAM page, so only a delete through the SQL
+explorer reaches this. With the table empty, the IAM page cannot grant a
+role; to recover, create `admin` and `user` again from the IAM page (they
+come back as ordinary roles, which can be renamed and deleted). The two
+roles are now also written together, in one transaction: `Init` created them
+one at a time, and a failure between the two left one role that no later
+boot completed, because the table was no longer empty.
+
+**Deploying it.** One file runs, in one transaction with its record, on
+every target; on Cloudflare it is one D1 batch of two statements in
+`/_deploy/prepare`. A database with roles keeps exactly the rows it had. A
+database whose roles table is empty at the upgrade gets the two roles, as
+its next boot's `Init` would have seeded them.
+
+**Rollback.** A build from before 010 sees a record it does not know and
+refuses it as "migrated by a newer build": a native server does not start, a
+Cloudflare deploy through `impresspress deploy` stops, a browser bundle stops
+without erasing. `wrangler rollback`, or promoting an older version, serves,
+because the request path never plans migrations; that version's `Init`
+counts the roles table on every cold isolate again, and seeds the roles
+only into an empty table.
+
+**Cloudflare budget.** A fresh Worker database now sends 487 statements for
+its migrations, two more than the 485 before it (010's statement and its
+ledger row), within half of the default 1000.
+
 ### Legalpages: the default documents come from a migration (legalpages 003)
 
 **What changes.** Legalpages' new migration `003_default_documents`
@@ -59,9 +105,10 @@ because the request path never plans migrations; that version's `Init`
 counts the table on every cold isolate again, and publishes the defaults
 only into an empty table.
 
-**Cloudflare budget.** A fresh Worker database now sends 485 statements for
-its migrations, two more than the 483 before it (003's statement and its
-ledger row), within half of the default 1000.
+**Cloudflare budget.** A fresh Worker database sent 485 statements for its
+migrations at this release, two more than the 483 before it (003's statement
+and its ledger row; 487 since admin 010, above), within half of the default
+1000.
 
 ### Cloudflare: D1's daily limits and resets are reported as temporary
 
@@ -207,8 +254,8 @@ migrations is not supported.
 
 **Cloudflare budget.** A fresh Worker database sent 483 statements for its
 migrations at this release, two more than the 481 before it (018's statement
-and its ledger row; 485 since legalpages 003, above), within half of the
-default 1000.
+and its ledger row; 485 since legalpages 003 and 487 since admin 010, both
+above), within half of the default 1000.
 
 ### Native: an env file that cannot be loaded stops the boot; `serve --port` works
 
@@ -454,8 +501,8 @@ a Worker that compiles those blocks. Dev never runs on a Worker. The
 fresh-install budget test now counts only the blocks
 `impresspress-cloudflare` can compile, read from its `Cargo.toml`: a fresh
 Worker database sent 480 statements at that release (481 since wafer-run
-1272fd63, 483 since auth 018 and 485 since legalpages 003, all above),
-within half of the default 1000.
+1272fd63, 483 since auth 018, 485 since legalpages 003 and 487 since admin
+010, all above), within half of the default 1000.
 
 ### Cloudflare: workers-rs 0.8.7
 
@@ -674,8 +721,8 @@ loss, or recreate the database.
 **Cloudflare budget.** A fresh database's `/_deploy/prepare` sent 454
 statements for its migrations at this release, 480 since the
 stamped-column migrations, 481 since wafer-run 1272fd63, 483 since auth
-018 and 485 since legalpages 003 (counted by a test that keeps it within
-half of the default budget of 1000). Leave
+018, 485 since legalpages 003 and 487 since admin 010 (counted by a test
+that keeps it within half of the default budget of 1000). Leave
 `[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
 fresh install.
 

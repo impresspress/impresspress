@@ -655,30 +655,6 @@ pub(super) async fn handle_remove_role(ctx: &dyn Context, msg: &Message) -> Outp
     }
 }
 
-pub async fn seed_defaults(ctx: &dyn Context) {
-    let count = db::count(ctx, ROLES_TABLE, &[]).await.unwrap_or(0);
-    if count > 0 {
-        return;
-    }
-
-    let now = crate::util::now_rfc3339();
-    for (name, desc) in &[
-        ("admin", "Full access to all resources"),
-        ("user", "Standard user access"),
-    ] {
-        let data = json_map(serde_json::json!({
-            "name": name,
-            "description": desc,
-            "is_system": true,
-            "created_at": now,
-            "permissions": []
-        }));
-        if let Err(e) = db::create(ctx, ROLES_TABLE, data).await {
-            tracing::warn!("Failed to seed default role '{name}': {e}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -823,10 +799,9 @@ mod tests {
         assert_eq!(editor["is_system"], serde_json::json!(false));
     }
 
-    /// Seed a real system role (`is_system: true`) via the shared
-    /// `seed_defaults` path and return its row id.
-    async fn seed_system_role(ctx: &dyn Context) -> String {
-        seed_defaults(ctx).await;
+    /// The row id of the `admin` system role (`is_system: true`), which
+    /// admin's migration `010_default_roles` seeds into every install.
+    async fn system_role_id(ctx: &dyn Context) -> String {
         let records = db_read::list_every(
             ctx,
             ROLES_TABLE,
@@ -837,11 +812,11 @@ mod tests {
             }],
         )
         .await
-        .expect("list seeded admin role");
+        .expect("list the admin role");
         records
             .into_iter()
             .next()
-            .expect("admin role was seeded")
+            .expect("migration 010 seeded the admin role")
             .id
     }
 
@@ -875,7 +850,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let role_id = seed_system_role(&ctx).await;
+        let role_id = system_role_id(&ctx).await;
         let failing = FailingGetContext { inner: ctx };
 
         let out = super::super::ops::delete_role(
@@ -1003,7 +978,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let role_id = seed_system_role(&ctx).await;
+        let role_id = system_role_id(&ctx).await;
         let failing = FailingGetContext { inner: ctx };
 
         // Attempt to rename the system role while the protective guard read
@@ -1047,7 +1022,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let role_id = seed_system_role(&ctx).await;
+        let role_id = system_role_id(&ctx).await;
 
         let out = handle_update_role(
             &ctx,
@@ -2324,7 +2299,6 @@ mod tests {
             crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
             Y_EMAIL,
         );
-        seed_defaults(&ctx.fixture()).await;
         crate::blocks::auth::bootstrap::bootstrap_with_email_password(
             &ctx.fixture(),
             X_EMAIL,
@@ -2415,7 +2389,6 @@ mod tests {
             crate::blocks::admin::ADMIN_BLOCK_ID,
             Arc::new(crate::blocks::admin::AdminBlock::new()),
         );
-        seed_defaults(&ctx.fixture()).await;
         crate::blocks::auth::bootstrap::bootstrap_with_email_password(
             &ctx.fixture(),
             A_EMAIL,
@@ -2491,6 +2464,86 @@ mod tests {
             403,
             "an admin route must refuse the demoted admin: {}",
             String::from_utf8_lossy(&refused.body)
+        );
+    }
+}
+
+/// Admin's `Init` and the roles table: migration `010_default_roles` seeds
+/// the two system roles once per database, so `Init` neither reads nor
+/// writes the table.
+#[cfg(test)]
+mod init_tests {
+    use wafer_block::Block as _;
+    use wafer_run::{LifecycleEvent, LifecycleType};
+
+    use super::ROLES_TABLE;
+    use crate::{
+        blocks::admin::{AdminBlock, ADMIN_BLOCK_ID},
+        test_support::{FailingDbOpContext, TestContext},
+    };
+
+    async fn role_count(ctx: &TestContext) -> i64 {
+        wafer_core::clients::database::count(ctx, ROLES_TABLE, &[])
+            .await
+            .expect("count roles")
+    }
+
+    /// `iam::seed_defaults` counted the roles table on every `Init` (on
+    /// Cloudflare, once per cold isolate) through `unwrap_or(0)`, so a count
+    /// that failed read as an empty table and the seed went on to write. On
+    /// the very state that seed acted on, a migrated database whose roles
+    /// table is empty, `Init` writes nothing; and with every read of the
+    /// table failing, `Init` still succeeds and still writes nothing. Any
+    /// `Init` seed restored, counting or probing, fails the first half,
+    /// because the table is empty; a fail-open one also fails the second.
+    #[tokio::test]
+    async fn init_reads_nothing_from_the_roles_table() {
+        let ctx = TestContext::with_admin().await.running_as(ADMIN_BLOCK_ID);
+        // The migrated install holds the two system roles; empty the table,
+        // as only the SQL explorer can.
+        for id in ["seed-admin", "seed-user"] {
+            wafer_core::clients::database::delete(&ctx, ROLES_TABLE, id)
+                .await
+                .unwrap_or_else(|e| panic!("delete the system role {id}: {e:?}"));
+        }
+        assert_eq!(
+            role_count(&ctx).await,
+            0,
+            "migration 010 seeded only two roles"
+        );
+        let init = || LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: Vec::new(),
+        };
+
+        AdminBlock::new()
+            .lifecycle(&ctx, init())
+            .await
+            .expect("Init");
+        assert_eq!(
+            role_count(&ctx).await,
+            0,
+            "Init must not seed roles: migration 010 does, once per database"
+        );
+
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![
+                ("database.count", ROLES_TABLE),
+                ("database.list", ROLES_TABLE),
+                ("database.get", ROLES_TABLE),
+                ("database.sum", ROLES_TABLE),
+                ("database.aggregate", ROLES_TABLE),
+            ],
+        );
+        AdminBlock::new()
+            .lifecycle(&failing, init())
+            .await
+            .expect("Init reads no role, so a failing read cannot fail it");
+        assert_eq!(
+            role_count(&ctx).await,
+            0,
+            "a roles read that fails must not read as an empty table to seed"
         );
     }
 }

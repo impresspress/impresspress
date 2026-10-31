@@ -458,14 +458,18 @@ mod pre_ledger_migrations {
     /// from before the ledger, from the texts that list carried (today's
     /// 001-008 and the first 009), and recorded as that runner recorded it.
     /// The pass adopts 001-008 from that record, runs today's 009 — the
-    /// history marks the first 009 as not applied — and drops the column,
-    /// and a grant the database held survives.
+    /// history marks the first 009 as not applied — and the files after it,
+    /// and drops the column, and a grant the database held survives.
     #[wasm_bindgen_test]
     async fn a_pre_ledger_database_file_is_adopted_and_keeps_its_rows() {
         let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
-        let mut files: Vec<MigrationFile<'static>> = MIGRATIONS.sqlite.to_vec();
-        let last = files.pop().expect("009");
-        assert_eq!(last.0, BLOCK_SETTINGS_CLEAR_BLESSED_HASH);
+        // That list ended at 009: today's 001-008, then the first 009.
+        let at_009 = MIGRATIONS
+            .sqlite
+            .iter()
+            .position(|(name, _)| *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH)
+            .expect("009 is wired into admin's SQLite list");
+        let mut files: Vec<MigrationFile<'static>> = MIGRATIONS.sqlite[..at_009].to_vec();
         files.push((BLOCK_SETTINGS_CLEAR_BLESSED_HASH, FIRST_009));
         let state = admin_state("56ab1250");
         assert_eq!(
@@ -508,11 +512,12 @@ mod pre_ledger_migrations {
         let expected: Vec<(String, Origin, String)> = MIGRATIONS
             .sqlite
             .iter()
-            .map(|(name, _)| {
-                if *name == BLOCK_SETTINGS_CLEAR_BLESSED_HASH {
-                    (name.to_string(), Origin::Ran, String::new())
-                } else {
+            .enumerate()
+            .map(|(i, (name, _))| {
+                if i < at_009 {
                     (name.to_string(), Origin::Adopted, state.to_string())
+                } else {
+                    (name.to_string(), Origin::Ran, String::new())
                 }
             })
             .collect();
@@ -673,6 +678,116 @@ mod pre_ledger_migrations {
                 .unwrap_or_default()
                 .is_empty(),
             "the failed file is not recorded"
+        );
+    }
+}
+
+/// Admin's `010_default_roles` on real sql.js, through the browser's
+/// pre-build pass ([`super::apply_block_migrations`]), as a browser install
+/// runs it. The rest of its proof (a table with any role gets nothing, the
+/// stamps' ordering) is `impresspress-core`'s
+/// `test_support::admin_default_roles`, on SQLite and PostgreSQL.
+mod admin_default_roles {
+    use std::sync::Arc;
+
+    use wafer_core::interfaces::database::service::DatabaseService;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::super::apply_block_migrations;
+    use crate::database::test_support::fresh_db;
+
+    const TABLE: &str = "impresspress__admin__roles";
+
+    /// Every role as `(id, name, description, permissions, is_system,
+    /// updated_at)`, by id.
+    async fn roles(
+        db: &Arc<dyn DatabaseService>,
+    ) -> Vec<(String, String, String, String, i64, String)> {
+        let text = |row: &wafer_core::interfaces::database::service::Record, column: &str| {
+            row.data
+                .get(column)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("{column} is text: {row:?}"))
+                .to_string()
+        };
+        let mut rows: Vec<_> = db
+            .list(TABLE, &wafer_block::db::ListOptions::default())
+            .await
+            .expect("list roles")
+            .records
+            .iter()
+            .map(|row| {
+                (
+                    text(row, "id"),
+                    text(row, "name"),
+                    text(row, "description"),
+                    text(row, "permissions"),
+                    row.data
+                        .get("is_system")
+                        .and_then(serde_json::Value::as_i64)
+                        .expect("is_system is an integer"),
+                    text(row, "updated_at"),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// **A fresh browser install holds the two system roles, once.** Both
+    /// are `is_system` with no permissions, stamped in the executor's
+    /// `+00:00` form; a second pass runs nothing, and once every role is
+    /// deleted a further pass seeds nothing.
+    #[wasm_bindgen_test]
+    async fn a_fresh_install_seeds_the_system_roles_once() {
+        let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
+        apply_block_migrations(&db)
+            .await
+            .unwrap_or_else(|e| panic!("every block's list applies: {e:?}"));
+
+        let seeded = roles(&db).await;
+        let shape: Vec<_> = seeded
+            .iter()
+            .map(|(id, name, description, permissions, is_system, _)| {
+                (
+                    id.as_str(),
+                    name.as_str(),
+                    description.as_str(),
+                    permissions.as_str(),
+                    *is_system,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (
+                    "seed-admin",
+                    "admin",
+                    "Full access to all resources",
+                    "[]",
+                    1
+                ),
+                ("seed-user", "user", "Standard user access", "[]", 1),
+            ]
+        );
+        for (id, .., stamp) in &seeded {
+            assert!(
+                stamp.len() == 25 && stamp.ends_with("+00:00"),
+                "{id} is stamped {stamp:?}, not `YYYY-MM-DDTHH:MM:SS+00:00`"
+            );
+        }
+
+        apply_block_migrations(&db).await.expect("the second pass");
+        assert_eq!(roles(&db).await, seeded, "a second pass runs nothing");
+
+        for id in ["seed-admin", "seed-user"] {
+            db.delete(TABLE, id).await.expect("delete a system role");
+        }
+        apply_block_migrations(&db).await.expect("the third pass");
+        assert!(
+            roles(&db).await.is_empty(),
+            "deleting every role is final once 010 has run"
         );
     }
 }
