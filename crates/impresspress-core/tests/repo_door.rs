@@ -405,11 +405,21 @@ const LITERAL_ALLOWED: &[(&str, &[&str])] = &[
     ("share_access_logs", &["blocks/files/repo/shares.rs"]),
     ("quota", &["blocks/files/repo/quota.rs"]),
     ("views", &["blocks/files/repo/views.rs"]),
-    // The legalpages door. Nothing but the door itself: the block declares
-    // no `collections(..)` and no `grants(..)` (it owns the one table it
-    // touches, so WRAP has nothing to cross-check), which is what leaves this
-    // list at one entry.
-    ("documents", &["blocks/legalpages/repo/documents.rs"]),
+    // The legalpages door. The block declares no `collections(..)` and no
+    // `grants(..)` (it owns the one table it touches, so WRAP has nothing to
+    // cross-check), so the door itself is the only production file.
+    (
+        "documents",
+        &[
+            // the door itself
+            "blocks/legalpages/repo/documents.rs",
+            // the proof of `003_default_documents` (SQLite and PostgreSQL)
+            // asserts on the rows the `.sql` file writes, as stored, through
+            // a bare `DatabaseService` with no block context; it spells the
+            // table as the file does, like the auth migration tests above
+            "test_support/legalpages_default_documents.rs",
+        ],
+    ),
     (
         "users",
         &[

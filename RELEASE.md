@@ -19,6 +19,50 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Legalpages: the default documents come from a migration (legalpages 003)
+
+**What changes.** Legalpages' new migration `003_default_documents`
+publishes the default Terms of service and Privacy policy, which the block's
+`Init` published until now. `Init` decided by counting the documents table on
+every boot, and Cloudflare runs every block's `Init` on every cold isolate,
+so each cold isolate read every stored document version, archived ones
+included: on one deployment that was 305 rows on about 10,800 cold isolates
+a day, 57% of its account's daily D1 reads. `Init` now reads nothing from the
+table, on every target.
+
+**What 003 writes,** into an empty table only: both documents published as
+version 1 by `system`, with the titles and text `Init` used, under the ids
+`seed-terms` and `seed-privacy`. A table holding any document, in any status,
+gets nothing, so a database that already has the defaults gets no second set,
+and a type an admin deleted while the other remains is not seeded again
+(as before).
+
+**Behaviour change: deleting every document is final.** Until now, deleting
+every document made the next boot (on Cloudflare, the next cold isolate)
+publish both defaults again. Once 003 has run, nothing does. Publish them
+from the editor to have them back. This also ends a race: two isolates
+that found the table empty together both published, the second publish of
+each type taking version 2, which left an archived duplicate of each
+default behind the live one.
+
+**Deploying it.** One file runs, in one transaction with its record, on
+every target; on Cloudflare it is one D1 batch of two statements in
+`/_deploy/prepare`. A database with documents keeps exactly the rows it had.
+A database whose table is empty at the upgrade gets the two defaults, as its
+next boot's `Init` would have published them.
+
+**Rollback.** A build from before 003 sees a record it does not know and
+refuses it as "migrated by a newer build": a native server does not start, a
+Cloudflare deploy through `impresspress deploy` stops, a browser bundle stops
+without erasing. `wrangler rollback`, or promoting an older version, serves,
+because the request path never plans migrations; that version's `Init`
+counts the table on every cold isolate again, and publishes the defaults
+only into an empty table.
+
+**Cloudflare budget.** A fresh Worker database now sends 485 statements for
+its migrations, two more than the 483 before it (003's statement and its
+ledger row), within half of the default 1000.
+
 ### wafer-run 96860baa: Admin → Database opens on Cloudflare
 
 **What changes.** The wafer-run pin moves from `1272fd63` to `96860baa`
@@ -117,9 +161,10 @@ blocklist was retired reads the table. A build from before that read it on
 every authenticated request and fails those requests; downgrading across
 migrations is not supported.
 
-**Cloudflare budget.** A fresh Worker database now sends 483 statements for
-its migrations, two more than the 481 before it (018's statement and its
-ledger row), within half of the default 1000.
+**Cloudflare budget.** A fresh Worker database sent 483 statements for its
+migrations at this release, two more than the 481 before it (018's statement
+and its ledger row; 485 since legalpages 003, above), within half of the
+default 1000.
 
 ### Native: an env file that cannot be loaded stops the boot; `serve --port` works
 
@@ -365,8 +410,8 @@ a Worker that compiles those blocks. Dev never runs on a Worker. The
 fresh-install budget test now counts only the blocks
 `impresspress-cloudflare` can compile, read from its `Cargo.toml`: a fresh
 Worker database sent 480 statements at that release (481 since wafer-run
-1272fd63 and 483 since auth 018, both above), within half of the default
-1000.
+1272fd63, 483 since auth 018 and 485 since legalpages 003, all above),
+within half of the default 1000.
 
 ### Cloudflare: workers-rs 0.8.7
 
@@ -584,9 +629,9 @@ loss, or recreate the database.
 
 **Cloudflare budget.** A fresh database's `/_deploy/prepare` sent 454
 statements for its migrations at this release, 480 since the
-stamped-column migrations, 481 since wafer-run 1272fd63 and 483 since auth
-018 (counted by a test that keeps it within half of the default budget of
-1000). Leave
+stamped-column migrations, 481 since wafer-run 1272fd63, 483 since auth
+018 and 485 since legalpages 003 (counted by a test that keeps it within
+half of the default budget of 1000). Leave
 `[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
 fresh install.
 
