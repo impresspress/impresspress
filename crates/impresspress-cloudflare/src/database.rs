@@ -85,8 +85,10 @@
 //! D1 reports a failed statement only as text, so every error is classified by
 //! [`impresspress_core::sqlite_text_error::statement_error`]: a primary- or
 //! unique-key violation is [`DatabaseError::AlreadyExists`], as the native
-//! backends report it from the driver's code, and anything else `Internal`.
-//! That is part of the `DatabaseService` contract, not a courtesy:
+//! backends report it from the driver's code; one of D1's transient texts (a
+//! lost connection, an overload, a reset, a daily limit — that module lists
+//! them) is [`DatabaseError::Unavailable`]; anything else is `Internal`.
+//! The taken key is part of the `DatabaseService` contract, not a courtesy:
 //! `impresspress_core::blocks::crud` answers `AlreadyExists` as a 409 and
 //! never re-reads a key to find out what a refused write meant. The tests
 //! `a_create_refused_for_a_taken_key_is_already_exists` and
