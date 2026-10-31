@@ -642,7 +642,7 @@ mod page_chrome_tests {
     //! What the legal admin pages render through the block's own dispatch:
     //! the sub-pages' trail, one primary at most, one level of cards.
 
-    use wafer_run::{Block, InputStream, LifecycleEvent, LifecycleType};
+    use wafer_run::{Block, InputStream};
 
     use super::*;
     use crate::{
@@ -650,20 +650,10 @@ mod page_chrome_tests {
         test_support::{admin_msg, dom, output_html, TestContext},
     };
 
-    /// The block with its two default documents, as a fresh deployment has.
+    /// The block with its two default documents, as a fresh deployment has
+    /// them from migration 003.
     async fn seeded() -> TestContext {
-        let ctx = crate::blocks::legalpages::test_ctx().await;
-        LegalPagesBlock::new()
-            .lifecycle(
-                &ctx,
-                LifecycleEvent {
-                    event_type: LifecycleType::Init,
-                    data: Vec::new(),
-                },
-            )
-            .await
-            .expect("init seeds the defaults");
-        ctx
+        crate::blocks::legalpages::fresh_install_ctx().await
     }
 
     async fn page(ctx: &TestContext, path: &str) -> String {

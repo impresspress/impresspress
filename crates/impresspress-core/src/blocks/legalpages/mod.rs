@@ -9,7 +9,7 @@ mod service;
 use maud::{html, Markup, PreEscaped};
 use wafer_run::{
     context::Context, BlockInfo, ConfigVar, HttpMethod, InputStream, InputType, InstanceMode,
-    Message, OutputStream, WaferError,
+    Message, OutputStream,
 };
 
 use self::{
@@ -460,58 +460,6 @@ impl LegalPagesBlock {
             Err(e) => crud::db_error(e, "Document not found", "Database error"),
         }
     }
-
-    /// Seed the two default documents, once, on Init.
-    ///
-    /// Returns `Result` and the lifecycle propagates it. The count used to be
-    /// read through `unwrap_or(0)`, which made a count that *failed*
-    /// indistinguishable from an empty table, so Init seeded a second set of
-    /// documents on top of the existing ones and still reported success
-    /// (B10).
-    async fn seed_defaults(&self, ctx: &dyn Context) -> Result<(), WaferError> {
-        if documents::count(ctx).await? > 0 {
-            return Ok(());
-        }
-
-        for (doc_type, content) in &[
-            (
-                DocumentType::Terms,
-                "These are the default terms of service. Please update them in the admin panel.\n",
-            ),
-            (
-                DocumentType::Privacy,
-                "This is the default privacy policy. Please update it in the admin panel.\n",
-            ),
-        ] {
-            // Seed through the same service fn both publish surfaces use —
-            // the published-document shape (status/version/published_at/…)
-            // exists exactly once, in `repo::documents`. The table is empty
-            // here (count == 0 above), so the archive pass is a no-op.
-            //
-            // A failure here fails Init too. Logging it left the deployment
-            // with one of the two documents and a successful boot, which is
-            // the same silence the count read used to have.
-            service::publish_document(
-                ctx,
-                service::PublishRequest {
-                    doc_type: *doc_type,
-                    doc_id: "",
-                    title: Some(doc_type.title()),
-                    content: Some(content),
-                    created_by: "system",
-                },
-            )
-            .await
-            .map_err(|e| match e {
-                service::PublishError::Db(e) => e,
-                other => WaferError::new(
-                    wafer_run::ErrorCode::Internal,
-                    format!("legalpages: seeding {doc_type:?} failed: {other:?}"),
-                ),
-            })?;
-        }
-        Ok(())
-    }
 }
 
 /// The response for a publish that did not happen, for both publish
@@ -767,30 +715,49 @@ crate::impresspress_feature_block! {
             Route::ApiDelete => this.handle_admin_delete(ctx, &msg).await,
         }
     },
-    lifecycle: |this, ctx, event| {
+    lifecycle: |_this, ctx, event| {
+        // Applies the block's migrations and nothing else. Migration 003 seeds
+        // the two default documents once per database, so Init reads nothing
+        // from the documents table on any boot.
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
             &migrations::MIGRATIONS)
-        .await?;
-        // Seed the default draft documents after migrations, only on Init.
-        if matches!(event.event_type, wafer_run::LifecycleType::Init) {
-            this.seed_defaults(ctx).await?;
-        }
-        Ok(())
+        .await
     },
 }
 
-/// A `TestContext` with the legalpages schema applied. Shared by every test
-/// module in the block so the fixture exists once.
+/// A fresh install: a `TestContext` with the block's migrations applied
+/// through the real runner, so the documents table holds the two defaults
+/// migration 003 publishes.
 #[cfg(test)]
-pub(super) async fn test_ctx() -> crate::test_support::TestContext {
+pub(super) async fn fresh_install_ctx() -> crate::test_support::TestContext {
     let ctx = crate::test_support::TestContext::with_admin()
         .await
         .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
     crate::migration_helper::apply_migrations(&ctx, &migrations::MIGRATIONS)
         .await
         .expect("apply legalpages migrations");
+    ctx
+}
+
+/// A fresh install whose two default documents were then deleted: the
+/// migrated schema with an empty documents table, so a test writes exactly
+/// the rows it reasons about. Shared by every test module in the block so
+/// the fixture exists once.
+#[cfg(test)]
+pub(super) async fn test_ctx() -> crate::test_support::TestContext {
+    let ctx = fresh_install_ctx().await;
+    for id in ["seed-terms", "seed-privacy"] {
+        documents::delete(&ctx, id)
+            .await
+            .unwrap_or_else(|e| panic!("delete the default document {id}: {e:?}"));
+    }
+    assert_eq!(
+        documents::count(&ctx).await.expect("count"),
+        0,
+        "migration 003 published only the two defaults"
+    );
     ctx
 }
 
@@ -965,60 +932,47 @@ mod write_loss_tests {
         );
     }
 
-    /// B10, defect 3. `seed_defaults` read its "is the table already seeded?"
-    /// count through `unwrap_or(0)`, so a count that *failed* was
-    /// indistinguishable from an empty table and Init seeded a duplicate set
-    /// of documents on top of the existing ones. It returned `()`, so the
-    /// lifecycle could not see the failure either.
+    /// B10, defect 3, was the Init seed reading its "is the table already
+    /// seeded?" count through `unwrap_or(0)`, so a count that failed seeded a
+    /// duplicate set of documents. Migration 003 seeds the defaults now, once
+    /// per database, so Init neither reads nor writes the documents table.
+    /// On the very state the old seed acted on, a migrated database whose
+    /// table is empty, Init seeds nothing; and with every read of the table
+    /// failing, Init still succeeds. Any Init seed restored, counting or
+    /// probing, fails the first half, because the table is empty; the second
+    /// pins that Init depends on no read of the table at all.
     #[tokio::test]
-    async fn init_fails_when_the_seed_count_fails() {
+    async fn init_reads_nothing_from_the_documents_table() {
         let ctx = test_ctx().await;
-        let failing =
-            FailingDbOpContext::new(ctx.clone(), vec![("database.count", documents::TABLE)]);
-
-        let result = LegalPagesBlock::new()
-            .lifecycle(
-                &failing,
-                LifecycleEvent {
-                    event_type: LifecycleType::Init,
-                    data: Vec::new(),
-                },
-            )
-            .await;
-
-        assert_eq!(
-            row_count(&ctx).await,
-            0,
-            "Init must not have seeded on a count it could not read"
-        );
-        assert!(
-            result.is_err(),
-            "a count the seed cannot read must fail Init, not read as `table is empty`"
-        );
-    }
-
-    /// The counterpart of the two `FailingDbOpContext` tests above: on a
-    /// healthy context Init still seeds exactly the two default documents,
-    /// and running it twice does not duplicate them.
-    #[tokio::test]
-    async fn init_seeds_the_two_defaults_once() {
-        let ctx = test_ctx().await;
-        let event = || LifecycleEvent {
+        let init = || LifecycleEvent {
             event_type: LifecycleType::Init,
             data: Vec::new(),
         };
 
         LegalPagesBlock::new()
-            .lifecycle(&ctx, event())
+            .lifecycle(&ctx, init())
             .await
-            .expect("first init");
-        assert_eq!(row_count(&ctx).await, 2);
+            .expect("Init");
+        assert_eq!(
+            row_count(&ctx).await,
+            0,
+            "Init must not seed: deleting every document is final once 003 has run"
+        );
+
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![
+                ("database.count", documents::TABLE),
+                ("database.list", documents::TABLE),
+                ("database.get", documents::TABLE),
+            ],
+        );
 
         LegalPagesBlock::new()
-            .lifecycle(&ctx, event())
+            .lifecycle(&failing, init())
             .await
-            .expect("second init");
-        assert_eq!(row_count(&ctx).await, 2, "Init is idempotent");
+            .expect("Init reads no document, so a failing read cannot fail it");
+        assert_eq!(row_count(&ctx).await, 0);
     }
 
     /// A `latest_version` that could not be read used to answer `0`, so the
@@ -1429,6 +1383,42 @@ mod write_loss_tests {
             html.contains("#123456"),
             "the configured background colour must reach the rendered page: {html}"
         );
+    }
+}
+
+/// What a fresh install serves: the two documents migration 003 publishes,
+/// on the public pages, as the Init seed's did.
+#[cfg(test)]
+mod default_documents_tests {
+    use wafer_run::Block as _;
+
+    use super::*;
+    use crate::test_support::{anon_msg, output_html};
+
+    #[tokio::test]
+    async fn a_fresh_install_serves_the_default_terms_and_privacy_policy() {
+        let ctx = fresh_install_ctx().await;
+        for (path, title, text) in [
+            (
+                "/b/legalpages/terms",
+                DocumentType::Terms.title(),
+                "These are the default terms of service. Please update them in the admin panel.",
+            ),
+            (
+                "/b/legalpages/privacy",
+                DocumentType::Privacy.title(),
+                "This is the default privacy policy. Please update it in the admin panel.",
+            ),
+        ] {
+            let html = output_html(
+                LegalPagesBlock::new()
+                    .handle(&ctx, anon_msg("retrieve", path), InputStream::empty())
+                    .await,
+            )
+            .await;
+            assert!(html.contains(title), "{path}: no {title:?}: {html}");
+            assert!(html.contains(text), "{path}: no default text: {html}");
+        }
     }
 }
 

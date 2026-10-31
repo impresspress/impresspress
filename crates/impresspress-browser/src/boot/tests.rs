@@ -676,3 +676,109 @@ mod pre_ledger_migrations {
         );
     }
 }
+
+/// Legalpages' `003_default_documents` on real sql.js, through the browser's
+/// pre-build pass ([`super::apply_block_migrations`]), as a browser install
+/// runs it. The rest of its proof (a table with any document gets nothing,
+/// the stamps' ordering) is `impresspress-core`'s
+/// `test_support::legalpages_default_documents`, on SQLite and PostgreSQL.
+mod legalpages_default_documents {
+    use std::sync::Arc;
+
+    use wafer_core::interfaces::database::service::DatabaseService;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::super::apply_block_migrations;
+    use crate::database::test_support::fresh_db;
+
+    const TABLE: &str = "impresspress__legalpages__documents";
+
+    /// Every document as `(id, doc_type, status, version, created_by,
+    /// updated_at)`, by id.
+    async fn documents(
+        db: &Arc<dyn DatabaseService>,
+    ) -> Vec<(String, String, String, i64, String, String)> {
+        let text = |row: &wafer_core::interfaces::database::service::Record, column: &str| {
+            row.data
+                .get(column)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("{column} is text: {row:?}"))
+                .to_string()
+        };
+        let mut rows: Vec<_> = db
+            .list(TABLE, &wafer_block::db::ListOptions::default())
+            .await
+            .expect("list documents")
+            .records
+            .iter()
+            .map(|row| {
+                (
+                    text(row, "id"),
+                    text(row, "doc_type"),
+                    text(row, "status"),
+                    row.data
+                        .get("version")
+                        .and_then(serde_json::Value::as_i64)
+                        .expect("version is an integer"),
+                    text(row, "created_by"),
+                    text(row, "updated_at"),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// **A fresh browser install publishes the two default documents, once.**
+    /// Both are `published` version 1 by `system`, stamped in the executor's
+    /// `+00:00` form; a second pass runs nothing, and once every document is
+    /// deleted a further pass seeds nothing. Both later passes return at the
+    /// `current_hash` fast path; the ledger re-plan is covered by
+    /// `impresspress-core`'s proof on SQLite and PostgreSQL.
+    #[wasm_bindgen_test]
+    async fn a_fresh_install_publishes_the_defaults_once() {
+        let db: Arc<dyn DatabaseService> = Arc::new(fresh_db().await);
+        apply_block_migrations(&db)
+            .await
+            .unwrap_or_else(|e| panic!("every block's list applies: {e:?}"));
+
+        let seeded = documents(&db).await;
+        let shape: Vec<_> = seeded
+            .iter()
+            .map(|(id, doc_type, status, version, by, _)| {
+                (
+                    id.as_str(),
+                    doc_type.as_str(),
+                    status.as_str(),
+                    *version,
+                    by.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("seed-privacy", "privacy", "published", 1, "system"),
+                ("seed-terms", "terms", "published", 1, "system"),
+            ]
+        );
+        for (id, .., stamp) in &seeded {
+            assert!(
+                stamp.len() == 25 && stamp.ends_with("+00:00"),
+                "{id} is stamped {stamp:?}, not `YYYY-MM-DDTHH:MM:SS+00:00`"
+            );
+        }
+
+        apply_block_migrations(&db).await.expect("the second pass");
+        assert_eq!(documents(&db).await, seeded, "a second pass runs nothing");
+
+        for id in ["seed-privacy", "seed-terms"] {
+            db.delete(TABLE, id).await.expect("delete a default");
+        }
+        apply_block_migrations(&db).await.expect("the third pass");
+        assert!(
+            documents(&db).await.is_empty(),
+            "deleting every document is final once 003 has run"
+        );
+    }
+}
