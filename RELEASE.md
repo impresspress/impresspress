@@ -19,6 +19,38 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: D1's daily limits and resets are retried, not fatal
+
+**What was wrong.** A block whose `Init` queries D1 had a failure classified
+by its text, and only a short list of texts counted as transient. On the Free
+plan, once the account passes its daily row read or row write limit, every
+query fails with `D1_ERROR: Your account has exceeded D1's free tier daily
+row read limit. …` until 00:00 UTC. That text was not on the list, so the
+failure was a fault: the runtime cached the block as failed for the life of
+the isolate, and it stayed failed after the limit lifted. The same held for
+D1's reset and unreachable-database errors from Cloudflare's D1 error list,
+and for `Internal error in D1 DB storage…`, which the list spelled with a
+lowercase `internal error`.
+
+**What changes.** These D1 texts are now transient (`Unavailable`), so a
+block `Init` that hits one is retried instead of cached as failed:
+
+- the daily row read and row write limits;
+- `D1 DB reset because its code was updated`;
+- `Internal error while starting up D1 DB storage caused object to be
+  reset` and `Internal error in D1 DB storage caused object to be reset`;
+- `Replica disconnected from primary`;
+- `Cannot resolve D1 DB due to transient issue on remote node`;
+- `D1 DB's isolate exceeded its memory limit and was reset` and `D1 DB
+  exceeded its CPU time limit and was reset`.
+
+The texts now match in any letter case. A full database (`Exceeded maximum
+DB size.`) and a full account (`…maximum account storage limit…`) stay
+faults: retrying cannot fix them. This change does not keep the rest of the
+site serving during a D1 outage; that is separate work.
+
+**What to do.** Nothing.
+
 ### wafer-run 96860baa: Admin → Database opens on Cloudflare
 
 **What changes.** The wafer-run pin moves from `1272fd63` to `96860baa`
