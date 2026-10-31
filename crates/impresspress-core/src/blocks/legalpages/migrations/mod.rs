@@ -1,5 +1,12 @@
 //! Legalpages block migrations. Applied from the block's `Init` lifecycle via
-//! [`crate::migration_helper::lifecycle_init`].
+//! [`crate::migration_helper::lifecycle_init`], and pre-build where a target
+//! applies every list before its runtime exists (the browser).
+//!
+//! Each file runs once, as one transaction with its row in the per-file
+//! migration ledger (`impresspress__admin__applied_migrations`).
+//! `003_default_documents` seeds the two default documents, which `Init` used
+//! to seed after counting the table on every boot; its header says why the
+//! guard is the whole table.
 
 const SQL_001_SQLITE: &str = include_str!("001_legalpages_schema.sqlite.sql");
 #[cfg(feature = "postgres")]
@@ -7,12 +14,20 @@ const SQL_001_POSTGRES: &str = include_str!("001_legalpages_schema.postgres.sql"
 const SQL_002_SQLITE: &str = include_str!("002_legalpages_version_numbers.sqlite.sql");
 #[cfg(feature = "postgres")]
 const SQL_002_POSTGRES: &str = include_str!("002_legalpages_version_numbers.postgres.sql");
+const SQL_003_SQLITE: &str = include_str!("003_default_documents.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_003_POSTGRES: &str = include_str!("003_default_documents.postgres.sql");
+
+/// Basename of the migration that seeds the two default documents, named once
+/// so the migration list and the tests that drive it cannot drift apart.
+pub(crate) const DEFAULT_DOCUMENTS: &str = "003_default_documents";
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("001_legalpages_schema", SQL_001_SQLITE),
     ("002_legalpages_version_numbers", SQL_002_SQLITE),
+    (DEFAULT_DOCUMENTS, SQL_003_SQLITE),
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
@@ -22,6 +37,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
     ("001_legalpages_schema", SQL_001_POSTGRES),
     ("002_legalpages_version_numbers", SQL_002_POSTGRES),
+    (DEFAULT_DOCUMENTS, SQL_003_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

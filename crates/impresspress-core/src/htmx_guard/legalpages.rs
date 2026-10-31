@@ -45,9 +45,9 @@ fn caller(action: &str, path: &str) -> Message {
     }
 }
 
-/// The block's own `Init`: its migrations, and the two default documents it
-/// publishes — so the public pages render a published document and the
-/// editor opens on one.
+/// The block's own `Init`, which applies its migrations: 003 publishes the
+/// two default documents, so the public pages render a published document
+/// and the editor opens on one.
 async fn fixture() -> Fixture {
     let ctx = TestContext::with_admin().await;
     // Init runs in the block's own frame.
@@ -62,7 +62,7 @@ async fn fixture() -> Fixture {
         .await
         .expect("legalpages Init");
 
-    // A document Init published, for the by-id row to read.
+    // A document 003 published, for the by-id row to read.
     let listed = crate::test_support::htmx::answer(
         LegalPagesBlock::new()
             .handle(
@@ -76,7 +76,7 @@ async fn fixture() -> Fixture {
     let listed: serde_json::Value = serde_json::from_str(&listed.body).expect("the list is JSON");
     let document = listed["records"][0]["id"]
         .as_str()
-        .unwrap_or_else(|| panic!("Init published a document: {listed}"))
+        .unwrap_or_else(|| panic!("003 published a document: {listed}"))
         .to_string();
 
     Fixture {

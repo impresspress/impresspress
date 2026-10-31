@@ -16,6 +16,10 @@
 //! - **Auth 018** drops the JWT blocklist and nothing else, and on a
 //!   database without the table fails whole with PostgreSQL's own error,
 //!   recording nothing (`impresspress_core::test_support::jwt_blocklist_drop`).
+//! - **Legalpages 003** seeds the two default documents into an empty table
+//!   and nothing into a table holding any document, and once recorded leaves
+//!   an emptied table empty
+//!   (`impresspress_core::test_support::legalpages_default_documents`).
 //! - **Every state upgrades as its entry says:** every supported entry of
 //!   every block's PostgreSQL history, rebuilt with the runner from before
 //!   the ledger and upgraded through today's, converges on a fresh install's
@@ -42,7 +46,7 @@ use std::{
 };
 
 use impresspress_core::test_support::{
-    jwt_blocklist_drop, migration_history as history, stamped_columns,
+    jwt_blocklist_drop, legalpages_default_documents, migration_history as history, stamped_columns,
 };
 use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_sql_utils::Backend;
@@ -219,6 +223,18 @@ async fn auth_018_drops_the_blocklist_and_nothing_else_on_postgres() {
         Box::pin(server.database()) as Pin<Box<dyn Future<Output = Arc<dyn DatabaseService>> + '_>>
     };
     let problems = jwt_blocklist_drop::check(Backend::Postgres, &new_db).await;
+    server.drop_all().await;
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a PostgreSQL server named by IMPRESSPRESS_TEST_POSTGRES_URL"]
+async fn legalpages_003_seeds_the_defaults_into_an_empty_table_once_on_postgres() {
+    let server = Server::connect("impresspress_legalpages_003").await;
+    let new_db = || {
+        Box::pin(server.database()) as Pin<Box<dyn Future<Output = Arc<dyn DatabaseService>> + '_>>
+    };
+    let problems = legalpages_default_documents::check(Backend::Postgres, &new_db).await;
     server.drop_all().await;
     assert!(problems.is_empty(), "{problems:#?}");
 }
