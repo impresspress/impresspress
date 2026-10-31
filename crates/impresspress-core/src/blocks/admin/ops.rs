@@ -626,7 +626,7 @@ async fn bump_each(
 ///   carries "Rotating this secret invalidates every issued session" — and
 ///   refusing it here would delete a working capability;
 /// - on Cloudflare the secret is a worker binding (`PROTECTED_ENV_KEYS`,
-///   consumed by `runtime_build`), and `CfDeployBootHooks::seed_and_load` runs
+///   consumed by `runtime_build`), and `builder::DeployBootHooks::seed_and_load` runs
 ///   only `seed_auto_generated`, which never covers this key. The row is
 ///   therefore inert there: an edit is accepted and never takes effect.
 ///

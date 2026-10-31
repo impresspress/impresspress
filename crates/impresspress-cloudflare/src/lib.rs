@@ -22,8 +22,8 @@
 //! |---|---|
 //! | [`services`] | the public `make_*` service constructors |
 //! | [`environment`] | the runtime-identity hash and the prepared-plan identity reads |
-//! | [`runtime_build`] | `build_runtime`, the two config surfaces, the three boot funnels |
-//! | [`boot_hooks`] | the three `BootHooks` impls those funnels pick between |
+//! | [`runtime_build`] | `build_runtime`, the two config surfaces, the Worker's wrappers around core's boot funnels |
+//! | `boot_hooks` (tests) | the core boot hooks driven over this crate's KV-cached D1 wrapper |
 //! | [`runtime_cache`] | the per-isolate runtime cache and its probe policy |
 //! | [`deploy_endpoints`] | `/_deploy/init`, `/_deploy/prepare`, `/_deploy/prepared`, `/_deploy/verify` |
 //! | [`host_policy`] | the `*.workers.dev` preview lockdown |
@@ -76,6 +76,7 @@
     )
 )]
 
+#[cfg(test)]
 mod boot_hooks;
 pub mod config_service;
 // Compile-time `DatabaseService` conformance assertions for the D1 and
@@ -880,16 +881,16 @@ where
 {
     // WHICH BOOT FUNNEL A CRON TAKES, and why it is this one.
     //
-    // `get_or_build` is the request path's entry, and it picks between two of
-    // the three funnels `runtime_build` declares: `boot_prepared_runtime` when
-    // this Worker version carries a packaged plan, `boot_dynamic_request_
-    // runtime` otherwise. Going through it puts a scheduled invocation on
+    // `get_or_build` is the request path's entry, and it picks between the two
+    // request-path builds `impresspress_core::builder::boot_request_runtime`
+    // offers: `RequestBuild::Prepared` when this Worker version carries a
+    // packaged plan, `RequestBuild::Database` otherwise. Going through it puts a scheduled invocation on
     // whichever of those two this deployment's fetches already take. That is
     // the decision, made here, not a side effect of reusing a convenient
     // function — and it is also why the build is not wasted: a cold cron warms
     // the very cache the next fetch reads.
     //
-    // The third funnel, `boot_deploy_runtime`, is the one a cron must NOT
+    // The deploy funnel, `boot_deploy_runtime`, is the one a cron must NOT
     // take, and it is the one that looks affordable — no client is waiting, so
     // `InitPolicy::Reported` and the seeding hook seem free. They are not.
     // Seeding is a deploy-time mutation performed with an operator present. On

@@ -939,14 +939,11 @@ async fn finish_runtime(
 ) -> Result<(Rc<ReadyRuntime>, u32, u64), String> {
     let mut built = built;
     let lifecycle = kind.lifecycle();
-    let booted = match &kind {
-        RuntimeKind::Dynamic { .. } => {
-            crate::runtime_build::boot_dynamic_request_runtime(&mut built).await
-        }
-        RuntimeKind::Prepared { .. } => {
-            crate::runtime_build::boot_prepared_runtime(&mut built).await
-        }
+    let build = match &kind {
+        RuntimeKind::Dynamic { .. } => impresspress_core::builder::RequestBuild::Database,
+        RuntimeKind::Prepared { .. } => impresspress_core::builder::RequestBuild::Prepared,
     };
+    let booted = crate::runtime_build::boot_request_runtime(&mut built, build).await;
     booted.map_err(|error| format!("{lifecycle}-runtime boot: {error}"))?;
 
     let build_ordinal = next_build_ordinal();
@@ -1416,10 +1413,11 @@ where
 
     // Grants and settings were imported from the verified plan, so this is the
     // one path whose `GrantSource` is `PreInstalled` and whose seed hook is a
-    // written no-op — see `crate::runtime_build::boot_prepared_runtime`, which
-    // `RuntimeKind::Prepared` selects. Everything else is the shared ordering,
-    // under this request's services: ConfigSource may still perform per-block
-    // reads, and keeping them here prevents cross-request lazy-init waiters.
+    // written no-op — see `impresspress_core::builder::boot_request_runtime`'s
+    // `RequestBuild::Prepared`, which `RuntimeKind::Prepared` selects.
+    // Everything else is the shared ordering, under this request's services:
+    // ConfigSource may still perform per-block reads, and keeping them here
+    // prevents cross-request lazy-init waiters.
     Ok(finish_runtime(
         built,
         RuntimeKind::Prepared {

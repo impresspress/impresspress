@@ -28,6 +28,7 @@
 //! about ancestry and visibility.
 
 pub mod admin_default_roles;
+pub mod d1_shaped;
 // Test-only: the sentence-case rule the label guards share.
 #[cfg(test)]
 pub mod case;

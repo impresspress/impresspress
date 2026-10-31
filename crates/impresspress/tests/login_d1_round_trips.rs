@@ -15,24 +15,12 @@
 //! the deferred tasks are queued rather than run inline, and what the
 //! response waits on is exactly what runs inside the scope.
 //!
-//! The database is the platform's SQLite service behind [`D1Shaped`], a
-//! `DbExec` decorator that makes it behave like the D1 adapter in the two ways
-//! that decide what a request costs there: one schema cache that outlives the
-//! request (D1's is the isolate's), and one round trip per primitive, with a
-//! `run_batch`/`run_transaction` one round trip for all of its statements (D1's
-//! `db.batch()`). Every `get`/`list`/`create`/... is the shared `DbExec`
-//! default D1 runs too, so the statements are the ones D1 would be sent. A
-//! fake D1 binding in the wasm test harness could count them as well, but it
-//! cannot execute a sign-in: it has no SQL engine behind it.
+//! The database is the platform's SQLite service behind [`D1Shaped`]
+//! (`impresspress_core::test_support::d1_shaped`), which makes it behave like
+//! the D1 adapter in the two ways that decide what a request costs there and
+//! records every round trip; see its module docs.
 
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use impresspress_core::{
     after_response::{self, AfterResponse},
@@ -42,266 +30,17 @@ use impresspress_core::{
     },
     builder::{boot, GrantSource, InitPolicy},
     deferred::{self, DeferMode},
+    test_support::d1_shaped::{D1Shaped, Ledger, RoundTrip},
 };
 use impresspress_native::InfraConfig;
 use impresspress_password::pepper::PasswordPeppers;
 use impresspress_server::{build_native_runtime, AppHooks, NativeBootHooks};
 use wafer_block::{http_codec, InputStream};
-use wafer_block_sqlite::service::SQLiteDatabaseService;
-use wafer_core::interfaces::database::{
-    codec::JsonColumns,
-    exec::{BatchOp, BatchResult, DbExec, TxOp, TxResult},
-    schema_cache::SchemaCache,
-    service::{
-        Column, DatabaseError, DatabaseService, Record, StatementBudget, Table, TransactionError,
-    },
-};
+use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_run::Wafer;
-use wafer_sql_utils::Backend;
 
 const ADMIN_EMAIL: &str = "admin@example.com";
 const ADMIN_PASSWORD: &str = "correct-horse-battery-staple";
-
-/// One round trip: the wave it started in, how many statements it carried,
-/// and what they were.
-#[derive(Debug, Clone)]
-struct RoundTrip {
-    wave: usize,
-    statements: usize,
-    sql: String,
-}
-
-/// What [`D1Shaped`] has seen since the last [`Ledger::take`].
-#[derive(Default)]
-struct Ledger {
-    trips: Mutex<Vec<RoundTrip>>,
-    in_flight: AtomicUsize,
-    waves: AtomicUsize,
-}
-
-impl Ledger {
-    fn take(&self) -> Vec<RoundTrip> {
-        self.waves.store(0, Ordering::SeqCst);
-        std::mem::take(&mut *self.trips.lock().expect("ledger poisoned"))
-    }
-}
-
-/// Ends a round trip when the primitive returns, however it returns.
-struct InFlight<'a>(&'a Ledger);
-
-impl Drop for InFlight<'_> {
-    fn drop(&mut self) {
-        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-/// The platform SQLite service, shaped like the D1 adapter (see the module
-/// docs), recording every round trip it is asked for.
-struct D1Shaped {
-    inner: SQLiteDatabaseService,
-    cache: SchemaCache,
-    ledger: Arc<Ledger>,
-}
-
-impl D1Shaped {
-    /// Start a round trip of `statements` statements. A round trip that starts
-    /// while none is in flight opens a new wave: the request had to wait for
-    /// everything before it. One that starts while another is in flight joins
-    /// that wave, as two D1 calls sent together do.
-    ///
-    /// The `yield_now` hands control back once before the statement runs, so
-    /// a caller that sends two primitives together (`futures::join!`) has
-    /// started both before either finishes, as it would on Workers, whatever
-    /// the local SQLite worker's timing.
-    async fn begin(&self, statements: usize, sql: String) -> InFlight<'_> {
-        let ledger = &*self.ledger;
-        let wave = if ledger.in_flight.fetch_add(1, Ordering::SeqCst) == 0 {
-            ledger.waves.fetch_add(1, Ordering::SeqCst) + 1
-        } else {
-            ledger.waves.load(Ordering::SeqCst)
-        };
-        ledger
-            .trips
-            .lock()
-            .expect("ledger poisoned")
-            .push(RoundTrip {
-                wave,
-                statements,
-                sql,
-            });
-        let guard = InFlight(ledger);
-        tokio::task::yield_now().await;
-        guard
-    }
-}
-
-#[wafer_block::wafer_async_trait]
-impl DbExec for D1Shaped {
-    const BACKEND: Backend = Backend::Sqlite;
-
-    fn schema_cache(&self) -> Option<&SchemaCache> {
-        Some(&self.cache)
-    }
-
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Unbounded)
-    }
-
-    async fn run_fetch(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-        json: &JsonColumns,
-    ) -> Result<Vec<Record>, DatabaseError> {
-        let _trip = self.begin(1, sql.to_string()).await;
-        self.inner.run_fetch(sql, params, json).await
-    }
-
-    async fn run_fetch_one(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-        json: &JsonColumns,
-    ) -> Result<Record, DatabaseError> {
-        let _trip = self.begin(1, sql.to_string()).await;
-        self.inner.run_fetch_one(sql, params, json).await
-    }
-
-    async fn run_execute(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-    ) -> Result<i64, DatabaseError> {
-        let _trip = self.begin(1, sql.to_string()).await;
-        self.inner.run_execute(sql, params).await
-    }
-
-    async fn run_execute_returning(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-        json: &JsonColumns,
-    ) -> Result<Vec<Record>, DatabaseError> {
-        let _trip = self.begin(1, sql.to_string()).await;
-        self.inner.run_execute_returning(sql, params, json).await
-    }
-
-    async fn run_scalar_i64(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-    ) -> Result<i64, DatabaseError> {
-        let _trip = self.begin(1, sql.to_string()).await;
-        self.inner.run_scalar_i64(sql, params).await
-    }
-
-    async fn run_scalar_f64(
-        &self,
-        sql: &str,
-        params: &[serde_json::Value],
-    ) -> Result<f64, DatabaseError> {
-        let _trip = self.begin(1, sql.to_string()).await;
-        self.inner.run_scalar_f64(sql, params).await
-    }
-
-    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        let _trip = self.begin(1, format!("<table exists: {table}>")).await;
-        self.inner.dbx_table_exists(table).await
-    }
-
-    /// One round trip for every statement, all-or-nothing as D1's
-    /// `db.batch()` is (the SQLite service's own transaction), and failing
-    /// as a batch fails: one error for the whole call, its classified code
-    /// and message kept and no statement named, because D1's rejection names
-    /// none. SQLite knows which statement failed; D1 does not, so neither
-    /// does this.
-    async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, TransactionError> {
-        let sql = ops
-            .iter()
-            .map(|op| match op {
-                TxOp::Execute { sql, .. } | TxOp::Returning { sql, .. } => *sql,
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        let _trip = self.begin(ops.len(), sql).await;
-        self.inner
-            .run_transaction(ops)
-            .await
-            .map_err(|failed| TransactionError::whole(failed.error))
-    }
-
-    async fn run_batch(&self, ops: &[BatchOp<'_>]) -> Result<Vec<BatchResult>, DatabaseError> {
-        let sql = ops
-            .iter()
-            .map(|op| match op {
-                BatchOp::Rows { sql, .. }
-                | BatchOp::FetchOne { sql, .. }
-                | BatchOp::Execute { sql, .. }
-                | BatchOp::ScalarI64 { sql, .. }
-                | BatchOp::ScalarF64 { sql, .. } => *sql,
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        let _trip = self.begin(ops.len(), sql).await;
-        self.inner.run_batch(ops).await
-    }
-}
-
-wafer_core::forward_database_service! {
-    impl DatabaseService for D1Shaped {
-        forward_to DbExec;
-
-        ops {
-            get: forward,
-            list: forward,
-            create: forward,
-            create_many: forward,
-            update: forward,
-            delete: forward,
-            count: forward,
-            sum: forward,
-            query_raw: forward,
-            exec_raw: forward,
-            exec_raw_transaction: forward,
-            delete_where: forward,
-            delete_where_count: forward,
-            take_where: forward,
-            update_where: forward,
-            update_where_count: forward,
-            increment_field_where: forward,
-            upsert: forward,
-            aggregate: forward,
-            batch: forward,
-            insert_guarded: forward,
-            update_guarded: forward,
-            // Schema mutation is boot's business, before anything is counted.
-            // Each drops this decorator's cached facts, as the SQLite
-            // service's own implementations drop its.
-            ensure_schema_table: custom,
-            ensure_schema_tables: inherit,
-            schema_table_exists: forward,
-            schema_columns: forward,
-            schema_drop_table: custom,
-            schema_add_column: custom,
-            statement_budget: forward,
-        }
-
-        async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-            self.cache.clear();
-            DatabaseService::ensure_schema_table(&self.inner, table).await
-        }
-
-        async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-            self.cache.clear();
-            DatabaseService::schema_drop_table(&self.inner, name).await
-        }
-
-        async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-            self.cache.clear();
-            DatabaseService::schema_add_column(&self.inner, table, column).await
-        }
-    }
-}
 
 fn infra_for(db_path: &Path, storage_root: &Path) -> InfraConfig {
     InfraConfig {
@@ -338,11 +77,8 @@ async fn start() -> Site {
     let infra = infra_for(&db_path, &storage_root);
 
     let ledger = Arc::new(Ledger::default());
-    let database: Arc<dyn DatabaseService> = Arc::new(D1Shaped {
-        inner: SQLiteDatabaseService::open(&infra.db_path).expect("open sqlite"),
-        cache: SchemaCache::new(),
-        ledger: Arc::clone(&ledger),
-    });
+    let database: Arc<dyn DatabaseService> =
+        Arc::new(D1Shaped::open(&db_path, Arc::clone(&ledger)));
     let app_env = HashMap::from([
         (
             BOOTSTRAP_ADMIN_EMAIL_KEY.to_string(),
@@ -422,13 +158,13 @@ impl Cost {
     }
 
     fn statements(trips: &[RoundTrip]) -> usize {
-        trips.iter().map(|t| t.statements).sum()
+        trips.iter().map(|t| t.statements()).sum()
     }
 
     fn describe(trips: &[RoundTrip]) -> String {
         trips
             .iter()
-            .map(|t| format!("  wave {} [{}] {}", t.wave, t.statements, t.sql))
+            .map(|t| format!("  wave {} [{}] {}", t.wave, t.statements(), t.sql()))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -554,7 +290,7 @@ async fn a_warm_sign_in_waits_on_four_round_trips() {
     );
     // A lookup is its `SELECT … LIMIT 1` alone: no total nothing reads.
     assert!(
-        !warm.response.iter().any(|t| t.sql.contains("COUNT(*)")),
+        !warm.response.iter().any(|t| t.sql().contains("COUNT(*)")),
         "a sign-in reads no totals\n{trace}"
     );
     // The first sign-in's creates cached every id source this one needs, the
@@ -564,7 +300,7 @@ async fn a_warm_sign_in_waits_on_four_round_trips() {
             .response
             .iter()
             .chain(&warm.after)
-            .any(|t| t.sql.contains("id_policy")),
+            .any(|t| t.sql().contains("id_policy")),
         "a warm sign-in probes no table's id source\n{trace}"
     );
 
@@ -575,7 +311,7 @@ async fn a_warm_sign_in_waits_on_four_round_trips() {
     let wave_of = |needle: &str| {
         warm.response
             .iter()
-            .find(|t| t.sql.contains(needle))
+            .find(|t| t.sql().contains(needle))
             .map(|t| t.wave)
             .unwrap_or_else(|| panic!("no {needle} read on the response path\n{trace}"))
     };
@@ -590,7 +326,7 @@ async fn a_warm_sign_in_waits_on_four_round_trips() {
     let wave_of_insert = |table: &str| {
         warm.response
             .iter()
-            .find(|t| t.sql.contains(&format!("INSERT INTO \"{table}\"")))
+            .find(|t| t.sql().contains(&format!("INSERT INTO \"{table}\"")))
             .map(|t| t.wave)
             .unwrap_or_else(|| panic!("no insert into {table} on the response path\n{trace}"))
     };
@@ -629,11 +365,11 @@ async fn the_bookkeeping_a_sign_in_defers_still_runs() {
         ),
     ] {
         assert!(
-            warm.after.iter().any(|t| t.sql.contains(needle)),
+            warm.after.iter().any(|t| t.sql().contains(needle)),
             "{what} must run after the response:\n{trace}"
         );
         assert!(
-            !warm.response.iter().any(|t| t.sql.contains(needle)),
+            !warm.response.iter().any(|t| t.sql().contains(needle)),
             "{what} must not delay the response:\n{}",
             Cost::describe(&warm.response)
         );
@@ -694,7 +430,7 @@ async fn an_access_token_is_checked_in_one_round_trip() {
     let reads_of = |trips: &[RoundTrip], table: &str| {
         trips
             .iter()
-            .filter(|t| t.sql.contains(&format!("FROM \"{table}\"")))
+            .filter(|t| t.sql().contains(&format!("FROM \"{table}\"")))
             .map(|t| t.wave)
             .collect::<Vec<_>>()
     };
@@ -702,7 +438,7 @@ async fn an_access_token_is_checked_in_one_round_trip() {
         trips
             .iter()
             .filter(|t| t.wave == wave)
-            .map(|t| t.sql.clone())
+            .map(|t| t.sql())
             .collect::<Vec<_>>()
     };
 
@@ -771,89 +507,4 @@ async fn an_access_token_is_checked_in_one_round_trip() {
         3,
         "D1 statements before the response\n{trace}"
     );
-}
-
-/// **[`D1Shaped`] runs a raw transaction as D1 runs a `db.batch()`**, so a
-/// migration file applied through it costs and fails as it would on D1: one
-/// round trip for every statement, all-or-nothing with the DDL in it, and a
-/// failure that keeps its classified code and message but names no
-/// statement, because D1's rejection names none (D1-BATCH-MEASUREMENT.md).
-#[tokio::test]
-async fn a_raw_transaction_is_one_round_trip_that_fails_whole() {
-    use wafer_core::interfaces::database::service::RawStatement;
-
-    let raw = |query: &str| RawStatement {
-        query: query.to_string(),
-        args: vec![],
-    };
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let ledger = Arc::new(Ledger::default());
-    let db = D1Shaped {
-        inner: SQLiteDatabaseService::open(
-            tmp.path()
-                .join("batch.sqlite3")
-                .to_str()
-                .expect("utf-8 path"),
-        )
-        .expect("open sqlite"),
-        cache: SchemaCache::new(),
-        ledger: Arc::clone(&ledger),
-    };
-
-    let err = DatabaseService::exec_raw_transaction(
-        &db,
-        &[
-            raw("CREATE TABLE d1_tx_a (id TEXT PRIMARY KEY)"),
-            raw("CREATE TABLE d1_tx_b (x TEXT)"),
-            raw("INSERT INTO d1_tx_a (id) VALUES ('k')"),
-            raw("INSERT INTO d1_tx_a (id) VALUES ('k')"),
-        ],
-    )
-    .await
-    .expect_err("a taken key refuses the batch");
-    let trips = ledger.take();
-    assert_eq!(
-        trips.iter().map(|trip| trip.statements).collect::<Vec<_>>(),
-        [4],
-        "one round trip carrying every statement: {trips:?}"
-    );
-    assert_eq!(err.statement, None, "a D1 batch names no statement: {err}");
-    match &err.error {
-        DatabaseError::AlreadyExists(message) => {
-            assert!(message.contains("d1_tx_a"), "D1's own message: {message}");
-        }
-        other => panic!("a taken key is AlreadyExists, not {other:?}"),
-    }
-    for table in ["d1_tx_a", "d1_tx_b"] {
-        assert!(
-            !DatabaseService::schema_table_exists(&db, table)
-                .await
-                .expect("table lookup"),
-            "{table} survived the refused batch"
-        );
-    }
-
-    ledger.take();
-    let counts = DatabaseService::exec_raw_transaction(
-        &db,
-        &[
-            raw("CREATE TABLE d1_tx_a (id TEXT PRIMARY KEY)"),
-            raw("INSERT INTO d1_tx_a (id) VALUES ('k')"),
-        ],
-    )
-    .await
-    .expect("the batch commits");
-    assert_eq!(counts.len(), 2);
-    assert_eq!(
-        ledger
-            .take()
-            .iter()
-            .map(|trip| trip.statements)
-            .collect::<Vec<_>>(),
-        [2],
-        "one round trip"
-    );
-    assert!(DatabaseService::schema_table_exists(&db, "d1_tx_a")
-        .await
-        .expect("table lookup"));
 }
