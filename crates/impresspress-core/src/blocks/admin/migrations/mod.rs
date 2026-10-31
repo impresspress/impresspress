@@ -277,9 +277,11 @@ const SQL_009_POSTGRES: &str = include_str!("009_block_settings_clear_blessed_ha
 // `+00:00` form, whole seconds, as legalpages' `003_default_documents` stamps
 // its rows.
 //
-// Who reads the rows: the IAM page's role catalog, role CRUD, and the dev
-// snapshot import, which upserts roles by `name`. Sign-in roles come from
-// `user_roles`, so no request path depends on them. Admin's list runs before
+// Who reads the rows: the IAM page's role catalog, role CRUD, the IAM
+// assign route (`iam::handle_assign_role` refuses a grant naming a role with
+// no row, so granting `admin` needs the `admin` row), and the dev snapshot
+// import, which upserts roles by `name`. Sign-in and token minting read only
+// `user_roles`, so no sign-in depends on them. Admin's list runs before
 // every other block's on every target, so the roles exist before auth
 // bootstraps the first admin.
 //

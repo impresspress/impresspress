@@ -40,10 +40,12 @@ count was).
 emptying the table made the next boot (on Cloudflare, the next cold isolate)
 seed both roles again. Once 010 has run, nothing does. The system roles
 cannot be deleted from the IAM page, so only a delete through the SQL
-explorer reaches this. The two roles are now also written together, in one
-transaction: `Init` created them one at a time, and a failure between the
-two left one role that no later boot completed, because the table was no
-longer empty.
+explorer reaches this. With the table empty, the IAM page cannot grant a
+role; to recover, create `admin` and `user` again from the IAM page (they
+come back as ordinary roles, which can be renamed and deleted). The two
+roles are now also written together, in one transaction: `Init` created them
+one at a time, and a failure between the two left one role that no later
+boot completed, because the table was no longer empty.
 
 **Deploying it.** One file runs, in one transaction with its record, on
 every target; on Cloudflare it is one D1 batch of two statements in

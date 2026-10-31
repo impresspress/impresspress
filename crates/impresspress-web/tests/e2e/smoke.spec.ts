@@ -301,10 +301,12 @@ const MARKER_INDEX = 'impresspress__admin__request_logs_created_at_idx';
 // Admin's last file, which the test makes pending again by deleting its
 // ledger row. It must be the last: a recorded file after a pending one is a
 // gap, which the runner refuses. What it does is visible: it seeds the two
-// system roles into an empty roles table, so a table emptied before it runs
-// holds them after.
+// system roles into an empty roles table under ids only it writes
+// (`seed-admin`, `seed-user`), so a table emptied before it runs holds them
+// after.
 const ADMIN_LAST = '010_default_roles';
 const ROLES = 'impresspress__admin__roles';
+const SEEDED_ROLE_IDS = ['seed-admin', 'seed-user'];
 const LEDGER = 'impresspress__admin__applied_migrations';
 
 /** Worker-console lines the test reads: runtime starts, and SQLite's
@@ -341,7 +343,7 @@ async function bootAgain(page: Page, seen: { starts: number }) {
 /** Run `statements` against the OPFS database, in the page, while no worker
  * is running; answer admin's recorded migration hash, whether the marker
  * index exists, how many of admin's files the ledger records, and how many
- * roles the roles table holds. */
+ * the ids of the roles the roles table holds, sorted. */
 async function onStoredDatabase(page: Page, statements: string[]) {
   await page.addScriptTag({ content: SQL_JS_SOURCE });
   return page.evaluate(
@@ -365,9 +367,11 @@ async function onStoredDatabase(page: Page, statements: string[]) {
       const index = db.exec("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", [marker]);
       const recorded = db.exec(`SELECT count(*) FROM ${ledger} WHERE block_name = ?`, [admin])[0]
         ?.values[0]?.[0] as number;
-      const roleCount = db.exec(`SELECT count(*) FROM ${roles}`)[0]?.values[0]?.[0] as number;
+      const roleIds = (db.exec(`SELECT id FROM ${roles} ORDER BY id`)[0]?.values ?? []).map(
+        (row: unknown[]) => row[0] as string,
+      );
       db.close();
-      return { hash, markerIndex: index.length > 0, recorded, roles: roleCount };
+      return { hash, markerIndex: index.length > 0, recorded, roles: roleIds };
     },
     {
       wasm: SQL_WASM_BASE64,
@@ -420,14 +424,14 @@ test('a pending migration applies once, alone, and a restart runs nothing', asyn
     `DROP INDEX ${MARKER_INDEX}`,
   ]);
   expect(rewound).toMatchObject({ hash: 'older-bundle', markerIndex: false, recorded: booted.recorded - 1 });
-  expect(booted.roles).toBe(2);
-  expect(rewound.roles).toBe(0);
+  expect(booted.roles).toEqual(SEEDED_ROLE_IDS);
+  expect(rewound.roles).toEqual([]);
 
   // Boot 2: the pending file applies, alone, and is recorded.
   await bootAgain(page, seen);
   await stopWorkers(page);
   const upgraded = await onStoredDatabase(page, []);
-  expect(upgraded.roles, "admin's pending migration was not applied").toBe(2);
+  expect(upgraded.roles, "admin's pending migration was not applied").toEqual(SEEDED_ROLE_IDS);
   expect(upgraded.recorded).toBe(booted.recorded);
   expect(upgraded.hash).toBe(booted.hash);
   expect(upgraded.markerIndex, 'a recorded migration ran again').toBe(false);
