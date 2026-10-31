@@ -19,6 +19,39 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: each invocation can log the D1 rows it read and wrote
+
+**What changes.** The Worker now adds up, per invocation, the rows D1 reports
+each query read and wrote (`meta.rows_read` and `meta.rows_written`, the
+figures D1 bills by). When the invocation's D1 work is over, it logs one
+line if it built a runtime, or if it read more rows than
+`IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD` (default 1000):
+
+```
+metric=d1_cost build=prepared statements=7 rows_read=44 rows_written=1 unmetered=0
+```
+
+- `build` is `prepared`, `dynamic` or `none`;
+- `statements` counts every D1 query the invocation sent, the
+  post-response work included (the request's audit row, deferred tasks,
+  a streamed body's final writes);
+- `unmetered` counts the queries whose rows D1 did not report: a failed
+  query, and the admin SQL explorer's query, which D1 answers without
+  row counts. A line whose `unmetered` is not 0 reports a floor.
+
+Read the lines with `wrangler tail <worker> --format json` and filter on
+`d1_cost`.
+
+**Also changes.** Every D1 read except the SQL explorer's now goes through
+D1's `all()`, the call whose answer carries the row counts, instead of
+`raw()` or `first()`. The rows a read returns are the same.
+
+**What to do.** Nothing. To log more invocations, set
+`IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD` as a Worker var (`0` logs every
+invocation that read a row). A value that is not a whole number is reported
+on every invocation as `metric=d1_rows_log_threshold_invalid`, and the
+default applies.
+
 ### Admin: the system roles come from a migration (admin 010)
 
 **What changes.** Admin's new migration `010_default_roles` seeds the two

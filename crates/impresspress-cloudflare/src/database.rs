@@ -211,8 +211,9 @@ pub(crate) fn forget_isolate_schema() {
 }
 
 /// The D1 statements one Worker invocation has sent, shared by every
-/// [`D1DatabaseService`] built in that invocation (see the module docs), and
-/// the statements of the invocation's limit reserved for its audit row.
+/// [`D1DatabaseService`] built in that invocation (see the module docs), the
+/// statements of the invocation's limit reserved for its audit row, and what
+/// D1 reported those statements cost.
 ///
 /// Create one at the Worker entry, once per `fetch` or `scheduled`
 /// invocation, and hand a clone to each service built while serving it: the
@@ -228,17 +229,123 @@ pub(crate) fn forget_isolate_schema() {
 /// audit row is written with, which may use them; and
 /// [`release_reservation`](Self::release_reservation) hands whatever the row
 /// did not use back to everything else once it is written or skipped.
+///
+/// ## Rows read and written
+///
+/// Every statement whose D1 result carries a `meta` adds that meta's
+/// `rows_read` and `rows_written` — the figures D1 bills, and the ones its
+/// analytics sum per database — to the invocation's [`D1Cost`]. A batch
+/// answers one result per statement, and each is added. A statement whose
+/// result reports no meta is still counted as sent, and the gap between the
+/// two is [`D1Cost::unmetered`]: a failed statement, and the admin SQL
+/// explorer's `query_raw`, which reads through `raw()` (see
+/// [`DbExec::query_raw`] on [`D1DatabaseService`]), whose answer has no meta.
+///
+/// A count made by [`reporting_at_end`](Self::reporting_at_end) hands its
+/// [`D1Cost`] to a report once, when its last handle is dropped. That is the
+/// end of the invocation's D1 work, which is later than its response: the
+/// audit row, the deferred tasks and a streamed body's final writes run in
+/// `ctx.wait_until` on clones of the same count.
 #[derive(Clone, Default)]
 pub struct D1QueryCount {
-    sent: Rc<Cell<u64>>,
-    reserved: Rc<Cell<u64>>,
+    tally: Rc<InvocationTally>,
     spends_reservation: bool,
 }
 
+/// Which request-path runtime build ran in an invocation: the two lifecycles
+/// `runtime_cache` builds by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildKind {
+    /// A runtime hydrated from the packaged prepared plan.
+    Prepared,
+    /// A runtime built from D1's settings and grants.
+    Dynamic,
+}
+
+impl BuildKind {
+    /// The word the `d1_cost` line and `runtime_cache`'s `kind` log field
+    /// name the lifecycle by.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Dynamic => "dynamic",
+        }
+    }
+}
+
+/// What one invocation's D1 statements cost, as D1 reported it (see
+/// [`D1QueryCount`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct D1Cost {
+    /// Statements sent, through every handle.
+    pub statements: u64,
+    /// Of those, the statements whose result reported its meta.
+    pub metered: u64,
+    /// The sum of `meta.rows_read` over every metered statement.
+    pub rows_read: u64,
+    /// The sum of `meta.rows_written` over every metered statement.
+    pub rows_written: u64,
+    /// The runtime build this invocation ran, if it ran one.
+    pub built: Option<BuildKind>,
+}
+
+impl D1Cost {
+    /// Statements sent whose rows D1 did not report.
+    pub fn unmetered(&self) -> u64 {
+        self.statements.saturating_sub(self.metered)
+    }
+}
+
+/// The report a [`D1QueryCount::reporting_at_end`] count hands its cost to.
+type CostReport = Box<dyn FnOnce(D1Cost)>;
+
+/// The state every handle of one invocation's [`D1QueryCount`] shares.
+#[derive(Default)]
+struct InvocationTally {
+    sent: Cell<u64>,
+    reserved: Cell<u64>,
+    metered: Cell<u64>,
+    rows_read: Cell<u64>,
+    rows_written: Cell<u64>,
+    built: Cell<Option<BuildKind>>,
+    report: Cell<Option<CostReport>>,
+}
+
+impl InvocationTally {
+    fn cost(&self) -> D1Cost {
+        D1Cost {
+            statements: self.sent.get(),
+            metered: self.metered.get(),
+            rows_read: self.rows_read.get(),
+            rows_written: self.rows_written.get(),
+            built: self.built.get(),
+        }
+    }
+}
+
+/// The last handle is gone, so no statement can be sent or metered on this
+/// count again: the invocation's D1 work is over.
+impl Drop for InvocationTally {
+    fn drop(&mut self) {
+        if let Some(report) = self.report.take() {
+            report(self.cost());
+        }
+    }
+}
+
 impl D1QueryCount {
-    /// A fresh count for a new invocation, reserving nothing.
+    /// A fresh count for a new invocation, reserving nothing and reporting
+    /// nothing.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A fresh count for a new invocation that hands its [`D1Cost`] to
+    /// `report` when its last handle is dropped (see the type docs).
+    pub fn reporting_at_end(report: impl FnOnce(D1Cost) + 'static) -> Self {
+        let count = Self::default();
+        count.tally.report.set(Some(Box::new(report)));
+        count
     }
 
     /// Hold `statements` of the invocation's limit back from every service
@@ -247,13 +354,13 @@ impl D1QueryCount {
     ///
     /// [`for_reserved_work`]: Self::for_reserved_work
     pub fn reserve(&self, statements: u64) {
-        self.reserved.set(statements);
+        self.tally.reserved.set(statements);
     }
 
     /// Give the reservation back: every service built from this count may
     /// use the invocation's whole limit again, less what has been sent.
     pub fn release_reservation(&self) {
-        self.reserved.set(0);
+        self.tally.reserved.set(0);
     }
 
     /// This invocation's count, for the work the reservation is for: services
@@ -267,14 +374,27 @@ impl D1QueryCount {
 
     /// Statements sent in this invocation so far, through every handle.
     pub fn sent(&self) -> u64 {
-        self.sent.get()
+        self.tally.sent.get()
+    }
+
+    /// What this invocation's statements have cost so far, through every
+    /// handle.
+    pub fn cost(&self) -> D1Cost {
+        self.tally.cost()
+    }
+
+    /// Record that this invocation ran a `kind` runtime build. Called by
+    /// `runtime_cache` as the build starts, so a build that fails still names
+    /// the rows it read.
+    pub fn note_build(&self, kind: BuildKind) {
+        self.tally.built.set(Some(kind));
     }
 
     /// The statements currently reserved, for a test that checks when the
     /// reservation is released.
     #[cfg(test)]
     pub(crate) fn reserved_for_test(&self) -> u64 {
-        self.reserved.get()
+        self.tally.reserved.get()
     }
 
     /// The statements a service built from this handle must leave unused.
@@ -282,13 +402,39 @@ impl D1QueryCount {
         if self.spends_reservation {
             0
         } else {
-            self.reserved.get()
+            self.tally.reserved.get()
         }
     }
 
     fn add(&self, statements: usize) {
         let statements = u64::try_from(statements).unwrap_or(u64::MAX);
-        self.sent.set(self.sent.get().saturating_add(statements));
+        let tally = &self.tally;
+        tally.sent.set(tally.sent.get().saturating_add(statements));
+    }
+
+    /// Add one statement's result to the invocation's cost: its rows read and
+    /// written when D1 reported its meta, nothing when it did not.
+    fn meter(&self, result: &D1Result) {
+        // A meta that does not decode is a meta not reported: the statement
+        // stays unmetered rather than failing a read that succeeded.
+        let Some(meta) = result.meta().ok().flatten() else {
+            return;
+        };
+        if meta.rows_read.is_none() && meta.rows_written.is_none() {
+            return;
+        }
+        let rows = |n: Option<usize>| u64::try_from(n.unwrap_or(0)).unwrap_or(u64::MAX);
+        let tally = &self.tally;
+        tally.metered.set(tally.metered.get().saturating_add(1));
+        tally
+            .rows_read
+            .set(tally.rows_read.get().saturating_add(rows(meta.rows_read)));
+        tally.rows_written.set(
+            tally
+                .rows_written
+                .get()
+                .saturating_add(rows(meta.rows_written)),
+        );
     }
 }
 
@@ -347,6 +493,44 @@ impl D1DatabaseService {
     ) -> Result<D1PreparedStatement, DatabaseError> {
         let js_params: Vec<JsValue> = params.iter().map(json_value_to_js).collect();
         self.db.prepare(sql).bind(&js_params).map_err(db_err)
+    }
+
+    /// Run a lone statement through `all()` and add its meta to the
+    /// invocation's cost. `all()` rather than `first()`: `first()` answers the
+    /// first row alone and drops the meta, and it is `all()`'s first row.
+    async fn all_metered(&self, stmt: &D1PreparedStatement) -> Result<D1Result, DatabaseError> {
+        let result = stmt.all().await.map_err(db_err)?;
+        self.queries.meter(&result);
+        Ok(result)
+    }
+
+    /// The rows of a lone statement, each as D1 answered it (see
+    /// [`DbExec::run_fetch`] for why `all()`'s row objects are the result's
+    /// columns in order).
+    async fn fetch_rows_metered(
+        &self,
+        stmt: &D1PreparedStatement,
+    ) -> Result<Vec<RecordData>, DatabaseError> {
+        self.all_metered(stmt).await?.results().map_err(db_err)
+    }
+
+    /// The first row of a lone statement's answer, as the scalar decoders
+    /// read it.
+    async fn first_row_metered(
+        &self,
+        stmt: &D1PreparedStatement,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        let rows: Vec<serde_json::Value> =
+            self.all_metered(stmt).await?.results().map_err(db_err)?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Add every result of a `db.batch()` to the invocation's cost: D1 answers
+    /// one meta per statement.
+    fn meter_batch(&self, results: &[D1Result]) {
+        for result in results {
+            self.queries.meter(result);
+        }
     }
 }
 
@@ -422,6 +606,21 @@ impl DbExec for D1DatabaseService {
         })
     }
 
+    /// Read through `all()`, whose answer carries the statement's meta — the
+    /// rows it read and wrote (see [`D1QueryCount`]). `raw()` answers the
+    /// rows alone, so a read through it costs rows nobody can see.
+    ///
+    /// `all()` answers each row as a JS object, built from D1's column list in
+    /// order, and a JS object keeps that order for every name that is not an
+    /// array index (`"1"`), which it enumerates first. Every statement that
+    /// reaches this is one the shared `wafer-sql-utils` builders generate —
+    /// the `DbExec` defaults, and the batched reads, which have always decoded
+    /// row objects (see [`fetch_rows`]) — whose result columns are a table's
+    /// own columns or the builders' aliases: SQL identifiers, never an array
+    /// index. A duplicate name keeps its first position and its last value,
+    /// as [`rows_from_positional`] pairs one. The one read whose columns are
+    /// a person's choice, the admin SQL explorer's, does not come here: see
+    /// [`query_raw`](DbExec::query_raw).
     async fn run_fetch(
         &self,
         sql: &str,
@@ -430,7 +629,8 @@ impl DbExec for D1DatabaseService {
     ) -> Result<Vec<Record>, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
         self.send(1)?;
-        Ok(fetch_rows(&stmt)
+        Ok(self
+            .fetch_rows_metered(&stmt)
             .await?
             .into_iter()
             .map(|row| record_from_columns(row, json))
@@ -449,7 +649,7 @@ impl DbExec for D1DatabaseService {
         // classified like every other failure and coming back `Internal`, as
         // it does on native SQLite and PostgreSQL. `NotFound` is only a query
         // that ran and matched no row.
-        fetch_rows(&stmt)
+        self.fetch_rows_metered(&stmt)
             .await?
             .into_iter()
             .next()
@@ -465,6 +665,7 @@ impl DbExec for D1DatabaseService {
         let stmt = self.prepare_bind(sql, params)?;
         self.send(1)?;
         let result = stmt.run().await.map_err(db_err)?;
+        self.queries.meter(&result);
         changes(&result)
     }
 
@@ -502,11 +703,7 @@ impl DbExec for D1DatabaseService {
     ) -> Result<i64, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
         self.send(1)?;
-        let row = stmt
-            .first::<serde_json::Value>(None)
-            .await
-            .map_err(db_err)?;
-        Ok(scalar_i64(row))
+        Ok(scalar_i64(self.first_row_metered(&stmt).await?))
     }
 
     async fn run_scalar_f64(
@@ -516,11 +713,30 @@ impl DbExec for D1DatabaseService {
     ) -> Result<f64, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
         self.send(1)?;
-        let row = stmt
-            .first::<serde_json::Value>(None)
-            .await
-            .map_err(db_err)?;
-        Ok(scalar_f64(row))
+        Ok(scalar_f64(self.first_row_metered(&stmt).await?))
+    }
+
+    /// The admin SQL explorer's read (`blocks::admin` hands it the SQL a
+    /// person typed): read through `raw({ columnNames: true })` and paired by
+    /// position, so `SELECT name, 1, id` keeps its columns in the order it
+    /// asked for them, where `all()`'s row objects would enumerate `1` first.
+    ///
+    /// `raw()` answers no meta, so this is the one read whose rows are not
+    /// metered: it is counted as sent, and it is the
+    /// [`D1Cost::unmetered`] statement in its invocation's `d1_cost` line.
+    /// Every other read goes through [`run_fetch`](DbExec::run_fetch).
+    async fn query_raw(
+        &self,
+        query: &str,
+        args: &[serde_json::Value],
+    ) -> Result<Vec<Record>, DatabaseError> {
+        let stmt = self.prepare_bind(query, args)?;
+        self.send(1)?;
+        Ok(fetch_rows(&stmt)
+            .await?
+            .into_iter()
+            .map(|row| record_from_columns(row, JsonColumns::NONE))
+            .collect())
     }
 
     /// Counted by the `run_scalar_i64` it sends through, not here.
@@ -587,6 +803,7 @@ impl DbExec for D1DatabaseService {
         }
         self.send(statements.len())?;
         let results = self.db.batch(statements).await.map_err(db_err)?;
+        self.meter_batch(&results);
 
         // D1 returns exactly one result per submitted statement, in order. A
         // length mismatch would break positional decoding — surface it rather
@@ -686,6 +903,7 @@ impl D1DatabaseService {
         }
         self.send(statements.len())?;
         let results = self.db.batch(statements).await.map_err(db_err)?;
+        self.meter_batch(&results);
         if results.len() != ops.len() {
             return Err(DatabaseError::Internal(format!(
                 "D1 batch returned {} results for {} statements",
@@ -985,21 +1203,24 @@ extern "C" {
         -> Result<js_sys::Promise, JsValue>;
 }
 
-/// The rows of `stmt`, each in the order the statement returned its columns.
+/// The rows of `stmt`, each in the order the statement returned its columns:
+/// the admin SQL explorer's read ([`DbExec::query_raw`]).
 ///
 /// Read through `raw({ columnNames: true })`, which answers the column names
 /// as its first array and each row's values positionally after it, paired by
 /// [`rows_from_positional`]. Not `all()`: that answers each row as a JS
 /// object, and a JS object enumerates integer-like names (`SELECT name, 1`)
-/// before the others, so the result's column order would be lost.
+/// before the others, so the result's column order would be lost. `raw()`
+/// answers no meta, so these rows are not metered (see [`D1QueryCount`]).
 ///
-/// `db.batch()` has no such option — its results are row objects — so the
-/// batched reads ([`DbExec::run_batch`]'s `Rows`/`FetchOne`,
-/// [`DbExec::run_transaction`]'s `Returning`) keep object key order. They
-/// only ever run statements the shared `wafer-sql-utils` builders generate,
-/// whose result columns are a table's own columns or the builders' aliases —
-/// SQL identifiers, never integer-like — so for them that order is the
-/// result's.
+/// Every other read answers row objects and keeps their key order: the lone
+/// reads ([`DbExec::run_fetch`], [`DbExec::run_fetch_one`], the scalars),
+/// which need `all()`'s meta, and the batched reads
+/// ([`DbExec::run_batch`]'s `Rows`/`FetchOne`, [`DbExec::run_transaction`]'s
+/// `Returning`), since `db.batch()` has no raw option. They only ever run
+/// statements the shared `wafer-sql-utils` builders generate, whose result
+/// columns are a table's own columns or the builders' aliases — SQL
+/// identifiers, never integer-like — so for them that order is the result's.
 async fn fetch_rows(stmt: &D1PreparedStatement) -> Result<Vec<RecordData>, DatabaseError> {
     let options = js_sys::Object::new();
     js_sys::Reflect::set(&options, &JsValue::from_str("columnNames"), &JsValue::TRUE)
@@ -1221,13 +1442,13 @@ mod tests {
         wasm_bindgen::JsCast::unchecked_into::<D1Database>(JsValue::undefined())
     }
 
-    /// A D1 handle whose every row read (`raw()`) rejects with the error D1
+    /// A D1 handle whose every row read (`all()`) rejects with the error D1
     /// raises for a table that does not exist — its message as D1 spells it,
     /// with `cause` attached when `cause` is `Some`, since D1 sets one on some
     /// rejections and not on others — except the introspection reads
     /// (`pragma_table_info`), which answer no rows, as SQLite does for a
     /// missing table. The object is structural: the adapter calls `prepare`,
-    /// `bind` and `raw` on it by name, as on a real binding.
+    /// `bind` and `all` on it by name, as on a real binding.
     fn missing_table_handle(cause: Option<&str>) -> D1Database {
         let handle = js_sys::Function::new_with_args(
             "cause",
@@ -1235,12 +1456,13 @@ mod tests {
                 prepare(sql) {
                     const stmt = {
                         bind() { return stmt; },
-                        raw(options) {
-                            if (!options || options.columnNames !== true) {
-                                throw new Error('raw() must be asked for the column names');
-                            }
+                        all() {
                             if (sql.includes('pragma_table_info')) {
-                                return Promise.resolve([['name', 'decl_type']]);
+                                return Promise.resolve({
+                                    success: true,
+                                    results: [],
+                                    meta: { rows_read: 0, rows_written: 0 },
+                                });
                             }
                             const message =
                                 'D1_ERROR: no such table: impresspress__d1test__never_created: SQLITE_ERROR';
@@ -1440,22 +1662,81 @@ mod tests {
         },
     }
 
+    /// The meta a [`metered_d1`] double has answered, summed over every
+    /// result it handed back: what the adapter's [`D1Cost`] must add up to.
+    #[derive(Default)]
+    struct HandedMeta {
+        statements: Cell<u64>,
+        rows_read: Cell<u64>,
+        rows_written: Cell<u64>,
+    }
+
+    impl HandedMeta {
+        /// A `meta` object for `sql`, as D1 answers one, recorded here.
+        ///
+        /// The rows are a function of the statement's text, so no two shapes
+        /// in a test answer the same figures, and a sum that dropped or
+        /// doubled one result is a different number: a read reports
+        /// `3 + len % 11` rows read and none written, a write
+        /// `1 + len % 5` read and `1 + len % 3` written.
+        fn answer(&self, sql: &str) -> js_sys::Object {
+            let len = sql.len() as u64;
+            let writes = ["INSERT", "UPDATE", "DELETE"]
+                .iter()
+                .any(|verb| sql.trim_start().starts_with(verb));
+            let (read, written) = if writes {
+                (1 + len % 5, 1 + len % 3)
+            } else {
+                (3 + len % 11, 0)
+            };
+            self.statements.set(self.statements.get() + 1);
+            self.rows_read.set(self.rows_read.get() + read);
+            self.rows_written.set(self.rows_written.get() + written);
+            let meta = js_sys::Object::new();
+            for (key, value) in [
+                ("changes", JsValue::from(1)),
+                ("rows_read", JsValue::from(read as f64)),
+                ("rows_written", JsValue::from(written as f64)),
+            ] {
+                js_sys::Reflect::set(&meta, &JsValue::from_str(key), &value).expect("set meta");
+            }
+            meta
+        }
+
+        /// The cost these answers add up to, for the statements sent.
+        fn cost(&self, built: Option<BuildKind>, statements: u64) -> D1Cost {
+            D1Cost {
+                statements,
+                metered: self.statements.get(),
+                rows_read: self.rows_read.get(),
+                rows_written: self.rows_written.get(),
+                built,
+            }
+        }
+    }
+
+    /// A successful D1 result carrying `rows` and `meta`, as `all()`, `run()`
+    /// and each entry of `batch()` answer one.
+    fn d1_result(rows: &js_sys::Array, meta: &js_sys::Object) -> JsValue {
+        let result = js_sys::Object::new();
+        for (key, value) in [
+            ("success", JsValue::TRUE),
+            ("results", JsValue::from(rows)),
+            ("meta", JsValue::from(meta)),
+        ] {
+            js_sys::Reflect::set(&result, &JsValue::from_str(key), &value).expect("set result");
+        }
+        JsValue::from(result)
+    }
+
     impl BatchAnswer {
-        /// The promise a lone `run()` returns: one successful result with
-        /// `changes: 1`, or the rejection. A rejected `batch()` is the same
-        /// rejection.
-        fn settle_run(self) -> js_sys::Promise {
+        /// The promise a lone `run()` of `sql` returns: one successful result
+        /// with `changes: 1` and `handed`'s meta, or the rejection. A rejected
+        /// `batch()` is the same rejection.
+        fn settle_run(self, sql: &str, handed: &HandedMeta) -> js_sys::Promise {
             match self {
                 BatchAnswer::Succeed => {
-                    let result = js_sys::Object::new();
-                    js_sys::Reflect::set(&result, &JsValue::from_str("success"), &JsValue::TRUE)
-                        .expect("set success");
-                    let meta = js_sys::Object::new();
-                    js_sys::Reflect::set(&meta, &JsValue::from_str("changes"), &JsValue::from(1))
-                        .expect("set changes");
-                    js_sys::Reflect::set(&result, &JsValue::from_str("meta"), &meta)
-                        .expect("set meta");
-                    js_sys::Promise::resolve(&JsValue::from(result))
+                    js_sys::Promise::resolve(&d1_result(&js_sys::Array::new(), &handed.answer(sql)))
                 }
                 BatchAnswer::Reject { message, cause } => {
                     let error = js_sys::Error::new(message);
@@ -1481,18 +1762,43 @@ mod tests {
         batching_d1_with_columns(answer, batches, &[])
     }
 
-    /// [`batching_d1`] whose lone-statement `raw()` — the executor's column
-    /// list, `SELECT name, type AS decl_type FROM pragma_table_info(?1)` —
-    /// answers `columns`, each declared `TEXT`, as a migrated table would.
+    /// [`batching_d1`] whose lone-statement reads answer `columns` (see
+    /// [`metered_d1`]).
     fn batching_d1_with_columns(
         answer: BatchAnswer,
         batches: Rc<std::cell::RefCell<Vec<Vec<String>>>>,
         columns: &'static [&'static str],
     ) -> D1Database {
+        metered_d1(answer, batches, columns, Rc::default())
+    }
+
+    /// [`batching_d1`] whose every successful result — a lone `all()` or
+    /// `run()`, each statement of a `batch()` — carries a `meta` with rows
+    /// read and written, as D1's does, summed into `handed`.
+    ///
+    /// A lone `all()` is the executor's one read of a table's columns and
+    /// their declared types (which hold JSON): it answers `columns`, each
+    /// declared `TEXT`, as a migrated table would, so every value is written
+    /// and read as it is. The one exception is the executor's probe of where
+    /// a created row's id comes from (`introspect::build_id_policy`, aliased
+    /// `id_policy`), which answers `0` — the executor mints the id — as for
+    /// every `TEXT` primary key impresspress declares.
+    ///
+    /// A lone `raw({ columnNames: true })`, which only the admin SQL
+    /// explorer's `query_raw` sends, answers the same columns positionally,
+    /// and no meta, as D1's `raw()` does.
+    fn metered_d1(
+        answer: BatchAnswer,
+        batches: Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+        columns: &'static [&'static str],
+        handed: Rc<HandedMeta>,
+    ) -> D1Database {
         use wasm_bindgen::{closure::Closure, JsCast};
 
         let db = js_sys::Object::new();
+        let lone = Rc::clone(&handed);
         let prepare = Closure::<dyn Fn(JsValue) -> JsValue>::new(move |sql: JsValue| {
+            let text = sql.as_string().expect("sql is text");
             let statement = js_sys::Object::new();
             js_sys::Reflect::set(&statement, &JsValue::from_str("sql"), &sql).expect("set sql");
             let this = statement.clone();
@@ -1504,10 +1810,7 @@ mod tests {
             )
             .expect("set bind");
             bind.forget();
-            // A lone statement's `raw({ columnNames: true })`: the executor's
-            // one read of a table's columns and their declared types (which
-            // hold JSON). It answers the column names, then `columns`, all
-            // `TEXT`, so every value is written and read as it is.
+
             let raw =
                 Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |options: JsValue| {
                     let asked_for_names =
@@ -1534,25 +1837,40 @@ mod tests {
             )
             .expect("set raw");
             raw.forget();
-            // A lone statement's `first()`: the executor's one probe of where
-            // a created row's id comes from (`introspect::build_id_policy`).
-            // It answers `0` — the executor mints the id — as for every `TEXT`
-            // primary key impresspress declares.
-            let first = Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |_col: JsValue| {
-                let row = js_sys::Object::new();
-                js_sys::Reflect::set(&row, &JsValue::from_str("id_policy"), &JsValue::from(0))
-                    .expect("set id_policy");
-                js_sys::Promise::resolve(&JsValue::from(row))
+
+            let (all_sql, all_handed) = (text.clone(), Rc::clone(&lone));
+            let all = Closure::<dyn Fn() -> js_sys::Promise>::new(move || {
+                let rows = js_sys::Array::new();
+                let set = |row: &js_sys::Object, key: &str, value: &JsValue| {
+                    js_sys::Reflect::set(row, &JsValue::from_str(key), value).expect("set row");
+                };
+                if all_sql.contains("id_policy") {
+                    let row = js_sys::Object::new();
+                    set(&row, "id_policy", &JsValue::from(0));
+                    rows.push(&row);
+                } else {
+                    for column in columns {
+                        let row = js_sys::Object::new();
+                        set(&row, "name", &JsValue::from_str(column));
+                        set(&row, "decl_type", &JsValue::from_str("TEXT"));
+                        rows.push(&row);
+                    }
+                }
+                js_sys::Promise::resolve(&d1_result(&rows, &all_handed.answer(&all_sql)))
             });
             js_sys::Reflect::set(
                 &statement,
-                &JsValue::from_str("first"),
-                first.as_ref().unchecked_ref(),
+                &JsValue::from_str("all"),
+                all.as_ref().unchecked_ref(),
             )
-            .expect("set first");
-            first.forget();
+            .expect("set all");
+            all.forget();
+
             // A lone statement's `run()`: a single-row write.
-            let run = Closure::<dyn Fn() -> js_sys::Promise>::new(move || answer.settle_run());
+            let run_handed = Rc::clone(&lone);
+            let run = Closure::<dyn Fn() -> js_sys::Promise>::new(move || {
+                answer.settle_run(&text, &run_handed)
+            });
             js_sys::Reflect::set(
                 &statement,
                 &JsValue::from_str("run"),
@@ -1586,20 +1904,6 @@ mod tests {
                     BatchAnswer::Succeed => {
                         let results = js_sys::Array::new();
                         for (n, sql) in sqls.iter().enumerate() {
-                            let result = js_sys::Object::new();
-                            let set = |key: &str, value: &JsValue| {
-                                js_sys::Reflect::set(&result, &JsValue::from_str(key), value)
-                                    .expect("set result field");
-                            };
-                            set("success", &JsValue::TRUE);
-                            let meta = js_sys::Object::new();
-                            js_sys::Reflect::set(
-                                &meta,
-                                &JsValue::from_str("changes"),
-                                &JsValue::from(1),
-                            )
-                            .expect("set changes");
-                            set("meta", &meta);
                             let rows = js_sys::Array::new();
                             if sql.contains("RETURNING") {
                                 let row = js_sys::Object::new();
@@ -1611,12 +1915,11 @@ mod tests {
                                 .expect("set id");
                                 rows.push(&row);
                             }
-                            set("results", &rows);
-                            results.push(&result);
+                            results.push(&d1_result(&rows, &handed.answer(sql)));
                         }
                         js_sys::Promise::resolve(&JsValue::from(results))
                     }
-                    BatchAnswer::Reject { .. } => answer.settle_run(),
+                    BatchAnswer::Reject { .. } => answer.settle_run("", &handed),
                 }
             },
         );
@@ -1933,7 +2236,7 @@ mod tests {
     #[wasm_bindgen_test]
     async fn each_primitive_counts_the_statements_it_sends() {
         forget_isolate_schema();
-        // One column, so a lone `raw()` answers a row and `run_fetch_one`
+        // One column, so a lone `all()` answers a row and `run_fetch_one`
         // finds it.
         let svc = service(
             batching_d1_with_columns(
@@ -2307,5 +2610,219 @@ mod tests {
         );
         assert_eq!(used(&request_a), 3, "request A counts only its own");
         assert_eq!(used(&request_b), 5, "request B counts only its own");
+    }
+
+    // ── Rows read and written ───────────────────────────────────────────────
+
+    /// A D1 service over `db` that counts into `queries`.
+    fn service_counting(db: D1Database, queries: &D1QueryCount) -> D1DatabaseService {
+        D1DatabaseService::new(db, "DB", queries.clone(), 1000)
+    }
+
+    /// **The rows come from D1's own meta, on every path that sends a
+    /// statement.** Every lone read, write and scalar, each statement of a
+    /// batch and of a transaction, and the reads the shared `DbExec` defaults
+    /// make on their way (the column list, the id policy, `list`'s count and
+    /// page): the invocation's cost is exactly the sum of the `meta` the
+    /// binding answered, one metered statement per result, and nothing is
+    /// left unmetered.
+    #[wasm_bindgen_test]
+    async fn every_statement_adds_the_rows_d1_reported_for_it() {
+        forget_isolate_schema();
+        let handed = Rc::new(HandedMeta::default());
+        let queries = D1QueryCount::new();
+        let svc = service_counting(
+            metered_d1(
+                BatchAnswer::Succeed,
+                Rc::new(std::cell::RefCell::new(Vec::new())),
+                &["path"],
+                Rc::clone(&handed),
+            ),
+            &queries,
+        );
+        let json = JsonColumns::NONE;
+
+        DbExec::run_fetch(&svc, "SELECT path FROM t", &[], json)
+            .await
+            .expect("fetch");
+        DbExec::run_fetch_one(&svc, "SELECT path FROM t LIMIT 1", &[], json)
+            .await
+            .expect("fetch one");
+        DbExec::run_execute(&svc, "UPDATE t SET path = 'p'", &[])
+            .await
+            .expect("execute");
+        DbExec::run_execute_returning(&svc, "DELETE FROM t RETURNING *", &[], json)
+            .await
+            .expect("execute returning");
+        DbExec::run_scalar_i64(&svc, "SELECT COUNT(*) AS n FROM t", &[])
+            .await
+            .expect("scalar i64");
+        DbExec::run_scalar_f64(&svc, "SELECT SUM(x) AS total FROM t", &[])
+            .await
+            .expect("scalar f64");
+        DbExec::dbx_table_exists(&svc, "t").await.expect("probe");
+        DbExec::run_batch(
+            &svc,
+            &[
+                BatchOp::Rows {
+                    sql: "SELECT path FROM t",
+                    params: &[],
+                    json,
+                },
+                BatchOp::Execute {
+                    sql: "UPDATE t SET path = 'q'",
+                    params: &[],
+                },
+            ],
+        )
+        .await
+        .expect("batch");
+        DbExec::run_transaction(
+            &svc,
+            &[
+                TxOp::Execute {
+                    sql: "INSERT INTO t (path) VALUES ('a')",
+                    params: &[],
+                },
+                TxOp::Returning {
+                    sql: "INSERT INTO t (path) VALUES ('b') RETURNING *",
+                    params: &[],
+                    json,
+                },
+            ],
+        )
+        .await
+        .expect("transaction");
+        DatabaseService::create_many(&svc, "t", rows(3))
+            .await
+            .expect("create_many");
+        DatabaseService::count(&svc, "t", &[]).await.expect("count");
+        DatabaseService::list(&svc, "t", &ListOptions::default())
+            .await
+            .expect("list");
+
+        let cost = queries.cost();
+        assert_eq!(
+            cost,
+            handed.cost(None, queries.sent()),
+            "the cost is the sum of the meta D1 answered"
+        );
+        assert_eq!(cost.unmetered(), 0, "every result carried its meta");
+        assert!(cost.statements > 15, "every path ran: {cost:?}");
+        assert!(cost.rows_read > 0 && cost.rows_written > 0, "{cost:?}");
+    }
+
+    /// The admin SQL explorer reads through `raw()`, which answers no meta:
+    /// its statement is counted as sent and stays unmetered, so its
+    /// invocation's line says its rows are a floor.
+    #[wasm_bindgen_test]
+    async fn a_raw_query_is_counted_but_unmetered() {
+        forget_isolate_schema();
+        let handed = Rc::new(HandedMeta::default());
+        let queries = D1QueryCount::new();
+        let svc = service_counting(
+            metered_d1(
+                BatchAnswer::Succeed,
+                Rc::new(std::cell::RefCell::new(Vec::new())),
+                &["path"],
+                Rc::clone(&handed),
+            ),
+            &queries,
+        );
+
+        let rows = DatabaseService::query_raw(&svc, "SELECT name, decl_type FROM x", &[])
+            .await
+            .expect("query");
+        assert_eq!(rows.len(), 1, "the raw answer's one row");
+
+        let cost = queries.cost();
+        assert_eq!(cost.statements, 1);
+        assert_eq!(cost.metered, 0);
+        assert_eq!(cost.unmetered(), 1);
+        assert_eq!((cost.rows_read, cost.rows_written), (0, 0));
+        assert_eq!(handed.statements.get(), 0, "no meta was answered");
+    }
+
+    /// A statement D1 refuses answers no meta: it is sent, and unmetered.
+    #[wasm_bindgen_test]
+    async fn a_refused_statement_is_sent_but_unmetered() {
+        forget_isolate_schema();
+        let queries = D1QueryCount::new();
+        let svc = service_counting(
+            batching_d1(
+                BatchAnswer::Reject {
+                    message: "D1_ERROR: NOT NULL constraint failed: t.path: SQLITE_CONSTRAINT",
+                    cause: None,
+                },
+                Rc::new(std::cell::RefCell::new(Vec::new())),
+            ),
+            &queries,
+        );
+        DbExec::run_execute(&svc, "UPDATE t SET a = 1", &[])
+            .await
+            .expect_err("refused");
+        let cost = queries.cost();
+        assert_eq!((cost.statements, cost.metered), (1, 0));
+        assert_eq!(cost.unmetered(), 1);
+    }
+
+    /// **The report runs once, when the invocation's last handle goes.** A
+    /// service built from the count, and the reserved-work handle the audit
+    /// row is written with, each keep it open; the report sees every
+    /// statement any of them sent, and the build the invocation noted.
+    #[wasm_bindgen_test]
+    async fn the_cost_is_reported_once_when_the_last_handle_is_dropped() {
+        forget_isolate_schema();
+        let handed = Rc::new(HandedMeta::default());
+        let reports: Rc<std::cell::RefCell<Vec<D1Cost>>> = Rc::default();
+        let sink = Rc::clone(&reports);
+        let queries = D1QueryCount::reporting_at_end(move |cost| sink.borrow_mut().push(cost));
+        let d1 = || {
+            metered_d1(
+                BatchAnswer::Succeed,
+                Rc::new(std::cell::RefCell::new(Vec::new())),
+                &["path"],
+                Rc::clone(&handed),
+            )
+        };
+        let request = service_counting(d1(), &queries);
+        let audit_row = service_counting(d1(), &queries.for_reserved_work());
+        queries.note_build(BuildKind::Prepared);
+
+        DbExec::run_fetch(&request, "SELECT path FROM t", &[], JsonColumns::NONE)
+            .await
+            .expect("fetch");
+        drop(queries);
+        assert!(reports.borrow().is_empty(), "the request still holds it");
+
+        drop(request);
+        DbExec::run_execute(
+            &audit_row,
+            "INSERT INTO request_logs (path) VALUES ('/')",
+            &[],
+        )
+        .await
+        .expect("audit row");
+        assert!(reports.borrow().is_empty(), "the audit row still holds it");
+
+        drop(audit_row);
+        let reports = reports.borrow();
+        assert_eq!(reports.len(), 1, "one report per invocation");
+        assert_eq!(reports[0], handed.cost(Some(BuildKind::Prepared), 2));
+        assert!(
+            reports[0].rows_written > 0,
+            "the audit row's write is in it"
+        );
+    }
+
+    /// A count made by `new` reports nothing; that is every test's and every
+    /// caller's but the Worker entries'.
+    #[wasm_bindgen_test]
+    fn a_plain_count_reports_nothing_and_starts_at_zero() {
+        let queries = D1QueryCount::new();
+        assert_eq!(queries.cost(), D1Cost::default());
+        assert_eq!(queries.cost().unmetered(), 0);
+        queries.note_build(BuildKind::Dynamic);
+        assert_eq!(queries.cost().built, Some(BuildKind::Dynamic));
     }
 }

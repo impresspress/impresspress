@@ -61,6 +61,15 @@ pub(crate) const CF_LOG_LEVEL_KEY: &str = "IMPRESSPRESS_CF_LOG_LEVEL";
 /// anything else) and those diagnostics emit no log line and no header.
 pub(crate) const EXECUTOR_TRACE_KEY: &str = "IMPRESSPRESS_EXECUTOR_TRACE";
 
+/// Worker var (`env.var`) naming how many D1 rows one invocation may read
+/// before its `d1_cost` line is logged even though it built no runtime (see
+/// [`crate::d1_cost_line`]). An infrastructure key: a Worker var only, never
+/// a `variables` row. Unset is [`D1_ROWS_LOG_THRESHOLD_DEFAULT`].
+pub(crate) const D1_ROWS_LOG_THRESHOLD_KEY: &str = "IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD";
+
+/// [`D1_ROWS_LOG_THRESHOLD_KEY`] when it is unset.
+pub(crate) const D1_ROWS_LOG_THRESHOLD_DEFAULT: u64 = 1000;
+
 /// Worker `Env` bindings that override D1 variables (set via
 /// `wrangler secret put`). Most config belongs in D1 so admins can manage it
 /// through the dashboard — this list stays short.
@@ -127,6 +136,7 @@ pub(crate) struct CfEnvironment {
     allow_workers_dev: Option<String>,
     deploy_token: Option<String>,
     d1_queries_per_invocation: Option<String>,
+    d1_rows_log_threshold: Option<String>,
     executor_trace: Option<String>,
 
     // ── the password hasher: read into the crypto service only ──────────────
@@ -188,6 +198,7 @@ impl CfEnvironment {
             allow_workers_dev: var(env, ALLOW_WORKERS_DEV_KEY),
             deploy_token: secret(env, impresspress_core::config_vars::DEPLOY_TOKEN_KEY),
             d1_queries_per_invocation: var(env, D1_QUERIES_PER_INVOCATION_KEY),
+            d1_rows_log_threshold: var(env, D1_ROWS_LOG_THRESHOLD_KEY),
             executor_trace: var(env, EXECUTOR_TRACE_KEY),
 
             password_hasher_shards: var(env, impresspress_password::protocol::SHARDS_VAR),
@@ -383,6 +394,23 @@ impl CfEnvironment {
     #[cfg(test)]
     pub(crate) fn set_d1_queries_per_invocation_for_test(&mut self, value: &str) {
         self.d1_queries_per_invocation = Some(value.to_string());
+    }
+
+    /// The rows read past which an invocation logs its `d1_cost` line even
+    /// when it built no runtime: the bound
+    /// `IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD`, or
+    /// [`D1_ROWS_LOG_THRESHOLD_DEFAULT`] when it is unbound.
+    ///
+    /// A bound value that is not a whole number is an error naming the var,
+    /// not the default, so the caller can say the operator's setting was not
+    /// applied.
+    pub(crate) fn d1_rows_log_threshold(&self) -> Result<u64, String> {
+        let Some(raw) = self.d1_rows_log_threshold.as_deref() else {
+            return Ok(D1_ROWS_LOG_THRESHOLD_DEFAULT);
+        };
+        raw.trim().parse::<u64>().map_err(|e| {
+            format!("{D1_ROWS_LOG_THRESHOLD_KEY} must be a whole number of rows, got {raw:?}: {e}")
+        })
     }
 
     /// How many password-hasher Durable Object instances this Worker spreads
@@ -618,6 +646,7 @@ pub(crate) mod test_support {
             allow_workers_dev: None,
             deploy_token: None,
             d1_queries_per_invocation: None,
+            d1_rows_log_threshold: None,
             executor_trace: None,
             password_hasher_shards: None,
             release_asset_id: None,
@@ -669,6 +698,9 @@ pub(crate) mod test_support {
             ("deploy_token", |e| e.deploy_token = Some("v".to_string())),
             ("d1_queries_per_invocation", |e| {
                 e.d1_queries_per_invocation = Some("v".to_string())
+            }),
+            ("d1_rows_log_threshold", |e| {
+                e.d1_rows_log_threshold = Some("v".to_string())
             }),
             ("executor_trace", |e| {
                 e.executor_trace = Some("v".to_string())
@@ -810,6 +842,7 @@ mod tests {
             (ALLOW_WORKERS_DEV_KEY, "1"),
             (impresspress_core::config_vars::DEPLOY_TOKEN_KEY, "token"),
             (D1_QUERIES_PER_INVOCATION_KEY, "50"),
+            (D1_ROWS_LOG_THRESHOLD_KEY, "250"),
             (EXECUTOR_TRACE_KEY, "1"),
             (impresspress_password::protocol::SHARDS_VAR, "5"),
             (
@@ -880,6 +913,7 @@ mod tests {
         assert!(captured.allows_workers_dev());
         assert_eq!(captured.deploy_token(), Some("token"));
         assert_eq!(captured.d1_queries_per_invocation(), Ok(50));
+        assert_eq!(captured.d1_rows_log_threshold(), Ok(250));
         assert!(captured.executor_trace_enabled());
         assert_eq!(captured.password_hasher_shards(), Ok(5));
         assert_eq!(
@@ -890,6 +924,34 @@ mod tests {
             .prepared_runtime_identity()
             .expect("a fully bound prepared-runtime contract parses");
         assert_eq!(prepared.application_id, "app");
+    }
+
+    /// The `d1_cost` rows threshold: unset is the default 1000, a whole
+    /// number is taken as it is, and anything else is an error naming the
+    /// var.
+    #[wasm_bindgen_test]
+    fn the_d1_rows_log_threshold_defaults_to_1000_and_refuses_a_malformed_value() {
+        let unbound = RecordingEnv::new(&[]);
+        assert_eq!(
+            CfEnvironment::capture(&unbound.env).d1_rows_log_threshold(),
+            Ok(D1_ROWS_LOG_THRESHOLD_DEFAULT)
+        );
+        assert_eq!(D1_ROWS_LOG_THRESHOLD_DEFAULT, 1000);
+        for (raw, threshold) in [("0", 0), (" 250 ", 250), ("50000", 50_000)] {
+            let env = RecordingEnv::new(&[(D1_ROWS_LOG_THRESHOLD_KEY, raw)]);
+            assert_eq!(
+                CfEnvironment::capture(&env.env).d1_rows_log_threshold(),
+                Ok(threshold),
+                "{raw:?}"
+            );
+        }
+        for raw in ["", "-5", "1k", "50.5"] {
+            let env = RecordingEnv::new(&[(D1_ROWS_LOG_THRESHOLD_KEY, raw)]);
+            let err = CfEnvironment::capture(&env.env)
+                .d1_rows_log_threshold()
+                .expect_err(raw);
+            assert!(err.contains(D1_ROWS_LOG_THRESHOLD_KEY), "{raw:?}: {err}");
+        }
     }
 
     /// The D1 query limit: unset is the default 1000, a bound number in range

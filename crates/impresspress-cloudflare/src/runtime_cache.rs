@@ -1303,6 +1303,12 @@ where
         (probe_version(&kv).await.into_dynamic_version(), false, true)
     };
 
+    // This invocation's `d1_cost` line names the build its rows were read
+    // for, a failed one included.
+    inputs
+        .queries
+        .note_build(crate::database::BuildKind::Dynamic);
+
     // This build already CONSUMED the dirty flag (`take_dirty` above). If it
     // now fails, that local-write signal must not die with it: the isolate
     // would keep serving the pre-write runtime as zero-await hits until the
@@ -1390,6 +1396,11 @@ where
         Arc<dyn wafer_core::interfaces::storage::service::StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
+    // This invocation's `d1_cost` line names the build its rows were read
+    // for, a failed one included.
+    inputs
+        .queries
+        .note_build(crate::database::BuildKind::Prepared);
     let built = crate::runtime_build::build_runtime(
         inputs.env,
         inputs.environment,

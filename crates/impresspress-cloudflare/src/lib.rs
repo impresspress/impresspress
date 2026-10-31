@@ -339,10 +339,13 @@ where
     // The D1 statements this invocation sends, counted across every D1
     // service it builds (its request services, a runtime build, the audit-row
     // write it hands to `ctx.wait_until`), against D1's per-invocation query
-    // limit. Created here, per invocation, and never kept: an isolate
-    // interleaves concurrent requests, and each has its own limit. See
-    // `database`'s module docs.
-    let queries = database::D1QueryCount::new();
+    // limit, with the rows D1 says they read and wrote. Created here, per
+    // invocation, and never kept: an isolate interleaves concurrent requests,
+    // and each has its own limit. See `database`'s module docs. Its last
+    // handle is dropped when the invocation's D1 work ends — after the match
+    // below, or after the `wait_until` work that holds a clone — and that is
+    // when it logs its `d1_cost` line.
+    let queries = invocation_query_count(&environment);
 
     // Isolate-scoped init — no-op after the first call. First, before any
     // path is routed: the `/_deploy/*` endpoints below boot a runtime and run
@@ -465,6 +468,60 @@ where
             )
         }
     }
+}
+
+/// A fresh [`database::D1QueryCount`] for one invocation, which logs the
+/// invocation's [`d1_cost_line`] when its D1 work ends.
+///
+/// The threshold is this deploy's `IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD`, read
+/// from the captured environment, never from KV or D1. A value that does not
+/// parse is logged as such on every invocation, and the default applies, so
+/// the operator sees that their setting was not applied rather than lose the
+/// lines.
+fn invocation_query_count(environment: &CfEnvironment) -> database::D1QueryCount {
+    let threshold = environment.d1_rows_log_threshold().unwrap_or_else(|error| {
+        worker::console_log!(
+            "{}",
+            impresspress_core::metrics::metric_line(
+                "d1_rows_log_threshold_invalid",
+                &[("error", &error)],
+            )
+        );
+        environment::D1_ROWS_LOG_THRESHOLD_DEFAULT
+    });
+    database::D1QueryCount::reporting_at_end(move |cost| {
+        if let Some(line) = d1_cost_line(&cost, threshold) {
+            worker::console_log!("{line}");
+        }
+    })
+}
+
+/// The `d1_cost` metric line for an invocation that cost `cost`, or `None`
+/// when it is not logged: it is logged when the invocation ran a runtime
+/// build, or read more than `threshold` rows.
+///
+/// `metric=d1_cost build=prepared|dynamic|none statements=N rows_read=N
+/// rows_written=N unmetered=N`. The rows are the sums of D1's own
+/// `meta.rows_read` / `meta.rows_written` over the invocation's statements,
+/// the figures D1 bills by; `unmetered` counts the statements whose rows D1
+/// did not report (a failed statement, the admin SQL explorer's read), so a
+/// line whose `unmetered` is not 0 is a floor, not a total. See
+/// [`database::D1QueryCount`].
+pub(crate) fn d1_cost_line(cost: &database::D1Cost, threshold: u64) -> Option<String> {
+    if cost.built.is_none() && cost.rows_read <= threshold {
+        return None;
+    }
+    let build = cost.built.map_or("none", database::BuildKind::as_str);
+    Some(impresspress_core::metrics::metric_line(
+        "d1_cost",
+        &[
+            ("build", build),
+            ("statements", &cost.statements.to_string()),
+            ("rows_read", &cost.rows_read.to_string()),
+            ("rows_written", &cost.rows_written.to_string()),
+            ("unmetered", &cost.unmetered().to_string()),
+        ],
+    ))
 }
 
 /// Serve one routed request and hand everything it leaves to run after its
@@ -667,9 +724,9 @@ pub async fn run_scheduled_with_config<F, G>(
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
     let environment = CfEnvironment::capture(&env);
-    // This invocation's D1 statement count, for the reason `run_with_config`
-    // gives.
-    let queries = database::D1QueryCount::new();
+    // This invocation's D1 statement count and `d1_cost` line, for the
+    // reasons `route_request` gives.
+    let queries = invocation_query_count(&environment);
     // Same reason as `run_with_config`: `std::env` is stubbed empty on wasm32,
     // so the Worker var is the only channel carrying an asset base URL. The
     // sweep renders no page, but the runtime this builds is published into the
@@ -1194,6 +1251,133 @@ mod deferred_drain_tests {
         assert!(
             after.take_tasks().is_empty(),
             "the task was handed on, not left behind"
+        );
+    }
+
+    /// **The `d1_cost` report waits for the request's post-response work.**
+    /// `serve_and_register` hands the deferred task to `wait_until` with a
+    /// clone of the invocation's count, so the response going back — and the
+    /// entry's own handle going with it — is not the end of the invocation's
+    /// D1 work: the report runs once, after that task.
+    #[wasm_bindgen_test]
+    async fn the_d1_cost_report_waits_for_the_post_response_work() {
+        init_isolate();
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let mut wafer = wafer_run::Wafer::new(Arc::new(wafer_run::StaticConfigSource::default()))
+            .expect("Wafer::new");
+        wafer
+            .register_block("test/defers", Arc::new(Defers(Arc::clone(&seen))))
+            .expect("register");
+        wafer
+            .add_flow_json(
+                r#"{"id":"site-main","name":"t","version":"0.1.0","description":"t",
+                    "steps":[{"id":"defers","block":"test/defers"}],
+                    "config":{"on_error":"stop"}}"#,
+            )
+            .expect("flow");
+        wafer.seal().await.expect("seal");
+
+        let handed: Rc<RefCell<Vec<BoxedTask>>> = Rc::default();
+        let sink = Rc::clone(&handed);
+        let reports: Rc<RefCell<Vec<database::D1Cost>>> = Rc::default();
+        let report = Rc::clone(&reports);
+        let req = worker::Request::new("https://example.test/anything", worker::Method::Get)
+            .expect("request");
+        let env = crate::test_fakes::empty_env();
+        let environment = CfEnvironment::capture(&env);
+        let queries =
+            database::D1QueryCount::reporting_at_end(move |cost| report.borrow_mut().push(cost));
+        queries.note_build(database::BuildKind::Dynamic);
+        let response = serve_and_register(
+            &env,
+            &environment,
+            &queries,
+            |after, defer| {
+                let wafer = &wafer;
+                async move {
+                    dispatch(
+                        wafer,
+                        req,
+                        request_services::RequestServices::marker(7),
+                        &after,
+                        &*defer,
+                    )
+                    .await
+                }
+            },
+            &move |task| sink.borrow_mut().push(task),
+        )
+        .await
+        .expect("dispatch");
+        assert_eq!(response.status_code(), 200);
+        drop(queries);
+        assert!(
+            reports.borrow().is_empty(),
+            "the deferred task still holds the invocation's count"
+        );
+
+        let tasks = std::mem::take(&mut *handed.borrow_mut());
+        assert_eq!(tasks.len(), 1);
+        for task in tasks {
+            task.await;
+        }
+        assert_eq!(seen.load(Ordering::SeqCst), 7, "the task ran");
+        assert_eq!(
+            *reports.borrow(),
+            [database::D1Cost {
+                built: Some(database::BuildKind::Dynamic),
+                ..database::D1Cost::default()
+            }],
+            "reported once, after the post-response work"
+        );
+    }
+
+    /// The `d1_cost` line: logged for an invocation that built a runtime,
+    /// whatever it read, and for one that read more than the threshold;
+    /// quiet otherwise. Its fields are D1's sums, and `unmetered` the
+    /// statements D1 did not report rows for.
+    #[wasm_bindgen_test]
+    fn the_d1_cost_line_is_logged_for_a_build_or_past_the_threshold() {
+        let cost = |built, rows_read| database::D1Cost {
+            statements: 12,
+            metered: 11,
+            rows_read,
+            rows_written: 3,
+            built,
+        };
+        assert_eq!(
+            d1_cost_line(&cost(Some(database::BuildKind::Prepared), 0), 1000).as_deref(),
+            Some(
+                "metric=d1_cost build=prepared statements=12 rows_read=0 rows_written=3 \
+                 unmetered=1"
+            ),
+            "a build is logged even when it read nothing"
+        );
+        assert_eq!(
+            d1_cost_line(&cost(Some(database::BuildKind::Dynamic), 353), 1000).as_deref(),
+            Some(
+                "metric=d1_cost build=dynamic statements=12 rows_read=353 rows_written=3 \
+                 unmetered=1"
+            ),
+        );
+        assert_eq!(
+            d1_cost_line(&cost(None, 1001), 1000).as_deref(),
+            Some(
+                "metric=d1_cost build=none statements=12 rows_read=1001 rows_written=3 \
+                 unmetered=1"
+            ),
+            "past the threshold without a build"
+        );
+        assert_eq!(
+            d1_cost_line(&cost(None, 1000), 1000),
+            None,
+            "at the threshold is not past it"
+        );
+        assert_eq!(d1_cost_line(&cost(None, 0), 0), None);
+        assert!(
+            d1_cost_line(&cost(None, 1), 0).is_some(),
+            "0 logs every read"
         );
     }
 
