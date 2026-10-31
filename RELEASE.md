@@ -19,21 +19,18 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
-### Cloudflare: D1's daily limits and resets are retried, not fatal
+### Cloudflare: D1's daily limits and resets are reported as temporary
 
-**What was wrong.** A block whose `Init` queries D1 had a failure classified
-by its text, and only a short list of texts counted as transient. On the Free
-plan, once the account passes its daily row read or row write limit, every
-query fails with `D1_ERROR: Your account has exceeded D1's free tier daily
-row read limit. …` until 00:00 UTC. That text was not on the list, so the
-failure was a fault: the runtime cached the block as failed for the life of
-the isolate, and it stayed failed after the limit lifted. The same held for
-D1's reset and unreachable-database errors from Cloudflare's D1 error list,
-and for `Internal error in D1 DB storage…`, which the list spelled with a
-lowercase `internal error`.
+**What was wrong.** D1 reports a failed query only as text, and impresspress
+decides from that text whether the failure is temporary (`Unavailable`) or a
+fault (`Internal`). Its list of temporary texts was short. On the Free plan,
+once the account passes its daily row read or row write limit, every query
+fails with `D1_ERROR: Your account has exceeded D1's free tier daily row read
+limit. …` until 00:00 UTC. That text, and D1's reset and unreachable-database
+texts from Cloudflare's D1 error list, were not on impresspress's list, and
+the list was matched case-sensitively. All of them were reported as faults.
 
-**What changes.** These D1 texts are now transient (`Unavailable`), so a
-block `Init` that hits one is retried instead of cached as failed:
+**What changes.** These D1 texts are now classified `Unavailable`:
 
 - the daily row read and row write limits;
 - `D1 DB reset because its code was updated`;
@@ -45,9 +42,24 @@ block `Init` that hits one is retried instead of cached as failed:
   exceeded its CPU time limit and was reset`.
 
 The texts now match in any letter case. A full database (`Exceeded maximum
-DB size.`) and a full account (`…maximum account storage limit…`) stay
-faults: retrying cannot fix them. This change does not keep the rest of the
-site serving during a D1 outage; that is separate work.
+DB size.`), a full account (`…maximum account storage limit…`) and a result
+over D1's 50 MB limit stay faults.
+
+What you see today, when a request's query fails with one of these texts:
+
+- the error is logged as a warning (`database temporarily unavailable`), not
+  as an error (`database internal error`);
+- where a block passes the error code through, the answer is a 503 instead
+  of a 500. Auth does: a signed-in request whose credential check hits one
+  answers 503 `Authentication is temporarily unavailable`;
+- elsewhere, the shared database-error handling still answers 500. That
+  changes in a later release.
+
+How a block's `Init` failure is treated does not change yet. On Cloudflare,
+any `Init` failure still fails the runtime build, and the next request builds
+again. The classification starts to matter when a later release keeps
+serving with a degraded block, which then retries that block's `Init`
+instead of failing it for good.
 
 **What to do.** Nothing.
 

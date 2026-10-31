@@ -15,13 +15,14 @@
 //! `UNIQUE constraint failed: <table>.<column>` — for a `UNIQUE` index, and
 //! for a primary key too, whether it is a rowid alias or not.
 //!
-//! A failure that retrying can cure is [`DatabaseError::Unavailable`], as the
-//! native backends report a busy database or a lost connection: the runtime
-//! retries a block `Init` that failed that way instead of caching the failure
-//! until the isolate is replaced. [`TRANSIENT`] lists the texts: D1's lost
-//! connection, overload, queue-full, storage timeout, reset and
-//! unreachable-replica messages, the Free plan's daily row read and row write
-//! limits (they lift at 00:00 UTC), and SQLite's busy database (D1, and
+//! A failure that a later attempt may not hit is [`DatabaseError::Unavailable`],
+//! as the native backends report a busy database or a lost connection: the
+//! runtime retries a block `Init` that failed that way instead of caching the
+//! failure until the isolate is replaced, and the database handler answers it
+//! `ErrorCode::Unavailable`, logged as a warning. [`TRANSIENT`] lists the
+//! texts: D1's lost connection, overload, queue-full, storage timeout, reset
+//! and unreachable-replica messages, the Free plan's daily row read and row
+//! write limits (they lift at 00:00 UTC), and SQLite's busy database (D1, and
 //! sql.js in the browser). The match ignores ASCII case: D1's texts are not
 //! cased consistently (`internal error; reference = …` beside `Internal error
 //! in D1 DB storage…`).
@@ -37,11 +38,24 @@ use wafer_core::interfaces::database::service::DatabaseError;
 /// The text SQLite puts in every primary- or unique-key violation.
 const UNIQUE_VIOLATION: &str = "UNIQUE constraint failed";
 
-/// Texts of failures that retrying can cure, matched as substrings, ignoring
-/// ASCII case. The D1 texts are the ones Cloudflare's D1 error list gives
-/// (<https://developers.cloudflare.com/d1/observability/debug-d1/>).
+/// Texts of failures that a later attempt may not hit, matched as substrings,
+/// ignoring ASCII case. The D1 texts are the ones Cloudflare's D1 error list
+/// gives (<https://developers.cloudflare.com/d1/observability/debug-d1/>).
 /// `D1 DB is overloaded` covers both overload texts (`Requests queued for too
 /// long.` and `Too many requests queued.`).
+///
+/// Retrying does not cure all of them. Cloudflare classes the overload,
+/// storage-timeout, memory-limit and CPU-limit texts as load problems for the
+/// application to fix, not as errors to retry. They are listed anyway because
+/// the reset or the full queue fails every query in flight on that database,
+/// and an innocent query cannot be told from the one that caused it by the
+/// text. The cost: a block whose own `Init` causes such a reset is retried,
+/// and resets the database again, on every retry, logged only as a warning.
+///
+/// `Can't read from request stream because client disconnected.` is on
+/// Cloudflare's retry list but is left out: it describes a client that
+/// dropped its connection while uploading a query to D1 (an import over the
+/// HTTP API), not a failure a Worker's D1 binding reports.
 const TRANSIENT: &[&str] = &[
     "Network connection lost",
     "D1 DB is overloaded",
@@ -151,8 +165,8 @@ mod tests {
 
     /// The Free plan's daily row read limit. Its `D1_ERROR:` shape is the
     /// exact text D1 returned in the 2026-10-30 outage. It lifts at 00:00 UTC,
-    /// so a block `Init` that hit it must be retried, not cached as failed for
-    /// the isolate's life.
+    /// so it is `Unavailable`: a runtime that keeps serving with a degraded
+    /// block retries that block's `Init` instead of failing it for good.
     #[test]
     fn the_daily_row_read_limit_is_unavailable() {
         assert_d1_text_unavailable(
@@ -230,7 +244,8 @@ mod tests {
     }
 
     /// Every other failure is a fault, exactly as on the native backends —
-    /// a full database or account included: only an operator can cure those.
+    /// a full database or account included (only an operator can cure those),
+    /// and a result over D1's size limit (only a different query can).
     #[test]
     fn any_other_failure_stays_internal() {
         for text in [
@@ -241,6 +256,7 @@ mod tests {
             "D1_ERROR: Exceeded maximum DB size.",
             "D1_ERROR: Your account has exceeded D1's maximum account storage limit, \
              please contact Cloudflare to raise your limit",
+            "D1_ERROR: D1 query result exceeded the maximum response size limit of 50 MB",
         ] {
             assert!(
                 matches!(statement_error(text.into()), DatabaseError::Internal(_)),
