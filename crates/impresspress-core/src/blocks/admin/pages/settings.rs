@@ -279,6 +279,11 @@ mod tests {
     /// values cannot be read the page is a 500, never that form filled from
     /// the boot map and the declared defaults — saving it would write those
     /// over the stored settings.
+    ///
+    /// It is the bare status page, not one inside the shell: the shell's own
+    /// branding is stored config too, read from the same variables snapshot as
+    /// the form's values, so when one cannot be read neither can the other,
+    /// and the shell fails closed rather than drawing default branding.
     #[tokio::test]
     async fn a_failed_read_renders_no_email_form() {
         let ctx = TestContext::with_admin()
@@ -292,10 +297,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(parts.status, 500);
         let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert_eq!(parts.status, 500, "{html}");
         assert!(!html.contains("settings-form"), "{html}");
-        assert!(html.contains("status-page--in-shell"), "{html}");
+        assert!(html.contains(r#"class="status-page""#), "{html}");
+        assert!(!html.contains(r#"class="shell""#), "{html}");
     }
 
     /// Maximum `<form>` nesting depth in `html`. HTML forms cannot nest —

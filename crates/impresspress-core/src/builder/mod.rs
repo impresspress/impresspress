@@ -139,6 +139,11 @@ pub struct ImpresspressBuilder {
     /// should pass `EnvConfigSource`; cloudflare consumers pass
     /// `DatabaseConfigSource`.
     config_source: Option<Arc<dyn wafer_run::ConfigSource>>,
+    /// The runtime's read of the `variables` table, handed to the config
+    /// block at registration. A fresh one unless the caller supplies its own
+    /// ([`Self::variables_snapshot`]) — which a target whose config source
+    /// reads the same table must do, so the two share one read.
+    variables_snapshot: Arc<crate::config_source::VariablesSnapshot>,
 }
 
 impl Default for ImpresspressBuilder {
@@ -174,6 +179,7 @@ impl ImpresspressBuilder {
             extra_vector_service: None,
             extra_embedding_service: None,
             config_source: None,
+            variables_snapshot: Arc::default(),
         }
     }
 
@@ -331,6 +337,22 @@ impl ImpresspressBuilder {
     /// `DatabaseConfigSource`.
     pub fn config_source(mut self, source: Arc<dyn wafer_run::ConfigSource>) -> Self {
         self.config_source = Some(source);
+        self
+    }
+
+    /// Supply the runtime's [`VariablesSnapshot`](crate::config_source::VariablesSnapshot):
+    /// the one memoized read of the `variables` table the config block serves
+    /// `CONFIG_GET` from. A target whose [`Self::config_source`] reads that
+    /// table too (Cloudflare's `DatabaseConfigSource`) creates the snapshot
+    /// first and passes it to both, so a build reads the table once and a
+    /// warm request not at all. Without this call the builder creates one,
+    /// which is right for a target whose config source does not read the
+    /// table (native's static map, the browser's shared one).
+    pub fn variables_snapshot(
+        mut self,
+        snapshot: Arc<crate::config_source::VariablesSnapshot>,
+    ) -> Self {
+        self.variables_snapshot = snapshot;
         self
     }
 

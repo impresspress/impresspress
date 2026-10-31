@@ -42,12 +42,30 @@
 //! 4. Otherwise `NotFound`, exactly as wafer-core's block reports it: the
 //!    one answer `config::get_default` / `get_optional` take as "unset".
 //!
-//! A `CONFIG_GET` that cannot read the table answers from the boot map, so a
-//! database blip does not blank every page's branding. That is wrong for a
-//! form: a settings page pre-filled from the boot map or the declared
-//! defaults, then saved, writes those over the stored values. Forms read
-//! through [`get_many`] ([`CONFIG_GET_MANY`]) instead, which follows the same
-//! read order but answers an unreadable table with an error.
+//! ## Fail closed
+//!
+//! A `CONFIG_GET` or [`CONFIG_GET_MANY`] that cannot read the table answers
+//! `ErrorCode::Unavailable` for every key the table could hold — every key but
+//! the runtime-owned ones of step 1, which never come from the table. It does
+//! not answer from the boot map: for a key the boot map lacks that would be
+//! `NotFound`, which `config::get_default` turns into the caller's declared
+//! default, so a page would render — and a form would save — config nobody
+//! stored. wafer-core's `get_default` and `get_optional` treat only
+//! `NotFound` as unset and return every other error, so the caller sees the
+//! failure. A page that reads stored config therefore answers an error while
+//! the table is unreadable, rather than rendering with defaults.
+//!
+//! A table that does not exist yet is not a failed read: on a fresh database,
+//! before admin's migrations (which is where admin's own `Init` reads its
+//! backend), nothing can be stored, so the read order goes on to the boot map.
+//! The read tells the two apart by asking the schema only after a failed list
+//! ([`variables::read_unfiltered`]).
+//!
+//! The table is read through the runtime's
+//! [`VariablesSnapshot`](crate::config_source::VariablesSnapshot), which this
+//! block shares with the runtime's config source: one read per config-write
+//! generation serves both, and a failed read is remembered and replayed until
+//! its retry, with no query.
 //!
 //! An empty row value deliberately falls through to the boot map rather than
 //! masking it. Blank means "unset", not "explicitly blank", everywhere in this
@@ -56,10 +74,7 @@
 //! exactly that reason — so a row that ended up blank must not shadow what the
 //! boot map holds for the key.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use wafer_block::{codec, wire::config as wire, ResourceAccess, ServiceOp};
 use wafer_core::interfaces::{config::service::ConfigService, database::service::DatabaseService};
@@ -69,9 +84,9 @@ use wafer_run::{
 };
 
 use crate::{
-    config_generation::config_write_generation,
-    // audit-allow: this block never reaches the table under WRAP — it reads and writes through `variables`' boot-flavour API (`load_all`, `find_by_key`, `set`) over the raw `DatabaseService` that `builder::registration` hands it, the same way `config_source::DatabaseConfigSource` reads this table, so no grant applies (a `ctx`-routed read IS denied: see `the_config_block_reads_the_variables_table_under_wrap`); the audit also derives the caller `impresspress/config` from the file path, while the block registers as `wafer-run/config`
-    platform_state::variables,
+    config_source::VariablesSnapshot,
+    // audit-allow: this block never reaches the table under WRAP — it reads and writes through `variables`' boot-flavour API (`read_unfiltered` via the runtime's `VariablesSnapshot`, `find_by_key`, `set`) over the raw `DatabaseService` that `builder::registration` hands it, the same way `config_source::DatabaseConfigSource` reads this table, so no grant applies (a `ctx`-routed read IS denied: see `the_config_block_reads_the_variables_table_under_wrap`); the audit also derives the caller `impresspress/config` from the file path, while the block registers as `wafer-run/config`
+    platform_state::variables::{self, UnfilteredReadError},
     util::{is_sensitive_key, validate_config_value},
 };
 
@@ -97,10 +112,10 @@ fn served_only_from_boot_map(key: &str) -> bool {
 /// The block every config read and write is addressed to.
 const CONFIG_BLOCK: &str = "wafer-run/config";
 
-/// Read several keys in the `CONFIG_GET` read order, failing when the
-/// `variables` table cannot be read rather than answering from the boot map.
-/// An impresspress operation on the config block this module registers;
-/// callers go through [`get_many`].
+/// Read several keys in the `CONFIG_GET` read order, in one call. Fails as a
+/// whole when the `variables` table cannot be read, or when the caller may not
+/// read ONE of the keys. An impresspress operation on the config block this
+/// module registers; callers go through [`get_many`].
 pub const CONFIG_GET_MANY: &str = "impresspress.config.get_many";
 
 /// The interface this block declares: `config@v1`'s two actions plus
@@ -124,8 +139,8 @@ pub fn interface_spec() -> wafer_block::InterfaceSpec {
     let mut spec = wafer_block::interfaces::config_v1();
     spec.name = CONFIG_INTERFACE.to_string();
     spec.description = format!(
-        "{} Adds {CONFIG_GET_MANY}, which fails rather than falling back when the variables \
-         table cannot be read.",
+        "{} Adds {CONFIG_GET_MANY}, which reads several keys at once and fails as a whole when \
+         the variables table cannot be read or one key may not be read.",
         spec.description
     );
     spec.actions.insert(
@@ -173,10 +188,11 @@ struct GetManyResponse {
 /// The current value of each of `keys` that has one, or an error when the
 /// `variables` table could not be read (or the caller may not read a key).
 ///
-/// For a form. A `config.get` that cannot read the table answers from the
-/// boot map, and [`wafer_core::clients::config::get_default`] turns a key
-/// missing there into the caller's default — right for page chrome and wrong
-/// for a form whose Save posts every field back.
+/// For a form. Both this and `config.get` fail on an unreadable table (see
+/// the module's "Fail closed"); what this adds is the batch: one call for
+/// the whole form, refused as a whole when WRAP denies the caller one key, so
+/// a form never renders some fields from stored values and one from a
+/// default its Save would write back.
 pub async fn get_many(
     ctx: &dyn Context,
     keys: &[&str],
@@ -196,15 +212,6 @@ pub async fn get_many(
     let resp: GetManyResponse = codec::decode(&buf.body).map_err(codec::DecodeError::internal)?;
     Ok(resp.values)
 }
-
-/// The `variables` table as a key/value map, shared by every reader holding
-/// the snapshot it was built for.
-type ConfigRows = Arc<HashMap<String, String>>;
-
-/// A memoized [`ConfigRows`] tagged with the config-write generation it was
-/// read at, so a later write makes it visibly stale. See
-/// [`VariablesConfigBlock::snapshot`].
-type CachedRows = RwLock<Option<(u64, ConfigRows)>>;
 
 /// The config block impresspress registers in place of wafer-core's.
 pub struct VariablesConfigBlock {
@@ -233,15 +240,20 @@ pub struct VariablesConfigBlock {
     /// `config_source::DatabaseConfigSource` reads the same table the same way for the same
     /// reason.
     db: Arc<dyn DatabaseService>,
-    /// The `variables` table, memoized alongside the config-write generation
-    /// it was read at. See [`Self::snapshot`].
-    snapshot: CachedRows,
+    /// The runtime's read of the `variables` table, shared with its config
+    /// source. See [`Self::resolve`].
+    snapshot: Arc<VariablesSnapshot>,
 }
 
 impl VariablesConfigBlock {
     /// Wrap wafer-core's config block over the same boot-seeded service the
-    /// builder already constructed.
-    pub fn new(boot: Arc<dyn ConfigService>, db: Arc<dyn DatabaseService>) -> Self {
+    /// builder already constructed, reading stored config through the
+    /// runtime's `snapshot`.
+    pub fn new(
+        boot: Arc<dyn ConfigService>,
+        db: Arc<dyn DatabaseService>,
+        snapshot: Arc<VariablesSnapshot>,
+    ) -> Self {
         let inner: Arc<dyn Block> = Arc::new(wafer_core::service_blocks::config::ConfigBlock::new(
             boot.clone(),
         ));
@@ -249,7 +261,7 @@ impl VariablesConfigBlock {
             inner,
             boot,
             db,
-            snapshot: RwLock::new(None),
+            snapshot,
         }
     }
 
@@ -267,70 +279,38 @@ impl VariablesConfigBlock {
             })
     }
 
-    /// The whole `variables` table as a key/value map, fetched at most once
-    /// per config-write generation.
-    ///
-    /// One query, not one per key. A single page render reads roughly eight
-    /// branding keys through `config::get_default`; a row fetch per key would
-    /// turn that into eight D1 round-trips per request on Workers, where CPU
-    /// and latency are the scarce resources. `DatabaseConfigSource::cached_snapshot`
-    /// solves the same problem the same way and against the same counter, so
-    /// the two invalidate together.
-    ///
-    /// The generation is captured BEFORE the read: a write landing while the
-    /// query is in flight must not be masked by the snapshot it raced. That is
-    /// also what makes two workers racing this on native safe. Each stores the
-    /// generation its own rows were read at, so the loser leaves behind a
-    /// snapshot tagged older than the store is — which costs the next reader a
-    /// re-query and can never hand it rows from before a write it should see.
-    ///
-    /// No lock is held across the `await` — the guard is dropped before the
-    /// fetch and re-taken after — so a hard-stopped request cannot strand one.
-    ///
-    /// A failed read is not cached: the next reader queries again.
-    async fn snapshot(&self) -> Result<ConfigRows, WaferError> {
-        let generation = config_write_generation();
-        {
-            let cached = self
-                .snapshot
-                .read()
-                .expect("config snapshot lock poisoned")
-                .clone();
-            if let Some((cached_generation, rows)) = cached {
-                if cached_generation == generation {
-                    return Ok(rows);
-                }
-            }
-        }
-
-        let rows = variables::load_all(&self.db)
-            .await
-            .map_err(|e| WaferError::new(ErrorCode::Unavailable, e))?;
-        // `load_all` already returns a key/value map; an empty value falls
-        // through to the boot map rather than masking it (see the module docs).
-        let map: HashMap<String, String> = rows
-            .into_iter()
-            .filter(|(_, value)| !value.is_empty())
-            .collect();
-        let map = Arc::new(map);
-
-        *self
-            .snapshot
-            .write()
-            .expect("config snapshot lock poisoned") = Some((generation, map.clone()));
-        Ok(map)
-    }
-
     /// The value a reader of `key` is served, in the module's read order: the
     /// boot map for a runtime-owned key, else a non-empty row, else the boot
-    /// map. `Ok(None)` when none holds one; `Err` when the table could not be
-    /// read for a key it might hold.
+    /// map. `Ok(None)` when none holds one; `Err` (`Unavailable`) when the
+    /// table could not be read for a key it might hold — never the boot map's
+    /// value or `None` in its place (the module's "Fail closed").
+    ///
+    /// The table is read through the runtime's snapshot: at most once per
+    /// config-write generation, and shared with the config source. One query,
+    /// not one per key: a single page render reads roughly eight branding keys
+    /// through `config::get_default`, and a row fetch per key would turn that
+    /// into eight D1 round-trips per request on Workers, where CPU and latency
+    /// are the scarce resources.
     async fn resolve(&self, key: &str) -> Result<Option<String>, WaferError> {
         if served_only_from_boot_map(key) {
             return Ok(self.boot.get(key));
         }
-        let rows = self.snapshot().await?;
-        Ok(rows.get(key).cloned().or_else(|| self.boot.get(key)))
+        let stored = match self.snapshot.read(&self.db).await {
+            Ok(rows) => rows.values().get(key).cloned(),
+            // No table yet — a fresh database before admin's migrations, whose
+            // own `Init` reads its backend through here first. Nothing can be
+            // stored, so the read order goes on to the boot map, as
+            // `block_settings::load` and `wrap_grants::load` answer the same
+            // cold start with no rows. Not a failed read.
+            Err(UnfilteredReadError::Absent(_)) => None,
+            Err(e) => {
+                return Err(WaferError::new(
+                    ErrorCode::Unavailable,
+                    format!("the variables table could not be read: {e}"),
+                ))
+            }
+        };
+        Ok(stored.or_else(|| self.boot.get(key)))
     }
 
     /// [`CONFIG_GET_MANY`]: every requested key the caller may read, resolved
@@ -364,7 +344,7 @@ impl VariablesConfigBlock {
                 Err(e) => {
                     return OutputStream::error(WaferError::new(
                         e.code,
-                        format!("{CONFIG_GET_MANY} could not read the variables table: {e}"),
+                        format!("{CONFIG_GET_MANY}: {e}"),
                     ))
                 }
             }
@@ -607,20 +587,17 @@ impl Block for VariablesConfigBlock {
                     return OutputStream::error(e);
                 }
 
+                // Fail closed: an unreadable table is `Unavailable` for this
+                // key, never the boot map's answer — for a key the boot map
+                // lacks that would be `NotFound`, which `get_default` turns
+                // into the caller's default. See the module's "Fail closed".
                 let value = match self.resolve(&key).await {
                     Ok(value) => value,
                     Err(e) => {
-                        // Reported rather than propagated: a config read that
-                        // cannot reach the table falls back to the boot map,
-                        // which is what the process was already serving.
-                        // Failing instead would turn a transient database blip
-                        // into a blank site. A form must not be filled from
-                        // this; it reads through `CONFIG_GET_MANY`.
-                        tracing::warn!(
-                            error = %e,
-                            "config read could not reach the variables table; falling back to the boot map"
-                        );
-                        self.boot.get(&key)
+                        return OutputStream::error(WaferError::new(
+                            e.code,
+                            format!("config.get {key}: {e}"),
+                        ))
                     }
                 };
 
@@ -695,12 +672,16 @@ impl Block for VariablesConfigBlock {
 ///
 /// Replaces `wafer_core::service_blocks::config::register_with`, which binds
 /// the same name to a block serving both operations from the in-memory map.
+///
+/// It reads stored config through `snapshot`, the runtime's
+/// [`VariablesSnapshot`], which the runtime also hands its config source.
 pub fn register_with(
     wafer: &mut wafer_run::Wafer,
     boot: Arc<dyn ConfigService>,
     db: Arc<dyn DatabaseService>,
+    snapshot: Arc<VariablesSnapshot>,
 ) -> Result<(), wafer_run::RuntimeError> {
-    let block: Arc<dyn Block> = Arc::new(VariablesConfigBlock::new(boot, db));
+    let block: Arc<dyn Block> = Arc::new(VariablesConfigBlock::new(boot, db, snapshot));
     // The spec for the interface `info()` declares. `dispatch_call` validates
     // a call's action against it, and an interface name with no spec only
     // warns and lets every action through. Both registrations are snapshotted
@@ -766,27 +747,42 @@ mod tests {
         );
     }
 
-    /// Where `CONFIG_GET` falls back to the boot map on an unreadable table,
-    /// `CONFIG_GET_MANY` fails: a form must not be filled from the fallback.
-    /// The `CONFIG_GET` half is a guard on the fallback this keeps.
+    /// Fail closed: on an unreadable table `CONFIG_GET` and `CONFIG_GET_MANY`
+    /// both answer `Unavailable` — not the boot map's value for a key it
+    /// holds, not `NotFound` (and so the caller's default) for a key it
+    /// lacks — and `config::get_default` returns that error. A runtime-owned
+    /// key, which never comes from the table, is still served.
     #[tokio::test]
-    async fn get_many_fails_where_config_get_falls_back() {
+    async fn an_unreadable_table_is_unavailable_never_the_boot_map_or_a_default() {
         let mut ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         ctx.set_config(APP_NAME_KEY, "from-boot");
+        ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
         wafer_core::clients::config::set(&ctx.fixture(), APP_NAME_KEY, "stored")
             .await
             .expect("store a row");
         let ctx = ctx.break_reads();
 
+        let in_boot_map = wafer_core::clients::config::get_default(&ctx, APP_NAME_KEY, "default")
+            .await
+            .expect_err("a key the boot map holds must not be answered from it");
+        assert_eq!(in_boot_map.code, ErrorCode::Unavailable, "{in_boot_map}");
+        let unset = wafer_core::clients::config::get_default(&ctx, "X__NOT_IN_BOOT", "default")
+            .await
+            .expect_err("a key the boot map lacks must not become the default");
+        assert_eq!(unset.code, ErrorCode::Unavailable, "{unset}");
+        let many = get_many(&ctx, &[APP_NAME_KEY])
+            .await
+            .expect_err("a form must not be filled without the table");
+        assert_eq!(many.code, ErrorCode::Unavailable, "{many}");
+
         assert_eq!(
-            wafer_core::clients::config::get_default(&ctx, APP_NAME_KEY, "")
+            wafer_core::clients::config::get(&ctx, crate::migration_helper::RUN_MIGRATIONS_KEY)
                 .await
-                .expect("config read"),
-            "from-boot"
+                .expect("a runtime-owned key comes from the boot map, never the table"),
+            "1"
         );
-        assert!(get_many(&ctx, &[APP_NAME_KEY]).await.is_err());
     }
 
     /// An admin write must be visible to a reader whose snapshot is ALREADY

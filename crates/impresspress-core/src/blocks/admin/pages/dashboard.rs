@@ -579,11 +579,16 @@ mod outage_tests {
     use super::*;
     use crate::test_support::{admin_msg, output_html, output_http_status, TestContext};
 
+    /// On a warm runtime: its variables snapshot (the shell's branding) was
+    /// read before the outage, so only the dashboard's own reads fail. On a
+    /// cold one the stored-config read fails first and the page fails closed.
     #[tokio::test]
     async fn every_failed_read_marks_its_own_stat_and_the_page_still_renders() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .with_warm_config()
+            .await
             .break_reads();
         let msg = admin_msg("retrieve", "/b/admin/");
 

@@ -80,6 +80,7 @@ use impresspress_core::{
         PreparedPlanExporter, RequestBuild, RuntimeConfig, StructuralConfigInputs,
         PREPARE_RUNTIME_PLAN_KEY,
     },
+    config_source::{RetryMode, VariablesSnapshot},
     deferred::{self, DeferMode},
     features::BlockSettings,
     platform_state::{block_settings, user_roles, variables, wrap_grants},
@@ -156,14 +157,16 @@ struct Built {
     block_settings: Arc<RwLock<BlockSettings>>,
     config: Arc<dyn ConfigService>,
     source: Arc<RequestScopedSource>,
+    variables: Arc<VariablesSnapshot>,
 }
 
 /// The config source a built runtime holds, standing in for the Worker's
 /// `config_source_proxy()`: it forwards to whichever source the current
 /// request installed. On Cloudflare that is a fresh `DatabaseConfigSource` per
-/// request (`warm_request_services`), so a warm request that resolved a
-/// block's config would read the table again; the harness installs one the
-/// same way before each warm request ([`warm_source`]).
+/// request (`warm_request_services`), over the runtime's variables snapshot;
+/// the harness installs one the same way before each warm request
+/// ([`warm_source`]), so a warm request that resolved a block's config would
+/// show here whether it read the table again.
 struct RequestScopedSource(RwLock<Arc<dyn wafer_run::ConfigSource>>);
 
 impl RequestScopedSource {
@@ -191,16 +194,18 @@ fn bound() -> HashMap<String, String> {
 }
 
 /// A warm request's config source, built as `warm_request_services` builds it:
-/// the warm surfaces over the cached runtime's snapshot, then a fresh
-/// `request_config_source` over this request's overlay.
+/// the warm surfaces over the cached runtime's config snapshot, then a fresh
+/// `request_config_source` over this request's overlay and the runtime's
+/// variables snapshot.
 fn warm_source(
     db: &Arc<dyn DatabaseService>,
     wafer: &Wafer,
+    variables: &Arc<VariablesSnapshot>,
     request_config: &HashMap<String, String>,
 ) -> Arc<dyn wafer_run::ConfigSource> {
     let (_config_map, overlay) =
         warm_config_surfaces(&bound(), wafer.config_snapshot(), request_config);
-    request_config_source(db.clone(), overlay)
+    request_config_source(db.clone(), overlay, variables.clone())
 }
 
 /// The plan identity a Worker version carries, fixed for the harness.
@@ -213,8 +218,9 @@ fn identity() -> (String, WaferLockIdentity, PreparedReleaseAssets) {
 
 /// Build (not boot) a runtime over `db` the way `build_runtime` does: the
 /// `block_settings` read (or the plan's), the structural config pass with the
-/// bound JWT secret, the consumer's request config, the config source over the
-/// resulting overlay, the builder. The config passes and the source are the
+/// bound JWT secret, the consumer's request config, the runtime's variables
+/// snapshot, the config source over the resulting overlay and that snapshot,
+/// the builder (handed the same snapshot). The config passes and the source are the
 /// production functions; the sequence around them is `build_runtime`'s,
 /// copied, because that function needs a `worker::Env` (the golden's header
 /// names what the copy cannot see).
@@ -259,9 +265,11 @@ async fn build(
     if provisioning {
         runtime_config.both(PREPARE_RUNTIME_PLAN_KEY, "1");
     }
+    let variables = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
     let source = Arc::new(RequestScopedSource(RwLock::new(request_config_source(
         db.clone(),
         overlay,
+        variables.clone(),
     ))));
     let (builder, config) = install(runtime_config);
     let builder = builder
@@ -274,7 +282,8 @@ async fn build(
         .network(Arc::new(NoNetwork))
         .logger(Arc::new(wafer_core::service_blocks::logger::TracingLogger))
         .block_settings(settings)
-        .config_source(source.clone());
+        .config_source(source.clone())
+        .variables_snapshot(variables.clone());
     let builder = match prepared {
         Some(plan) => {
             let (sha, lock, assets) = identity();
@@ -293,6 +302,7 @@ async fn build(
         block_settings,
         config,
         source,
+        variables,
     }
 }
 
@@ -330,13 +340,13 @@ async fn provision(db: &Arc<dyn DatabaseService>) -> PreparedRuntimePlan {
 }
 
 /// Phases 3 and 4: a request-path build, booted; with the config source a
-/// warm request installs into.
+/// warm request installs into, and the runtime's variables snapshot.
 async fn boot_request(
     db: &Arc<dyn DatabaseService>,
     build_kind: RequestBuild,
     plan: &PreparedRuntimePlan,
     request_config: &HashMap<String, String>,
-) -> (Wafer, Arc<RequestScopedSource>) {
+) -> (Wafer, Arc<RequestScopedSource>, Arc<VariablesSnapshot>) {
     let prepared = (build_kind == RequestBuild::Prepared).then_some(plan);
     let mut built = build(db, prepared, false, request_config).await;
     boot_request_runtime(
@@ -348,7 +358,7 @@ async fn boot_request(
     )
     .await
     .unwrap_or_else(|e| panic!("the {build_kind:?} request build boots: {e}"));
-    (built.wafer, built.source)
+    (built.wafer, built.source, built.variables)
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,19 +1060,19 @@ const ALLOWED: &[Allowed] = &[
         phase: PHASE_DATABASE,
         table: "impresspress__admin__variables",
         class: Class::Scan,
-        mixed: 2,
-        shared: 10,
-        because: "the config source's unfiltered snapshot and the config block's; with \
-                  no block-scoped row the source re-reads it for each of the 9 \
-                  config-declaring blocks. D1-READ-COST PR 6 makes it 1 per build",
+        mixed: 1,
+        shared: 1,
+        because: "the runtime's variables snapshot: one unfiltered read serves the config \
+                  source for every config-declaring block and the config block, with or \
+                  without a block-scoped row (D1-READ-COST PR 6)",
     },
     Allowed {
         phase: PHASE_PREPARED,
         table: "impresspress__admin__variables",
         class: Class::Scan,
-        mixed: 2,
-        shared: 10,
-        because: "as on the database build; D1-READ-COST PR 6 makes it 1 per build",
+        mixed: 1,
+        shared: 1,
+        because: "the runtime's variables snapshot, as on the database build",
     },
     Allowed {
         phase: PHASE_DATABASE,
@@ -1227,7 +1237,7 @@ async fn run(variant: Variant) -> Run {
 
     // 3. A database build, on a cold isolate.
     let db = cold(&path, &ledger);
-    let (wafer, _) = boot_request(&db, RequestBuild::Database, &plan, &request_config).await;
+    let (wafer, _, _) = boot_request(&db, RequestBuild::Database, &plan, &request_config).await;
     drop(wafer);
     drop(db);
     phases.push(Phase::new(
@@ -1239,7 +1249,8 @@ async fn run(variant: Variant) -> Run {
 
     // 4. A prepared build, on a cold isolate.
     let db = cold(&path, &ledger);
-    let (wafer, source) = boot_request(&db, RequestBuild::Prepared, &plan, &request_config).await;
+    let (wafer, source, variables) =
+        boot_request(&db, RequestBuild::Prepared, &plan, &request_config).await;
     phases.push(Phase::new(
         label(PHASE_PREPARED),
         &ledger.take(),
@@ -1257,7 +1268,7 @@ async fn run(variant: Variant) -> Run {
 
     // 5. Warm requests on runtime 4.
     for (name, path, signed_in, expected) in WARM {
-        source.install(warm_source(&db, &wafer, &request_config));
+        source.install(warm_source(&db, &wafer, &variables, &request_config));
         let status = request(&wafer, &db, path, signed_in.then_some(token.as_str())).await;
         let phase = Phase::new(
             label(&format!("5 warm {name}")),
@@ -1337,9 +1348,9 @@ const HEADER: &str = "\
 # stores under their blocks. So the all-shared shape exists only before a
 # repinned site's first prepare, or after a manual delete. The variant deletes
 # them and forwards their values as request config (`add_request_config`), as a
-# consumer binding its secrets does; products requires its secret. With no row
-# carrying a block, the config source's pre-002 rule leaves its grouped snapshot
-# unmemoized, so each config-declaring block re-reads the table (PR 6, R4).
+# consumer binding its secrets does; products requires its secret. Its rows
+# still carry the `block` column (NULL), so the runtime's variables snapshot
+# memoizes them like any other: one read per build, as in `mixed` (PR 6, R4).
 ";
 
 fn render(runs: &[Run]) -> String {

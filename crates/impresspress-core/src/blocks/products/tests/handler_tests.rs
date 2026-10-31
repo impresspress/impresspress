@@ -2235,8 +2235,9 @@ async fn restore_whose_collision_probe_cannot_run_keeps_the_writes_own_conflict(
     // collision probe's `list_all` is the one read that cannot run — the
     // exact interleaving a transient database wobble produces on top of a
     // genuine collision, and the only one that reaches the "probe could not
-    // tell" branch.
-    let ctx = ctx.break_list_reads();
+    // tell" branch. On a warm runtime, whose variables snapshot was read
+    // before the wobble: the handler's stored-config read is served from it.
+    let ctx = ctx.with_warm_config().await.break_list_reads();
 
     let (msg, input) = admin_create_msg(
         "/b/products/api/admin/products/original/restore",

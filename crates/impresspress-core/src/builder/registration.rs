@@ -141,7 +141,12 @@ impl ImpresspressBuilder {
         // impresspress owns this block: the `variables` table is the config
         // store, so an admin write is visible to the next read instead of after
         // the next restart. See `blocks::config`.
-        crate::blocks::config::register_with(&mut wafer, config, config_db)?;
+        crate::blocks::config::register_with(
+            &mut wafer,
+            config,
+            config_db,
+            self.variables_snapshot.clone(),
+        )?;
         wafer_core::service_blocks::crypto::register_with(&mut wafer, crypto)?;
 
         wafer_core::service_blocks::network::register_with(&mut wafer, network)?;

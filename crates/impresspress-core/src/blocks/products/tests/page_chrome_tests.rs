@@ -427,7 +427,9 @@ async fn stripe_page_states_are_badges_and_settings_have_one_way_in() {
 /// back — not a bare page whose only way out is "Go home".
 #[tokio::test]
 async fn a_failed_admin_read_is_the_error_page_inside_the_shell() {
-    let ctx = ctx().await.break_list_reads();
+    // Warm, so the shell's stored config is served and the page's own read
+    // is what fails.
+    let ctx = ctx().await.with_warm_config().await.break_list_reads();
     let (mut msg, input) = admin_get_msg("/b/products/admin/groups");
     msg.set_meta("http.header.accept", "text/html");
     let parts =

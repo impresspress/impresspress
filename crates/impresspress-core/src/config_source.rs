@@ -20,15 +20,20 @@
 //!   until after the runtime is sealed.
 //! * [`DatabaseConfigSource`] — reads the variables table on demand, through
 //!   whatever [`DatabaseService`](wafer_core::interfaces::database::service::DatabaseService)
-//!   it is given. Cloudflare's, over D1; native tests and the D1 cost harness
-//!   run the same code over SQLite.
+//!   it is given, via its runtime's [`VariablesSnapshot`]. Cloudflare's, over
+//!   D1; native tests and the D1 cost harness run the same code over SQLite.
+//!
+//! [`VariablesSnapshot`] is the runtime's one memoized read of that table,
+//! shared by the database source and the config block (see its module).
 
 mod database;
+mod snapshot;
 
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 pub use database::DatabaseConfigSource;
+pub use snapshot::{BlockVariables, RetryMode, VariablesRows, VariablesSnapshot};
 use wafer_block::ConfigVar;
 use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource};
 

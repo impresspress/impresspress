@@ -119,6 +119,12 @@ pub(crate) struct ReadyRuntime {
     // Deliberately no D1/KV/R2/network/config handles here. The Wafer's six
     // service blocks contain stateless request-scoped proxies; concrete
     // services are selected by `request_services::scope` for each dispatch.
+    /// The runtime's read of the `variables` table — data and memo, no
+    /// handle. Every warm request's config source reads through it
+    /// (`runtime_build::warm_request_services`), as the runtime's config block
+    /// does, so a warm request resolves config without a query; a rebuilt
+    /// runtime gets a new one.
+    pub variables_snapshot: std::sync::Arc<impresspress_core::config_source::VariablesSnapshot>,
     pub version: String,
     /// Config-version observed when a packaged plan was hydrated. `None`
     /// identifies the ordinary dynamic runtime path, whose `version` already
@@ -951,6 +957,7 @@ async fn finish_runtime(
     let tag = kind.tag(environment_identity, started_at);
     let rt = Rc::new(ReadyRuntime {
         wafer: built.wafer,
+        variables_snapshot: built.variables_snapshot,
         version: tag.version,
         config_version: tag.config_version,
         environment_identity: tag.environment_identity,
@@ -1762,6 +1769,7 @@ pub(crate) mod tests {
                 wafer_run::StaticConfigSource::default(),
             ))
             .expect("a bare runtime"),
+            variables_snapshot: std::sync::Arc::default(),
             version: "v-test".to_string(),
             config_version: None,
             environment_identity: "env-test".to_string(),

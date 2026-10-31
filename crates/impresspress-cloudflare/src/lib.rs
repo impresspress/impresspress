@@ -921,6 +921,7 @@ where
         environment,
         queries,
         rt.wafer.config_snapshot(),
+        &rt.variables_snapshot,
         request_config,
     )?;
 
@@ -1095,6 +1096,7 @@ where
         environment,
         queries,
         rt.wafer.config_snapshot(),
+        &rt.variables_snapshot,
         request_config,
     )?;
     let mut response = dispatch(&rt.wafer, req, services, after, defer).await?;

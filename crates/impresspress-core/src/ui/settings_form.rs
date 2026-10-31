@@ -120,15 +120,14 @@ impl<'a> SettingsSection<'a> {
 /// else the var's declared default — or `Err` when the `variables` table could
 /// not be read.
 ///
-/// Through [`crate::blocks::config::get_many`], never `config::get_default`:
-/// that one answers an unreadable table from the boot map and then the
-/// default, and `submit_js` posts every field, so a form rendered from it and
-/// saved writes those over every stored value on the page.
-///
-/// `get_many` also refuses the whole batch when WRAP denies the caller ONE of
-/// the keys, so a page that renders a var its block may not read is an error
-/// page rather than a field showing the default: the page has no value to
-/// show and its Save would have written the default over the stored one.
+/// Through [`crate::blocks::config::get_many`], never one `config::get_default`
+/// per field. Both fail on an unreadable table (the config block fails closed),
+/// but `get_many` reads the whole form in one call and refuses the whole batch
+/// when WRAP denies the caller ONE of the keys. Per field, a denied key would
+/// be one error among values — and `submit_js` posts every field, so a page
+/// that rendered a var its block may not read with its default would write
+/// that default over the stored one on Save. Refused as a batch, it is an
+/// error page instead.
 async fn current_values<'v>(
     ctx: &dyn Context,
     vars: impl IntoIterator<Item = &'v ConfigVar>,
