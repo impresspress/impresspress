@@ -63,6 +63,50 @@ only into an empty table.
 its migrations, two more than the 483 before it (003's statement and its
 ledger row), within half of the default 1000.
 
+### Cloudflare: D1's daily limits and resets are reported as temporary
+
+**What was wrong.** D1 reports a failed query only as text, and impresspress
+decides from that text whether the failure is temporary (`Unavailable`) or a
+fault (`Internal`). Its list of temporary texts was short. On the Free plan,
+once the account passes its daily row read or row write limit, every query
+fails with `D1_ERROR: Your account has exceeded D1's free tier daily row read
+limit. …` until 00:00 UTC. That text, and D1's reset and unreachable-database
+texts from Cloudflare's D1 error list, were not on impresspress's list, and
+the list was matched case-sensitively. All of them were reported as faults.
+
+**What changes.** These D1 texts are now classified `Unavailable`:
+
+- the daily row read and row write limits;
+- `D1 DB reset because its code was updated`;
+- `Internal error while starting up D1 DB storage caused object to be
+  reset` and `Internal error in D1 DB storage caused object to be reset`;
+- `Replica disconnected from primary`;
+- `Cannot resolve D1 DB due to transient issue on remote node`;
+- `D1 DB's isolate exceeded its memory limit and was reset` and `D1 DB
+  exceeded its CPU time limit and was reset`.
+
+The texts now match in any letter case. A full database (`Exceeded maximum
+DB size.`), a full account (`…maximum account storage limit…`) and a result
+over D1's 50 MB limit stay faults.
+
+What you see today, when a request's query fails with one of these texts:
+
+- the error is logged as a warning (`database temporarily unavailable`), not
+  as an error (`database internal error`);
+- where a block passes the error code through, the answer is a 503 instead
+  of a 500. Auth does: a signed-in request whose credential check hits one
+  answers 503 `Authentication is temporarily unavailable`;
+- elsewhere, the shared database-error handling still answers 500. That
+  changes in a later release.
+
+How a block's `Init` failure is treated does not change yet. On Cloudflare,
+any `Init` failure still fails the runtime build, and the next request builds
+again. The classification starts to matter when a later release keeps
+serving with a degraded block, which then retries that block's `Init`
+instead of failing it for good.
+
+**What to do.** Nothing.
+
 ### wafer-run 96860baa: Admin → Database opens on Cloudflare
 
 **What changes.** The wafer-run pin moves from `1272fd63` to `96860baa`

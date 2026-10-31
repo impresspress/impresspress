@@ -80,7 +80,8 @@
 //! message and no code, so the primitives classify that text with
 //! [`impresspress_core::sqlite_text_error::statement_error`]: a primary- or
 //! unique-key violation is [`DatabaseError::AlreadyExists`], as on the native
-//! backends, and anything else `Internal`.
+//! backends; a busy database (`database is locked`) is
+//! [`DatabaseError::Unavailable`]; anything else is `Internal`.
 
 use std::{collections::HashMap, sync::LazyLock};
 
