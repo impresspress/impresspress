@@ -98,11 +98,14 @@ wasm-bindgen-test = "0.3"
 # `runtime`'s root-scope test uses to stand in for a request stopped
 # mid-poll. `migration-fixtures`: the runner from before the per-file ledger
 # (`migration_helper::legacy_runner`), which `boot`'s migration tests build a
-# pre-ledger database file with. Dev-only, so the shipped bundle never sees
-# them.
+# pre-ledger database file with. `block-legalpages`: the block whose
+# `003_default_documents` `boot`'s tests run on real sql.js; the shipped
+# bundle (`impresspress-web`) compiles it in already. Dev-only, so the
+# shipped bundle never sees the first two.
 impresspress-core = { path = "../impresspress-core", default-features = false, features = [
     "test-hooks",
     "migration-fixtures",
+    "block-legalpages",
 ] }
 # `RequestInit` is test-only: the adapter reads the `Request` the Service
 # Worker hands it and never builds one. The request-side wasm tests do build

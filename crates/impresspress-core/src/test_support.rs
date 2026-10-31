@@ -39,6 +39,8 @@ pub mod dom;
 #[cfg(test)]
 pub mod htmx;
 pub mod jwt_blocklist_drop;
+#[cfg(feature = "block-legalpages")]
+pub mod legalpages_default_documents;
 pub mod migration_history;
 #[cfg(test)]
 mod parity_tests;

@@ -277,7 +277,10 @@ pub async fn list_page(
     Page::decode(db::list(ctx, TABLE, &opts).await?, DocumentRow::from_record)
 }
 
-/// How many documents the table holds, in any status.
+/// How many documents the table holds, in any status. Tests only: no
+/// production path counts the table (the default documents are seeded by
+/// migration 003, not by counting on every `Init`).
+#[cfg(test)]
 pub async fn count(ctx: &dyn Context) -> Result<i64, WaferError> {
     db::count(ctx, TABLE, &[]).await
 }
