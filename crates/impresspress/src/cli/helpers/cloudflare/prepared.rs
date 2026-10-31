@@ -278,20 +278,40 @@ pub struct PrepareResponse {
     pub plan: PreparedRuntimePlan,
 }
 
+/// Refuse a `/_deploy/*` response whose `schema_version` is not this CLI's,
+/// reading that one field and nothing else.
+///
+/// It runs before the strict decode, because the strict decode is exactly
+/// what another version's body fails: a Worker one schema behind lacks a
+/// field this CLI requires, one ahead carries a field this CLI's envelope
+/// refuses. Decoding first would report that as a missing or unknown field,
+/// pointing the operator at the body; [`DEPLOY_RESPONSE_SCHEMA_VERSION`]
+/// promises a mismatched CLI and Worker a schema refusal instead.
+fn require_schema_version(bytes: &[u8], endpoint: &str) -> Result<()> {
+    /// The one field every version of every `/_deploy/*` envelope carries.
+    #[derive(Deserialize)]
+    struct Versioned {
+        schema_version: u32,
+    }
+    let Versioned { schema_version } = serde_json::from_slice(bytes)
+        .with_context(|| format!("read the {endpoint} response's schema_version"))?;
+    if schema_version != DEPLOY_RESPONSE_SCHEMA_VERSION {
+        bail!(
+            "unsupported {endpoint} response schema {schema_version}; expected \
+             {DEPLOY_RESPONSE_SCHEMA_VERSION}"
+        );
+    }
+    Ok(())
+}
+
 pub fn parse_prepare_response(bytes: &[u8]) -> Result<PrepareResponse> {
+    require_schema_version(bytes, "/_deploy/prepare")?;
     let response: PrepareResponse =
         serde_json::from_slice(bytes).context("decode strict /_deploy/prepare response")?;
     response
         .plan
         .validate_deployable()
         .context("validate deployable prepared runtime plan")?;
-    if response.schema_version != DEPLOY_RESPONSE_SCHEMA_VERSION {
-        bail!(
-            "unsupported /_deploy/prepare response schema {}; expected {}",
-            response.schema_version,
-            DEPLOY_RESPONSE_SCHEMA_VERSION
-        );
-    }
     if !response.init_report.ok
         || !response.init_report.sealed
         || !response.init_report.grants.ok
@@ -405,15 +425,9 @@ pub fn parse_verify_response(
     expected_plan: &PreparedRuntimePlan,
     expected_release_asset: Option<(&str, &str, &str)>,
 ) -> Result<VerifyResponse> {
+    require_schema_version(bytes, "/_deploy/verify")?;
     let response: VerifyResponse =
         serde_json::from_slice(bytes).context("decode strict /_deploy/verify response")?;
-    if response.schema_version != DEPLOY_RESPONSE_SCHEMA_VERSION {
-        bail!(
-            "unsupported /_deploy/verify response schema {}; expected {}",
-            response.schema_version,
-            DEPLOY_RESPONSE_SCHEMA_VERSION
-        );
-    }
     if !response.ok {
         bail!("/_deploy/verify reported failure");
     }
@@ -717,6 +731,48 @@ mod tests {
         assert!(
             serialized.get(probe::VERIFY_FIELD).is_some(),
             "{serialized}"
+        );
+    }
+
+    /// A Worker one schema behind — version 2, whose boot report has no
+    /// `grants` step — meets a schema refusal naming both versions, not a
+    /// strict-decode error about the field it lacks. Likewise a version-1
+    /// verify reply, which lacks `password_hasher`.
+    #[test]
+    fn an_older_workers_response_is_refused_by_its_schema_version() {
+        let plan = plan();
+        let mut prepare: serde_json::Value =
+            serde_json::from_slice(&successful_prepare_json(&plan)).unwrap();
+        prepare["schema_version"] = serde_json::json!(2);
+        prepare["init_report"]
+            .as_object_mut()
+            .unwrap()
+            .remove("grants");
+        let error = parse_prepare_response(&serde_json::to_vec(&prepare).unwrap())
+            .expect_err("a version-2 body is refused");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "unsupported /_deploy/prepare response schema 2; expected \
+                 {DEPLOY_RESPONSE_SCHEMA_VERSION}"
+            ),
+        );
+
+        let verify = serde_json::json!({
+            "schema_version": 1,
+            "ok": true,
+            "summary": plan.summary().unwrap(),
+            "release_asset_verified": true,
+            "release_asset": null,
+        });
+        let error = parse_verify_response(&serde_json::to_vec(&verify).unwrap(), &plan, None)
+            .expect_err("a version-1 body is refused");
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "unsupported /_deploy/verify response schema 1; expected \
+                 {DEPLOY_RESPONSE_SCHEMA_VERSION}"
+            ),
         );
     }
 

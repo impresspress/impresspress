@@ -575,9 +575,6 @@ pub async fn boot_native(wafer: &mut Wafer) -> anyhow::Result<builder::BootRepor
             )
         })
         .collect();
-    if let Some(error) = report.grants.error.as_deref() {
-        failures.push(format!("grants: {error}"));
-    }
     if let Some(error) = report.seed.error.as_deref() {
         failures.push(format!("seed: {error}"));
     }

@@ -26,13 +26,23 @@ use wafer_run::{RuntimeError, Wafer};
 /// until the prepared candidate has passed verification and promotion.
 pub const PREPARE_RUNTIME_PLAN_KEY: &str = "IMPRESSPRESS_PREPARE_RUNTIME_PLAN";
 
-/// What a block `Init` failure (or a seed-hook failure) *does*. The ordering
-/// [`boot`] runs is identical under all three; only the consequence differs.
+/// What a block `Init` failure, a seed-hook failure or a failed
+/// [`GrantSource::Database`] read *does*. The ordering [`boot`] runs is
+/// identical under all three; only the consequence differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPolicy {
     /// Log and continue. The runtime is published even with a broken block, so
     /// one misconfigured block cannot wedge a whole page. Used by the browser,
     /// whose runtime is long-lived, inspectable and rebuilt on demand.
+    ///
+    /// Two failures are treated differently here, deliberately. A failed seed
+    /// hook still aborts: it leaves the config and enablement snapshots the
+    /// runtime would serve from unknown. A failed grants read boots on: the
+    /// admin-created grants only ever *add* access (`Wafer::add_wrap_grants`
+    /// is additive), so a runtime without them denies what they would have
+    /// allowed and never allows more — the fail-safe direction, and the page
+    /// stays usable to repair the database. The failure is logged and is in
+    /// [`BootReport::grants`].
     Tolerant,
     /// Fail closed on the first failure. Used by the Cloudflare request path:
     /// publishing a runtime with a failed lazy-init slot would let concurrent
@@ -201,7 +211,7 @@ pub trait BootHooks {
 ///    sequence is identical across processes and platforms).
 ///
 /// `policy` changes none of that ordering; it decides only what a failure at
-/// step 3, 4 or 5 does. See [`InitPolicy`].
+/// step 1, 3, 4 or 5 does. See [`InitPolicy`].
 ///
 /// The caller must have already wired the pre-seal bits its platform needs
 /// (`set_asset_loader`, any post-build block registration) onto `wafer` before
@@ -237,6 +247,11 @@ pub async fn boot(
             Err(e) => {
                 let error = format!("load the admin-created WRAP grants: {e}");
                 match policy {
+                    // Stringified like the seed and init arms. D1-OUTAGE IP-B
+                    // replaces this with `BootError::Grants`, which must
+                    // carry `e` itself so `Unavailable` (transient, 503) and
+                    // anything else (500) stay distinguishable — never
+                    // classified from this string.
                     InitPolicy::Strict => return Err(RuntimeError::Config(error)),
                     InitPolicy::Tolerant => {
                         tracing::error!(
