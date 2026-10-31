@@ -350,6 +350,23 @@ jobs:
           cargo test --locked -p impresspress-core --features site-runtime,test-support --test site_runtime 2>&1 | tee "$RUNNER_TEMP/site-runtime.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/site-runtime.log"
 
+      # `tests/d1_read_cost.rs` pins what a cold Cloudflare isolate sends D1
+      # (`tests/d1_read_cost.golden`), so it boots exactly the blocks a Worker
+      # compiles: every `block-*` feature `impresspress-cloudflare` passes
+      # through, and none of `llm` (the native provider backend, whose Init
+      # reads the providers table), `block-dev`, `site-runtime` or the native
+      # embedding blocks. The file is compiled out under any of those, which
+      # is every other step here, so it runs in its own invocation — the same
+      # command as `just d1-cost` — and the grep fails the step if it ever
+      # stops running. For the same reason no clippy lane sees the file, so
+      # this step lints it first.
+      - name: Run the D1 read-cost golden
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p impresspress-core --no-default-features --features test-support,block-files,block-messages,block-vector,block-llm,block-legalpages,block-tickets,block-userportal,block-products,block-signal --test d1_read_cost -- -D warnings
+          cargo test --locked -p impresspress-core --no-default-features --features test-support,block-files,block-messages,block-vector,block-llm,block-legalpages,block-tickets,block-userportal,block-products,block-signal --test d1_read_cost 2>&1 | tee "$RUNNER_TEMP/d1-read-cost.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/d1-read-cost.log"
+
       # `dev.js` is a TAIL composed into an IIFE with nothing on `window`
       # (see the file's own header comment), so its internal logic has no
       # exported function the Rust suite above can call directly —

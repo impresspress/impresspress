@@ -113,12 +113,7 @@ where
         .await?;
         let report = boot_deploy_runtime(&mut built).await?;
         let plan_draft = if prepare_plan && report.ok {
-            let final_settings =
-                impresspress_core::platform_state::block_settings::load(&built.db).await?;
-            let final_grants =
-                impresspress_core::platform_state::wrap_grants::load(&built.db).await;
-            built.plan_exporter.publish_block_settings(final_settings)?;
-            built.plan_exporter.publish_wrap_grants(&final_grants)?;
+            impresspress_core::builder::seal_prepared_plan(&built.db, &built.plan_exporter).await?;
             let identity = environment.prepared_runtime_identity()?;
             Some((built.plan_exporter.clone(), identity))
         } else {

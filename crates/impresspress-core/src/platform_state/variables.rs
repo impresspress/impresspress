@@ -504,8 +504,8 @@ pub const ENV_PRECEDENCE_TRANSITION_KEY: &str = "IMPRESSPRESS__ADMIN__ENV_PRECED
 /// "Native only" is structural, not merely a convention nobody has broken yet.
 /// A Cloudflare deploy cannot set it from `wrangler.toml`: that target fills its
 /// boot map from `runtime_build::structural_config_inputs`, which reads only
-/// keys on `environment::PROTECTED_ENV_KEYS` and
-/// `environment::BUILDER_WORKER_VAR_KEYS` — two `&'static [&'static str]`
+/// keys on [`crate::builder::PROTECTED_ENV_KEYS`] and
+/// [`crate::builder::BUILDER_WORKER_VAR_KEYS`] — two `&'static [&'static str]`
 /// allowlists this key is not on — so an arbitrary worker var of this name is
 /// never copied through. Worth stating because the same question is worth
 /// asking of any `__…__` key, and the answer is not the same for all of them.
@@ -1663,13 +1663,13 @@ struct LoadedRow {
 ///
 /// Native and the browser get it inside [`seed_and_load`], which reuses rows it
 /// has already fetched. **Cloudflare never calls `seed_and_load` at all** — its
-/// `CfDeployBootHooks::seed_and_load` runs [`seed_auto_generated`] and the
+/// deploy hook, [`crate::builder::DeployBootHooks::seed_and_load`], runs [`seed_auto_generated`] and the
 /// `block_settings` seed and nothing else — so the hosted target calls this
 /// directly from that same deploy hook, at the cost of the one list this does
 /// for itself.
 ///
 /// It belongs in the DEPLOY hook specifically, not the request-path one:
-/// `CfRequestBootHooks` is documented as physically write-free, and a write
+/// [`crate::builder::RequestBootHooks`] is documented as physically write-free, and a write
 /// from it self-invalidates the fleet's config version and races concurrent
 /// isolates on insert. A repair at `/_deploy/init` time is both sufficient (the
 /// rows are legacy, not newly created) and the only safe slot.
@@ -3955,9 +3955,8 @@ mod boot_tests {
 
     /// The standalone entry point, which is what the HOSTED target calls:
     /// Cloudflare never runs `seed_and_load` (it has no process environment to
-    /// seed from), so `CfDeployBootHooks::seed_and_load` calls this directly.
-    /// That crate is wasm-only and CI does not execute its tests, so this is
-    /// the executed coverage for the function behind that call.
+    /// seed from), so `builder::DeployBootHooks::seed_and_load` calls this
+    /// directly.
     #[tokio::test]
     async fn the_standalone_repair_entry_point_fixes_an_unflagged_row() {
         let db = migrated_db().await;

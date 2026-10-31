@@ -13,6 +13,9 @@
 //!   [`GrantSource`], [`BootHooks`], and the native-embedding
 //!   `register_vector_block` helper.
 //! - [`config`] — [`RuntimeConfig`], the one owner of both config surfaces.
+//! - [`request_path`] — the hosted target's funnels over [`boot`]: the deploy
+//!   funnel, the two request-path builds, the prepare closing sequence, and
+//!   the structural config and config source every hosted build uses.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -30,6 +33,7 @@ mod boot;
 mod config;
 mod prepared;
 mod registration;
+mod request_path;
 
 pub use boot::{
     boot, BlockInitOutcome, BootHooks, BootReport, GrantSource, InitPolicy, StepOutcome,
@@ -50,6 +54,12 @@ pub(crate) use registration::required_model_cache_dir;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use registration::{granted_llm_router, SERVICE_ALIASES};
 pub use registration::{register_middleware_blocks, MIDDLEWARE_BLOCKS};
+pub use request_path::{
+    add_request_config, boot_deploy_runtime, boot_request_runtime, environment_owns_config_key,
+    request_config_source, seal_prepared_plan, structural_runtime_config, warm_config_surfaces,
+    DeployBootHooks, PreparedPlanBootHooks, RequestBootHooks, RequestBuild, StructuralConfigInputs,
+    BUILDER_WORKER_VAR_KEYS, PROTECTED_ENV_KEYS,
+};
 
 pub struct ImpresspressBuilder {
     database: Option<Arc<dyn DatabaseService>>,
