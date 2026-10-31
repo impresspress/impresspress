@@ -1303,6 +1303,12 @@ where
         (probe_version(&kv).await.into_dynamic_version(), false, true)
     };
 
+    // This invocation's `d1_cost` line names the build its rows were read
+    // for, a failed one included.
+    inputs
+        .queries
+        .note_build(crate::database::BuildKind::Dynamic);
+
     // This build already CONSUMED the dirty flag (`take_dirty` above). If it
     // now fails, that local-write signal must not die with it: the isolate
     // would keep serving the pre-write runtime as zero-await hits until the
@@ -1390,6 +1396,11 @@ where
         Arc<dyn wafer_core::interfaces::storage::service::StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
+    // This invocation's `d1_cost` line names the build its rows were read
+    // for, a failed one included.
+    inputs
+        .queries
+        .note_build(crate::database::BuildKind::Prepared);
     let built = crate::runtime_build::build_runtime(
         inputs.env,
         inputs.environment,
@@ -1630,7 +1641,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::*;
@@ -1645,10 +1656,99 @@ mod tests {
     }
 
     /// A cold isolate: no slot owner, no runtime, no recorded failure.
-    fn reset_isolate() {
+    pub(crate) fn reset_isolate() {
         reset_build_slot();
         RUNTIME.with(IsolateCell::clear);
         BUILD_LAST_FAILURE.with(|value| value.set(None));
+    }
+
+    /// A Worker `Env` with a `CONFIG_CACHE` KV namespace whose every call
+    /// rejects (so the version probe reads as unavailable and nothing is
+    /// written) and no D1 binding, so a build gets past the probe and fails
+    /// at its first D1 handle — before any statement is sent.
+    pub(crate) fn env_whose_build_fails_at_d1() -> worker::Env {
+        let env = js_sys::Function::new_no_args(
+            "const down = () => Promise.reject(new Error('kv unavailable in this test'));
+             return { CONFIG_CACHE: {
+                 get: down, getWithMetadata: down, put: down, list: down, delete: down,
+             } };",
+        )
+        .call0(&wasm_bindgen::JsValue::NULL)
+        .expect("the fake env builds");
+        wasm_bindgen::JsCast::unchecked_into::<worker::Env>(env)
+    }
+
+    /// **A cold dynamic build names itself in its invocation's cost**, failed
+    /// or not: the `d1_cost` line's `build=dynamic` comes from here. Driven
+    /// through `get_or_build`, the request path's one entry.
+    #[wasm_bindgen_test]
+    async fn a_cold_dynamic_build_notes_its_kind_on_the_invocations_count() {
+        reset_isolate();
+        let env = env_whose_build_fails_at_d1();
+        let environment = crate::environment::CfEnvironment::capture(&env);
+        let queries = crate::database::D1QueryCount::new();
+        let built = get_or_build(
+            &env,
+            &environment,
+            &queries,
+            &std::collections::HashMap::new(),
+            Ok,
+            |_, _| Ok(()),
+        )
+        .await;
+        reset_isolate();
+
+        assert!(built.is_err(), "the build failed at its D1 binding");
+        let cost = queries.cost();
+        assert_eq!(cost.built, Some(crate::database::BuildKind::Dynamic));
+        assert_eq!(cost.statements, 0, "it failed before sending anything");
+    }
+
+    /// **A prepared hydration names itself in its invocation's cost**, failed
+    /// or not: the line's `build=prepared` comes from here.
+    #[wasm_bindgen_test]
+    async fn a_prepared_hydration_notes_its_kind_on_the_invocations_count() {
+        let env = env_whose_build_fails_at_d1();
+        let environment = crate::environment::CfEnvironment::capture(&env);
+        let queries = crate::database::D1QueryCount::new();
+        let request_config = std::collections::HashMap::new();
+        let plan = impresspress_core::PreparedRuntimePlan::new_with_config_generation(
+            "example",
+            format!("sha256:{}", "a".repeat(64)),
+            "1".repeat(32),
+            impresspress_core::WaferLockIdentity::absent(),
+            impresspress_core::PreparedReleaseAssets::absent(),
+            impresspress_core::PreparedRuntimeStructure {
+                application_blocks: Vec::new(),
+                routes: Vec::new(),
+                built_in_route_count: 0,
+                block_settings: Default::default(),
+                block_configs: Default::default(),
+                final_block_configs: Default::default(),
+                wrap_grants: Vec::new(),
+                deployment_wrap_grants: Vec::new(),
+            },
+        )
+        .expect("a plan");
+        let hydrated = hydrate_prepared_runtime(
+            RequestInputs {
+                env: &env,
+                environment: &environment,
+                queries: &queries,
+                request_config: &request_config,
+            },
+            &plan,
+            Ok,
+            |_, _| Ok(()),
+            "env".to_string(),
+            0,
+        )
+        .await;
+
+        assert!(hydrated.is_err(), "the build failed at its D1 binding");
+        let cost = queries.cost();
+        assert_eq!(cost.built, Some(crate::database::BuildKind::Prepared));
+        assert_eq!(cost.statements, 0);
     }
 
     /// A bare runtime, enough to publish: `store` only moves the `Rc`.
