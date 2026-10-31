@@ -1345,14 +1345,9 @@ const STAMP: &str = "2026-09-03T00:00:00Z";
 async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
     let ctx = TestContext::with_products().await.fixture();
 
-    // What the DESTINATION seeded for itself, with its own ids.
-    seed_row(
-        &ctx,
-        ADMIN_ROLES_TABLE,
-        "role_minted_here",
-        json!({ "name": "admin", "description": "this instance's own admin role" }),
-    )
-    .await;
+    // What the DESTINATION seeded for itself, with its own ids: admin's
+    // migration 010 seeded its `admin` role as `seed-admin`, and this
+    // variable stands in for the boot seeder's.
     seed_row(
         &ctx,
         variables::TABLE,
@@ -1437,7 +1432,7 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
         .filter(|r| r.data["name"] == json!("admin"))
         .collect();
     assert_eq!(admin_roles.len(), 1, "{roles:?}");
-    assert_eq!(admin_roles[0].id, "role_minted_here");
+    assert_eq!(admin_roles[0].id, "seed-admin");
     assert_eq!(
         admin_roles[0].data["description"],
         json!("the exporting instance's admin role")
@@ -1489,10 +1484,20 @@ async fn re_importing_one_snapshot_converges_on_the_natural_key() {
         .await
         .unwrap();
 
+    // One `admin` role, the one migration 010 seeded, beside its `user`.
     let roles = db::list_all(&ctx, ADMIN_ROLES_TABLE, Vec::new())
         .await
         .unwrap();
-    assert_eq!(roles.len(), 1, "{roles:?}");
+    let mut names: Vec<_> = roles
+        .iter()
+        .map(|r| (r.id.as_str(), r.data["name"].as_str().unwrap_or_default()))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [("seed-admin", "admin"), ("seed-user", "user")],
+        "{roles:?}"
+    );
 }
 
 /// Every `Upsert` table's declared conflict columns must be columns the table
