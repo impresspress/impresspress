@@ -36,21 +36,31 @@ metric=d1_cost build=prepared statements=7 rows_read=44 rows_written=1 unmetered
   post-response work included (the request's audit row, deferred tasks,
   a streamed body's final writes);
 - `unmetered` counts the queries whose rows D1 did not report: a failed
-  query, and the admin SQL explorer's query, which D1 answers without
-  row counts. A line whose `unmetered` is not 0 reports a floor.
+  query, and every query the admin **Database** pages send — the SQL
+  explorer's, and also the table list, each table's row count and a
+  table's column info — which D1 answers without row counts. A line whose
+  `unmetered` is not 0 reports a floor.
 
 Read the lines with `wrangler tail <worker> --format json` and filter on
 `d1_cost`.
 
-**Also changes.** Every D1 read except the SQL explorer's now goes through
-D1's `all()`, the call whose answer carries the row counts, instead of
-`raw()` or `first()`. The rows a read returns are the same.
+**What the line cannot tell you.** It does not separate schema
+introspection (`pragma_table_info`) from other reads, and an invocation that
+built no runtime and read no more than the threshold logs nothing, so small
+warm reads — first-touch introspection among them — never appear at the
+default threshold. To measure those, also run D1's
+`d1AnalyticsAdaptiveGroups` query filtered to `pragma_table_info`, and a
+test deploy with `IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD=0`.
+
+**Also changes.** Every D1 read except the admin Database pages' now goes
+through D1's `all()`, the call whose answer carries the row counts, instead
+of `raw()` or `first()`. The rows a read returns are the same.
 
 **What to do.** Nothing. To log more invocations, set
 `IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD` as a Worker var (`0` logs every
-invocation that read a row). A value that is not a whole number is reported
-on every invocation as `metric=d1_rows_log_threshold_invalid`, and the
-default applies.
+invocation that read a row). A value that is not a whole number is logged
+as a warning on every invocation (`metric=d1_rows_log_threshold_invalid`),
+and the default applies.
 
 ### Admin: the system roles come from a migration (admin 010)
 

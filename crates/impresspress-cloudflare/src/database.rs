@@ -27,7 +27,8 @@
 //! Every D1 service built in one invocation shares one [`D1QueryCount`],
 //! created at the Worker entry (`run_with_config`, `run_scheduled_with_config`)
 //! and counted ONLY in the statement-sending primitives below: one per
-//! `run_fetch`/`run_fetch_one`/`run_execute`/`run_scalar_*`, and one per
+//! `run_fetch`/`run_fetch_one`/`run_execute`/`run_scalar_*`/`query_raw`, and
+//! one per
 //! statement of a `run_batch`/`run_transaction` (D1's limits page does not say
 //! whether a `db.batch()` counts as one query or N; N is the conservative
 //! reading). A statement is counted when it is sent, not when it succeeds,
@@ -237,9 +238,13 @@ pub(crate) fn forget_isolate_schema() {
 /// analytics sum per database — to the invocation's [`D1Cost`]. A batch
 /// answers one result per statement, and each is added. A statement whose
 /// result reports no meta is still counted as sent, and the gap between the
-/// two is [`D1Cost::unmetered`]: a failed statement, and the admin SQL
-/// explorer's `query_raw`, which reads through `raw()` (see
-/// [`DbExec::query_raw`] on [`D1DatabaseService`]), whose answer has no meta.
+/// two is [`D1Cost::unmetered`]: a failed statement, and every `query_raw`,
+/// which reads through `raw()` (see [`DbExec::query_raw`] on
+/// [`D1DatabaseService`]), whose answer has no meta. `query_raw` is how the
+/// admin block's database pages read: the SQL explorer's typed query, and
+/// also the table list, each table's row count (a full `COUNT(*)`) and a
+/// table's column info, built by `wafer_sql_utils::introspect`. Those three
+/// stay unmetered until wafer-core has a typed operation for each.
 ///
 /// A count made by [`reporting_at_end`](Self::reporting_at_end) hands its
 /// [`D1Cost`] to a report once, when its last handle is dropped. That is the
@@ -416,7 +421,11 @@ impl D1QueryCount {
     /// written when D1 reported its meta, nothing when it did not.
     fn meter(&self, result: &D1Result) {
         // A meta that does not decode is a meta not reported: the statement
-        // stays unmetered rather than failing a read that succeeded.
+        // stays unmetered rather than failing a read that succeeded. One known
+        // case: worker 0.8.7 decodes `meta.size_after` as a `usize`, 32 bits
+        // on wasm32, so on a database past 4 GiB (Workers Paid only) no meta
+        // decodes and every statement reads as `unmetered` — visible in the
+        // line, never a wrong row figure.
         let Some(meta) = result.meta().ok().flatten() else {
             return;
         };
@@ -618,8 +627,8 @@ impl DbExec for D1DatabaseService {
     /// row objects (see [`fetch_rows`]) — whose result columns are a table's
     /// own columns or the builders' aliases: SQL identifiers, never an array
     /// index. A duplicate name keeps its first position and its last value,
-    /// as [`rows_from_positional`] pairs one. The one read whose columns are
-    /// a person's choice, the admin SQL explorer's, does not come here: see
+    /// as [`rows_from_positional`] pairs one. `query_raw`, whose SQL can be a
+    /// person's (the admin SQL explorer's), does not come here: see
     /// [`query_raw`](DbExec::query_raw).
     async fn run_fetch(
         &self,
@@ -716,15 +725,18 @@ impl DbExec for D1DatabaseService {
         Ok(scalar_f64(self.first_row_metered(&stmt).await?))
     }
 
-    /// The admin SQL explorer's read (`blocks::admin` hands it the SQL a
-    /// person typed): read through `raw({ columnNames: true })` and paired by
-    /// position, so `SELECT name, 1, id` keeps its columns in the order it
-    /// asked for them, where `all()`'s row objects would enumerate `1` first.
+    /// Raw SQL text from a block: the admin SQL explorer's (the SQL a person
+    /// typed) and the admin database pages' introspection (the table list,
+    /// row counts and column info, built by `wafer_sql_utils::introspect`,
+    /// which reach the backend only as text through this op). Read through
+    /// `raw({ columnNames: true })` and paired by position, so
+    /// `SELECT name, 1, id` keeps its columns in the order it asked for them,
+    /// where `all()`'s row objects would enumerate `1` first.
     ///
-    /// `raw()` answers no meta, so this is the one read whose rows are not
-    /// metered: it is counted as sent, and it is the
-    /// [`D1Cost::unmetered`] statement in its invocation's `d1_cost` line.
-    /// Every other read goes through [`run_fetch`](DbExec::run_fetch).
+    /// `raw()` answers no meta, so these are the reads whose rows are not
+    /// metered: each is counted as sent, and is a [`D1Cost::unmetered`]
+    /// statement in its invocation's `d1_cost` line. Every other read goes
+    /// through [`run_fetch`](DbExec::run_fetch).
     async fn query_raw(
         &self,
         query: &str,
@@ -770,8 +782,9 @@ impl DbExec for D1DatabaseService {
     /// - [`BatchOp::ScalarF64`] → first of `results()` → [`scalar_f64`] (as
     ///   [`run_scalar_f64`](DbExec::run_scalar_f64)).
     ///
-    /// Note `results()` yields the same first row object `first()` returns, so
-    /// the scalar/fetch-one decode matches the primitives byte-for-byte.
+    /// The lone primitives read the same `all()`-shaped result (see
+    /// [`run_fetch`](DbExec::run_fetch)), so the scalar/fetch-one decode
+    /// matches them byte-for-byte.
     ///
     /// **Transactional vs. sequential (all-or-nothing).** D1 `batch()` runs
     /// the statements sequentially inside one implicit transaction: it stops
@@ -1204,7 +1217,7 @@ extern "C" {
 }
 
 /// The rows of `stmt`, each in the order the statement returned its columns:
-/// the admin SQL explorer's read ([`DbExec::query_raw`]).
+/// [`DbExec::query_raw`]'s read.
 ///
 /// Read through `raw({ columnNames: true })`, which answers the column names
 /// as its first array and each row's values positionally after it, paired by
@@ -1291,6 +1304,13 @@ fn js_text(value: &JsValue) -> String {
 /// message (`D1_ERROR: UNIQUE constraint failed: …`) the classifier reads.
 /// So a D1 error is spelled here as its message followed by its cause; every
 /// other variant's `Display` already carries its text.
+///
+/// That `D1` wrapping comes only from `run()`, `first()`, `raw()` and
+/// `batch()`. worker 0.8.7's `all()` — every lone read here — hands its
+/// rejection back unwrapped, as `Error::UnknownJsError`, whose `Display` is
+/// `Error: <message>` and drops the cause. The classifier still sees D1's
+/// whole text: workerd puts it in the message (`D1_ERROR: <text>`, the cause
+/// a copy of it), and transport failures keep their own message.
 fn d1_error_text(e: &worker::Error) -> String {
     match e {
         worker::Error::D1(d1) => {
@@ -1784,8 +1804,7 @@ mod tests {
     /// `id_policy`), which answers `0` — the executor mints the id — as for
     /// every `TEXT` primary key impresspress declares.
     ///
-    /// A lone `raw({ columnNames: true })`, which only the admin SQL
-    /// explorer's `query_raw` sends, answers the same columns positionally,
+    /// A lone `raw({ columnNames: true })`, which only `query_raw` sends, answers the same columns positionally,
     /// and no meta, as D1's `raw()` does.
     fn metered_d1(
         answer: BatchAnswer,
@@ -2712,8 +2731,9 @@ mod tests {
         assert!(cost.rows_read > 0 && cost.rows_written > 0, "{cost:?}");
     }
 
-    /// The admin SQL explorer reads through `raw()`, which answers no meta:
-    /// its statement is counted as sent and stays unmetered, so its
+    /// `query_raw` (the admin database pages: the SQL explorer, the table
+    /// list, row counts, column info) reads through `raw()`, which answers no
+    /// meta: its statement is counted as sent and stays unmetered, so its
     /// invocation's line says its rows are a floor.
     #[wasm_bindgen_test]
     async fn a_raw_query_is_counted_but_unmetered() {

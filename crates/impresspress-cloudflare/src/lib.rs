@@ -473,27 +473,97 @@ where
 /// A fresh [`database::D1QueryCount`] for one invocation, which logs the
 /// invocation's [`d1_cost_line`] when its D1 work ends.
 ///
+/// Both Worker entries create theirs here, and only here: `entry_wiring_tests`
+/// drives each entry and fails if it stops doing so.
+///
 /// The threshold is this deploy's `IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD`, read
 /// from the captured environment, never from KV or D1. A value that does not
-/// parse is logged as such on every invocation, and the default applies, so
-/// the operator sees that their setting was not applied rather than lose the
-/// lines.
+/// parse is logged as a warning on every invocation, and the default applies:
+/// the operator's setting was not applied, which they must see, and the lines
+/// it governs keep coming.
 fn invocation_query_count(environment: &CfEnvironment) -> database::D1QueryCount {
     let threshold = environment.d1_rows_log_threshold().unwrap_or_else(|error| {
-        worker::console_log!(
-            "{}",
-            impresspress_core::metrics::metric_line(
-                "d1_rows_log_threshold_invalid",
-                &[("error", &error)],
-            )
-        );
+        invocation_log::warn(&impresspress_core::metrics::metric_line(
+            "d1_rows_log_threshold_invalid",
+            &[("error", &error)],
+        ));
         environment::D1_ROWS_LOG_THRESHOLD_DEFAULT
     });
     database::D1QueryCount::reporting_at_end(move |cost| {
+        invocation_log::cost(&cost);
         if let Some(line) = d1_cost_line(&cost, threshold) {
-            worker::console_log!("{line}");
+            invocation_log::info(&line);
         }
     })
+}
+
+/// Where [`invocation_query_count`]'s lines and reports go: the Worker's
+/// console. A test captures them instead ([`invocation_log::capture`]), which
+/// is how the entries' wiring is tested through `run_with_config` and
+/// `run_scheduled_with_config` themselves.
+mod invocation_log {
+    #[cfg(test)]
+    use std::cell::RefCell;
+
+    use crate::database::D1Cost;
+
+    /// What one test captured: every reported cost, and every line with the
+    /// level it was logged at.
+    #[cfg(test)]
+    #[derive(Default)]
+    pub(crate) struct Captured {
+        pub(crate) costs: Vec<D1Cost>,
+        pub(crate) lines: Vec<(&'static str, String)>,
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        static CAPTURE: RefCell<Option<Captured>> = const { RefCell::new(None) };
+    }
+
+    /// Capture this thread's invocation lines and reports until
+    /// [`take`] (which also stops capturing).
+    #[cfg(test)]
+    pub(crate) fn capture() {
+        CAPTURE.with(|capture| *capture.borrow_mut() = Some(Captured::default()));
+    }
+
+    /// Everything captured since [`capture`]; capturing stops.
+    #[cfg(test)]
+    pub(crate) fn take() -> Captured {
+        CAPTURE.with(|capture| capture.borrow_mut().take().unwrap_or_default())
+    }
+
+    /// Hand `record` the capture, if a test installed one: whether it did.
+    #[cfg(test)]
+    fn captured(record: impl FnOnce(&mut Captured)) -> bool {
+        CAPTURE.with(|capture| capture.borrow_mut().as_mut().map(record).is_some())
+    }
+
+    /// An invocation's cost, reported when its D1 work ended. Production logs
+    /// it only through its line ([`info`]); a test sees every report, so it
+    /// can tell an entry that built no reporting count from one whose
+    /// invocation was under the threshold.
+    pub(super) fn cost(_cost: &D1Cost) {
+        #[cfg(test)]
+        captured(|c| c.costs.push(*_cost));
+    }
+
+    pub(super) fn info(line: &str) {
+        #[cfg(test)]
+        if captured(|c| c.lines.push(("info", line.to_string()))) {
+            return;
+        }
+        worker::console_log!("{line}");
+    }
+
+    pub(super) fn warn(line: &str) {
+        #[cfg(test)]
+        if captured(|c| c.lines.push(("warn", line.to_string()))) {
+            return;
+        }
+        worker::console_warn!("{line}");
+    }
 }
 
 /// The `d1_cost` metric line for an invocation that cost `cost`, or `None`
@@ -504,9 +574,17 @@ fn invocation_query_count(environment: &CfEnvironment) -> database::D1QueryCount
 /// rows_written=N unmetered=N`. The rows are the sums of D1's own
 /// `meta.rows_read` / `meta.rows_written` over the invocation's statements,
 /// the figures D1 bills by; `unmetered` counts the statements whose rows D1
-/// did not report (a failed statement, the admin SQL explorer's read), so a
-/// line whose `unmetered` is not 0 is a floor, not a total. See
+/// did not report (a failed statement; every `query_raw`, which is the
+/// admin database pages' explorer, table list, row counts and column info),
+/// so a line whose `unmetered` is not 0 is a floor, not a total. See
 /// [`database::D1QueryCount`].
+///
+/// What the line cannot say: it does not split introspection rows
+/// (`pragma_table_info`) from the rest, and an invocation that built nothing
+/// and read no more than the threshold logs nothing, so warm first-touch
+/// introspections never appear at the default. Measuring those takes D1's
+/// `d1AnalyticsAdaptiveGroups` query filtered to `pragma_table_info`, or a
+/// run with `IMPRESSPRESS_D1_ROWS_LOG_THRESHOLD=0`.
 pub(crate) fn d1_cost_line(cost: &database::D1Cost, threshold: u64) -> Option<String> {
     if cost.built.is_none() && cost.rows_read <= threshold {
         return None;
@@ -2243,6 +2321,159 @@ mod executor_trace_wiring_tests {
                 .get(executor_trace::INSTANCE_HEADER)
                 .expect("read the header"),
             None
+        );
+    }
+}
+
+/// Both Worker entries build their invocation's count through
+/// [`invocation_query_count`]: driven through `run_with_config` and
+/// `run_scheduled_with_config` themselves, each invocation reports its cost
+/// once when its D1 work ends, and a threshold that does not parse is a
+/// warning.
+#[cfg(test)]
+mod entry_wiring_tests {
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    const THRESHOLD_INVALID: &str = "metric=d1_rows_log_threshold_invalid";
+
+    /// A fetch through `run_with_config`: an unauthorized `/_deploy/prepared`,
+    /// answered 404 before any binding is touched, with `vars` as the Env.
+    async fn fetch(vars: &[(&str, &str)]) -> invocation_log::Captured {
+        let env = js_sys::Object::new();
+        for (name, value) in vars {
+            js_sys::Reflect::set(&env, &(*name).into(), &(*value).into()).expect("set a var");
+        }
+        let req =
+            worker::Request::new("https://example.test/_deploy/prepared", worker::Method::Get)
+                .expect("request");
+        let ctx = worker::Context::new(
+            JsValue::from(js_sys::Object::new()).unchecked_into::<worker::worker_sys::Context>(),
+        );
+        invocation_log::capture();
+        let response = run_with_config(
+            req,
+            JsValue::from(env).unchecked_into::<worker::Env>(),
+            ctx,
+            HashMap::new(),
+            Ok::<ImpresspressBuilder, Box<dyn std::error::Error>>,
+            |_, _| Ok(()),
+        )
+        .await
+        .expect("a response");
+        assert_eq!(response.status_code(), 404, "the deploy endpoint answered");
+        invocation_log::take()
+    }
+
+    /// A cron through `run_scheduled_with_config`, on an Env whose build gets
+    /// past the KV probe and fails at its D1 binding: a cold dynamic build
+    /// that sent no statement. `vars` are added to that Env.
+    async fn cron(vars: &[(&str, &str)]) -> invocation_log::Captured {
+        let env = runtime_cache::tests::env_whose_build_fails_at_d1();
+        for (name, value) in vars {
+            js_sys::Reflect::set(&env, &(*name).into(), &(*value).into()).expect("set a var");
+        }
+        let event = js_sys::Object::new();
+        js_sys::Reflect::set(&event, &"cron".into(), &"*/5 * * * *".into()).expect("cron");
+        js_sys::Reflect::set(&event, &"scheduledTime".into(), &JsValue::from(0.0)).expect("time");
+        let event = worker::ScheduledEvent::from(
+            JsValue::from(event).unchecked_into::<worker::worker_sys::ScheduledEvent>(),
+        );
+        // `waitUntil` keeps every promise it is handed, so the invocation's
+        // post-handler work can be run to the end before the capture is read.
+        let handed = js_sys::Array::new();
+        let ctx = js_sys::Function::new_with_args(
+            "handed",
+            "return { waitUntil(promise) { handed.push(promise); } };",
+        )
+        .call1(&JsValue::NULL, &handed)
+        .expect("the fake context builds");
+        let ctx = worker::ScheduleContext::from(
+            ctx.unchecked_into::<worker::worker_sys::ScheduleContext>(),
+        );
+        runtime_cache::tests::reset_isolate();
+        // A config-version retry another test left pending would be handed to
+        // `waitUntil` behind a `worker::Delay`, which Node's timers cannot
+        // drive; this cron is about its count, not that retry.
+        let _ = kv_cached_db::take_pending_version_retry();
+        invocation_log::capture();
+        run_scheduled_with_config(
+            event,
+            env,
+            ctx,
+            HashMap::new(),
+            Ok::<ImpresspressBuilder, Box<dyn std::error::Error>>,
+            |_, _| Ok(()),
+        )
+        .await;
+        for promise in handed.iter() {
+            let _ =
+                worker::wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(promise)).await;
+        }
+        let captured = invocation_log::take();
+        runtime_cache::tests::reset_isolate();
+        captured
+    }
+
+    /// The fetch entry's invocation reports once, when it ends; under the
+    /// threshold and with no build, it logs no line.
+    #[wasm_bindgen_test]
+    async fn a_fetch_reports_its_cost_once_through_the_entry() {
+        let captured = fetch(&[]).await;
+        assert_eq!(captured.costs, [database::D1Cost::default()]);
+        assert!(captured.lines.is_empty(), "{:?}", captured.lines);
+    }
+
+    /// A threshold the fetch entry cannot parse is a warning naming the var.
+    #[wasm_bindgen_test]
+    async fn a_fetch_warns_of_a_threshold_it_cannot_parse() {
+        let captured = fetch(&[(environment::D1_ROWS_LOG_THRESHOLD_KEY, "1k")]).await;
+        assert_eq!(captured.costs.len(), 1);
+        assert_eq!(captured.lines.len(), 1, "{:?}", captured.lines);
+        let (level, line) = &captured.lines[0];
+        assert_eq!(*level, "warn");
+        assert!(line.starts_with(THRESHOLD_INVALID), "{line}");
+        assert!(
+            line.contains(environment::D1_ROWS_LOG_THRESHOLD_KEY),
+            "{line}"
+        );
+    }
+
+    /// The scheduled entry's invocation reports once too, and its cold build
+    /// — failed before any statement — is a `build=dynamic` line.
+    #[wasm_bindgen_test]
+    async fn a_cron_that_builds_logs_its_d1_cost_line_through_the_entry() {
+        let captured = cron(&[]).await;
+        let built = database::D1Cost {
+            built: Some(database::BuildKind::Dynamic),
+            ..database::D1Cost::default()
+        };
+        assert_eq!(captured.costs, [built]);
+        assert_eq!(
+            captured.lines,
+            [(
+                "info",
+                "metric=d1_cost build=dynamic statements=0 rows_read=0 rows_written=0 \
+                 unmetered=0"
+                    .to_string()
+            )]
+        );
+    }
+
+    /// A threshold the scheduled entry cannot parse is a warning too.
+    #[wasm_bindgen_test]
+    async fn a_cron_warns_of_a_threshold_it_cannot_parse() {
+        let captured = cron(&[(environment::D1_ROWS_LOG_THRESHOLD_KEY, "-5")]).await;
+        assert_eq!(captured.costs.len(), 1);
+        assert!(
+            captured
+                .lines
+                .iter()
+                .any(|(level, line)| *level == "warn" && line.starts_with(THRESHOLD_INVALID)),
+            "{:?}",
+            captured.lines
         );
     }
 }
