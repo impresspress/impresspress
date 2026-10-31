@@ -127,7 +127,7 @@ pub struct ImpresspressBuilder {
     /// blocks that declare no required config or that read their config from
     /// `RuntimeContext::block_configs` (composite/uses). Native consumers
     /// should pass `EnvConfigSource`; cloudflare consumers pass
-    /// `D1ConfigSource`.
+    /// `DatabaseConfigSource`.
     config_source: Option<Arc<dyn wafer_run::ConfigSource>>,
 }
 
@@ -318,7 +318,7 @@ impl ImpresspressBuilder {
     /// no required config or that read their config from
     /// `RuntimeContext::block_configs` (composite/uses). Native consumers
     /// should pass `EnvConfigSource`; cloudflare consumers pass
-    /// `D1ConfigSource`.
+    /// `DatabaseConfigSource`.
     pub fn config_source(mut self, source: Arc<dyn wafer_run::ConfigSource>) -> Self {
         self.config_source = Some(source);
         self

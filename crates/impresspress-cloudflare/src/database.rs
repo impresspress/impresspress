@@ -128,7 +128,7 @@
 //! and that is what makes the memoization worth anything: every D1 service is
 //! built per request (`warm_request_services`, the audit-row write handle,
 //! `build_runtime`'s pre-`Init` `block_settings` read), and every request runs
-//! `D1ConfigSource::snapshot`, a paged `list` over the variables table. A
+//! the config source's snapshot, a paged `list` over the variables table. A
 //! per-service cache would be cold for each of them, so each request would pay
 //! the key round trip. What may invalidate the cache is enumerated on
 //! [`D1DatabaseService::schema_cache`].
@@ -169,9 +169,9 @@ thread_local! {
 ///
 /// Scoped to the isolate rather than to one service because the services are
 /// per *request*: `warm_request_services` builds a fresh `D1DatabaseService`
-/// (and so a fresh `KvCachedD1DatabaseService` and `D1ConfigSource`) for every
+/// (and so a fresh `KvCachedD1DatabaseService` and `DatabaseConfigSource`) for every
 /// request it serves. A per-service cache is therefore always cold, and
-/// `D1ConfigSource::snapshot` — which every request runs — issues a paged
+/// the config source's snapshot — which every request runs — issues a paged
 /// `list` over the variables table, so each request would pay a
 /// `pragma_table_info` round trip for the primary key before its select. One
 /// cache per isolate is what makes the introspection amortize, and it is the
@@ -1597,7 +1597,7 @@ mod tests {
     /// **Fails with a per-service cache**: every D1 service in an isolate has
     /// to answer with the same cache, because each of them is built per
     /// request (`warm_request_services`) over the same database, and
-    /// `D1ConfigSource::snapshot`'s paged `list` would otherwise pay a
+    /// the config source snapshot's paged `list` would otherwise pay a
     /// primary-key round trip on every request.
     #[wasm_bindgen_test]
     fn every_d1_service_in_an_isolate_shares_one_schema_cache() {

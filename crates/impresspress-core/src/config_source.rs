@@ -8,7 +8,7 @@
 //! target installs is not a convenience: it is what decides which blocks that
 //! target can run at all.
 //!
-//! Two impls live here, one per shape of "when does this target know its
+//! Three impls live here, one per shape of "when does this target know its
 //! config":
 //!
 //! * [`EnvConfigSource`] — reads `std::env`. Not used by the native server
@@ -18,13 +18,17 @@
 //! * [`SharedConfigSource`] — an empty map at build time, filled once the
 //!   variables are known. The browser target's, because it cannot know them
 //!   until after the runtime is sealed.
-//!
-//! Cloudflare's `D1ConfigSource` (in `impresspress-cloudflare`) is the third
-//! shape: it queries the variables table on demand.
+//! * [`DatabaseConfigSource`] — reads the variables table on demand, through
+//!   whatever [`DatabaseService`](wafer_core::interfaces::database::service::DatabaseService)
+//!   it is given. Cloudflare's, over D1; native tests and the D1 cost harness
+//!   run the same code over SQLite.
+
+mod database;
 
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+pub use database::DatabaseConfigSource;
 use wafer_block::ConfigVar;
 use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig, StaticConfigSource};
 
@@ -89,7 +93,7 @@ impl ConfigSource for EnvConfigSource {
 /// place — the seeded `impresspress__admin__variables` rows — but they reach
 /// it at different times. Native seeds pre-wafer and hands the loaded map
 /// straight to [`wafer_run::StaticConfigSource::new`]; Cloudflare's
-/// `D1ConfigSource` queries D1 on demand. The browser can do neither: the
+/// [`DatabaseConfigSource`] queries D1 on demand. The browser can do neither: the
 /// variables table only exists once the admin block's `lifecycle(Init)` has
 /// run its migration, and admin cannot run until the wafer is built and
 /// sealed. So the browser has to build first and learn its config second.

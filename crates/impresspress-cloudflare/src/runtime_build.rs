@@ -27,7 +27,6 @@ use wafer_core::interfaces::{
 
 use crate::{
     boot_hooks::{CfDeployBootHooks, CfRequestBootHooks, PreparedPlanBootHooks},
-    config_source,
     environment::{CfEnvironment, BUILDER_WORKER_VAR_KEYS, PROTECTED_ENV_KEYS},
     kv_cached_db, request_services, runner,
     services::{
@@ -206,7 +205,8 @@ pub(crate) async fn boot_prepared_runtime(built: &mut BuiltRuntime) -> Result<Bo
 /// `a_cold_start_before_any_migration_reads_no_settings` pins it.
 ///
 /// Every other read on this pre-migration window is already safe by ordering,
-/// not by luck: `D1ConfigSource` is reached only through
+/// not by luck: the [`DatabaseConfigSource`](impresspress_core::config_source::DatabaseConfigSource)
+/// is reached only through
 /// `ConfigSource::load_for_block`, which short-circuits for a block declaring
 /// no config keys — and `boot` initializes `impresspress/admin`, which
 /// declares none, before any block that does, so the `variables` table exists
@@ -260,7 +260,7 @@ where
 
     // 2. Load block settings (enablement + migration state) eagerly —
     //    the only database read this build issues itself. The per-block
-    //    env-config pre-load is gone; D1ConfigSource resolves declared
+    //    env-config pre-load is gone; the config source resolves declared
     //    config keys later, on first init of a block that declares any,
     //    from ONE unfiltered read of the whole variables table grouped by
     //    `block` in memory. block_settings still needs an eager load
@@ -329,13 +329,8 @@ where
         (request_services::config_proxy(), concrete)
     });
 
-    // 5. ConfigSource: D1-backed, resolving each block against one lazily
-    //    fetched unfiltered snapshot of the variables table. The overlay layers
-    //    worker::Env secrets (PROTECTED_ENV_KEYS) on top of D1 rows so
-    //    secrets never need to be mirrored into the variables table.
-    let cfg_source: Arc<dyn wafer_run::ConfigSource> = Arc::new(
-        config_source::D1ConfigSource::with_overlay(db.clone(), overlay),
-    );
+    // 5. ConfigSource: see `request_config_source`.
+    let cfg_source = request_config_source(db.clone(), overlay);
     let services = request_services::RequestServices::new(
         environment,
         db.clone(),
@@ -595,9 +590,7 @@ pub(crate) fn warm_request_services(
     let crypto = request_crypto_service(env, environment.jwt_secret().to_string(), environment)?;
     let network = make_fetch_network_service();
     let logger = console_logger(environment.cf_log_level());
-    let config_source: Arc<dyn wafer_run::ConfigSource> = Arc::new(
-        config_source::D1ConfigSource::with_overlay(db.clone(), overlay),
-    );
+    let config_source = request_config_source(db.clone(), overlay);
 
     Ok(request_services::RequestServices::new(
         environment,
@@ -609,6 +602,24 @@ pub(crate) fn warm_request_services(
         logger,
         config_source,
     ))
+}
+
+/// The config source both fills build: core's
+/// [`DatabaseConfigSource`](impresspress_core::config_source::DatabaseConfigSource)
+/// over this request's D1 service, resolving each block against one lazily
+/// fetched unfiltered snapshot of the variables table, with `overlay` — the
+/// `worker::Env` secrets (`PROTECTED_ENV_KEYS`) and the consumer's request
+/// config — layered over the rows, so a secret never has to be mirrored into
+/// that table.
+///
+/// The reading and resolving are core's, identical on every backend; what is
+/// Cloudflare's is the overlay, which [`structural_runtime_config`],
+/// [`add_request_config`] and [`request_config_surfaces`] assemble.
+fn request_config_source(
+    db: Arc<dyn DatabaseService>,
+    overlay: HashMap<String, String>,
+) -> Arc<dyn wafer_run::ConfigSource> {
+    Arc::new(impresspress_core::config_source::DatabaseConfigSource::with_overlay(db, overlay))
 }
 
 /// The crypto service both fills build: `jwt_secret` for tokens, and the
@@ -1086,6 +1097,221 @@ mod tests {
             declared,
             vec!["APP_SECRET"],
             "promoting the prepare flag to both surfaces retracts its divergence",
+        );
+    }
+
+    /// A D1 binding over a migrated variables table holding `rows` (a JS
+    /// array literal of row objects), answering the executor's introspection
+    /// as SQLite answers it. Every statement it runs is pushed onto `log` as
+    /// `[sql, params]` JSON, in order. A write, a batch or a `raw()` read
+    /// rejects: the config source sends none.
+    fn variables_d1(log: &js_sys::Array, rows: &str) -> worker::D1Database {
+        let handle = js_sys::Function::new_with_args(
+            "log",
+            &format!(
+                "const rows = {rows};
+                const columns = ['id', 'key', 'name', 'description', 'value', 'warning',
+                                 'sensitive', 'updated_by', 'created_at', 'updated_at', 'block'];
+                const meta = {{ rows_read: 0, rows_written: 0, changes: 0 }};
+                return {{
+                    prepare(sql) {{
+                        const stmt = {{
+                            params: [],
+                            bind(...params) {{ stmt.params = params; return stmt; }},
+                            all() {{
+                                log.push(JSON.stringify([sql, stmt.params]));
+                                let results = rows;
+                                if (sql.includes('pragma_table_info') && sql.includes('pk > 0')) {{
+                                    results = [{{ name: 'id' }}];
+                                }} else if (sql.includes('pragma_table_info')) {{
+                                    results = columns.map((name) => ({{
+                                        name,
+                                        decl_type: name === 'sensitive' ? 'INTEGER' : 'TEXT',
+                                    }}));
+                                }}
+                                return Promise.resolve({{ success: true, results, meta }});
+                            }},
+                            run() {{ return Promise.reject(new Error('the config source writes nothing')); }},
+                            raw() {{ return Promise.reject(new Error('the config source reads through all()')); }},
+                        }};
+                        return stmt;
+                    }},
+                    batch() {{ return Promise.reject(new Error('the config source sends no batch')); }},
+                }};"
+            ),
+        )
+        .call1(&wasm_bindgen::JsValue::NULL, log)
+        .expect("the fake binding builds");
+        wasm_bindgen::JsCast::unchecked_into::<worker::D1Database>(handle)
+    }
+
+    /// The rows [`variables_d1`] serves in these tests: two of auth's, one of
+    /// email's, and a shared row that belongs to no block.
+    const VARIABLES: &str = "[
+        { id: 'v1', key: 'WAFER_RUN__AUTH__A', name: '', description: '', value: 'from-d1',
+          warning: '', sensitive: 0, updated_by: '', created_at: 't', updated_at: 't',
+          block: 'WAFER_RUN__AUTH' },
+        { id: 'v2', key: 'WAFER_RUN__AUTH__JWT_SECRET', name: '', description: '',
+          value: 'stored-secret', warning: '', sensitive: 1, updated_by: '', created_at: 't',
+          updated_at: 't', block: 'WAFER_RUN__AUTH' },
+        { id: 'v3', key: 'IMPRESSPRESS__EMAIL__FROM', name: '', description: '',
+          value: 'from@d1.test', warning: '', sensitive: 0, updated_by: '', created_at: 't',
+          updated_at: 't', block: 'IMPRESSPRESS__EMAIL' },
+        { id: 'v4', key: 'WAFER_RUN_SHARED__APP_NAME', name: '', description: '',
+          value: 'shared', warning: '', sensitive: 0, updated_by: '', created_at: 't',
+          updated_at: 't', block: null }
+    ]";
+
+    /// A KV namespace that counts what reaches it and holds nothing.
+    #[derive(Default)]
+    struct CountingKv {
+        gets: std::cell::Cell<usize>,
+        writes: std::cell::Cell<usize>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl impresspress_core::kv::KvBackend for CountingKv {
+        async fn get(&self, _key: &str) -> Result<Option<String>, String> {
+            self.gets.set(self.gets.get() + 1);
+            Ok(None)
+        }
+        async fn put_with_ttl(&self, _key: &str, _value: &str, _ttl: u64) -> Result<(), String> {
+            self.writes.set(self.writes.get() + 1);
+            Ok(())
+        }
+        async fn put(&self, _key: &str, _value: &str) -> Result<(), String> {
+            self.writes.set(self.writes.get() + 1);
+            Ok(())
+        }
+        async fn delete(&self, _key: &str) -> Result<(), String> {
+            self.writes.set(self.writes.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// The database service both fills hand the config source, over `d1`:
+    /// the D1 adapter behind the KV row cache, on a cold isolate.
+    fn request_database(d1: worker::D1Database, kv: Arc<CountingKv>) -> Arc<dyn DatabaseService> {
+        crate::database::forget_isolate_schema();
+        let d1 = crate::database::D1DatabaseService::new(
+            d1,
+            "DB",
+            crate::database::D1QueryCount::new(),
+            1000,
+        );
+        Arc::new(crate::kv_cached_db::KvCachedD1DatabaseService::new(
+            Arc::new(d1),
+            kv,
+        ))
+    }
+
+    fn statements(log: &js_sys::Array) -> Vec<String> {
+        log.iter()
+            .map(|entry| entry.as_string().expect("a logged statement"))
+            .collect()
+    }
+
+    /// What a cold build's config resolution sends D1: the variables table's
+    /// primary key and columns (a cold isolate's schema cache), then ONE
+    /// unfiltered, bounded read of the whole table —
+    /// for every config-declaring block, and nothing for a block declaring no
+    /// keys. Nothing reaches KV: the whole-table shape is deliberately not a
+    /// cacheable one.
+    ///
+    /// The statements are pinned verbatim, and they are the ones the
+    /// Cloudflare-only `D1ConfigSource` sent before the source moved into
+    /// core: the same golden passed against that type (see the PR).
+    #[wasm_bindgen_test]
+    async fn a_cold_builds_config_resolution_sends_d1_one_unfiltered_variables_read() {
+        let log = js_sys::Array::new();
+        let kv = Arc::new(CountingKv::default());
+        let source = request_config_source(
+            request_database(variables_d1(&log, VARIABLES), kv.clone()),
+            HashMap::new(),
+        );
+
+        let auth = source
+            .load_for_block(
+                "wafer-run/auth",
+                &[
+                    wafer_block::ConfigVar::new("WAFER_RUN__AUTH__A", "doc", ""),
+                    wafer_block::ConfigVar::new("WAFER_RUN_SHARED__APP_NAME", "doc", "").optional(),
+                ],
+            )
+            .await
+            .expect("auth resolves");
+        assert_eq!(auth.get("WAFER_RUN__AUTH__A"), Some("from-d1"));
+        assert_eq!(
+            auth.get("WAFER_RUN_SHARED__APP_NAME"),
+            None,
+            "a shared row belongs to no block"
+        );
+        let email = source
+            .load_for_block(
+                "impresspress/email",
+                &[wafer_block::ConfigVar::new(
+                    "IMPRESSPRESS__EMAIL__FROM",
+                    "doc",
+                    "",
+                )],
+            )
+            .await
+            .expect("email resolves");
+        assert_eq!(email.get("IMPRESSPRESS__EMAIL__FROM"), Some("from@d1.test"));
+        source
+            .load_for_block("wafer-run/cors", &[])
+            .await
+            .expect("a block declaring nothing resolves");
+
+        assert_eq!(
+            statements(&log),
+            [
+                r#"["SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk",["impresspress__admin__variables"]]"#,
+                r#"["SELECT name, type AS decl_type FROM pragma_table_info(?1) ORDER BY cid",["impresspress__admin__variables"]]"#,
+                r#"["SELECT * FROM \"impresspress__admin__variables\" ORDER BY \"id\" ASC LIMIT ?",[10000]]"#,
+            ],
+        );
+        assert_eq!(kv.gets.get(), 0, "no KV read for the variables snapshot");
+        assert_eq!(kv.writes.get(), 0, "no KV write for the variables snapshot");
+    }
+
+    /// The overlay wiring, end to end: what the warm fill assembles — the
+    /// Worker's secret binding and a consumer's request config — wins over
+    /// the D1 row for the same key, through the source the fill builds.
+    #[wasm_bindgen_test]
+    async fn the_overlay_the_fill_assembles_wins_over_the_d1_row() {
+        let jwt = impresspress_core::blocks::auth::JWT_SECRET_KEY;
+        let mut environment = empty_environment();
+        environment.set_jwt_secret_for_test("bound-secret");
+        let request_config =
+            HashMap::from([("WAFER_RUN__AUTH__A".to_string(), "from-request".to_string())]);
+        let (_config, overlay) =
+            request_config_surfaces(&environment, &HashMap::new(), &request_config);
+
+        let log = js_sys::Array::new();
+        let source = request_config_source(
+            request_database(variables_d1(&log, VARIABLES), Arc::default()),
+            overlay,
+        );
+        let auth = source
+            .load_for_block(
+                "wafer-run/auth",
+                &[
+                    wafer_block::ConfigVar::new(jwt, "doc", ""),
+                    wafer_block::ConfigVar::new("WAFER_RUN__AUTH__A", "doc", ""),
+                ],
+            )
+            .await
+            .expect("auth resolves");
+        assert_eq!(
+            auth.get(jwt),
+            Some("bound-secret"),
+            "the Worker's secret binding beats the stored row"
+        );
+        assert_eq!(
+            auth.get("WAFER_RUN__AUTH__A"),
+            Some("from-request"),
+            "a consumer's request config beats the stored row"
         );
     }
 }
