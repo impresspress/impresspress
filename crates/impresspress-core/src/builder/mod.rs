@@ -55,9 +55,10 @@ pub(crate) use registration::required_model_cache_dir;
 pub(crate) use registration::{granted_llm_router, SERVICE_ALIASES};
 pub use registration::{register_middleware_blocks, MIDDLEWARE_BLOCKS};
 pub use request_path::{
-    boot_deploy_runtime, boot_request_runtime, request_config_source, seal_prepared_plan,
-    structural_runtime_config, DeployBootHooks, PreparedPlanBootHooks, RequestBootHooks,
-    RequestBuild, StructuralConfigInputs,
+    add_request_config, boot_deploy_runtime, boot_request_runtime, environment_owns_config_key,
+    request_config_source, seal_prepared_plan, structural_runtime_config, warm_config_surfaces,
+    DeployBootHooks, PreparedPlanBootHooks, RequestBootHooks, RequestBuild, StructuralConfigInputs,
+    BUILDER_WORKER_VAR_KEYS, PROTECTED_ENV_KEYS,
 };
 
 pub struct ImpresspressBuilder {

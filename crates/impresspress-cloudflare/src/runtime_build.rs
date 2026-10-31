@@ -17,8 +17,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use impresspress_core::builder::{
-    request_config_source, structural_runtime_config, BootReport, ImpresspressBuilder,
-    RequestBuild, RuntimeConfig, StructuralConfigInputs, PREPARE_RUNTIME_PLAN_KEY,
+    add_request_config, request_config_source, structural_runtime_config, BootReport,
+    ImpresspressBuilder, RequestBuild, RuntimeConfig, StructuralConfigInputs,
+    PREPARE_RUNTIME_PLAN_KEY,
 };
 use wafer_core::interfaces::{
     database::service::DatabaseService, storage::service::StorageService,
@@ -346,52 +347,27 @@ fn structural_config_inputs(
     }
 }
 
-/// The config surfaces a **warm** request's services read through: the map
-/// behind this request's `ConfigService`, and the `ConfigSource` overlay
-/// layered over the D1 `variables` rows.
-///
-/// There is no third surface here. A warm request has no snapshot to write —
-/// the isolate-cached runtime already carries one, and one request's values
-/// must never be baked into it — so this is a pair of maps rather than a
-/// [`RuntimeConfig`], whose whole purpose is to couple the async surface to a
-/// snapshot.
+/// The config surfaces a **warm** request's services read through, from this
+/// request's capture of the environment: see
+/// `impresspress_core::builder::warm_config_surfaces`.
 ///
 /// Every key [`CfEnvironment`] owns is taken from THIS request's capture and
-/// from nowhere else; the cached runtime's structural snapshot contributes only
-/// the keys the environment does *not* own, which today is the D1-derived
-/// `IMPRESSPRESS_BLOCK_SETTINGS`. A binding removed since the runtime was built
-/// is therefore absent from the map by construction.
-///
-/// That last part used to be a removal branch. The previous code cloned the
-/// whole snapshot and then deleted `PROTECTED_ENV_KEYS` and
+/// from nowhere else. That used to be a removal branch: the previous code
+/// cloned the whole snapshot and then deleted `PROTECTED_ENV_KEYS` and
 /// `BUILDER_WORKER_VAR_KEYS` back out of it by name when their bindings were
 /// gone — the right answer for the keys somebody had listed, and no answer at
-/// all for an Env-owned key on neither list, which a deployment that dropped
-/// its var kept serving until something else forced a rebuild. Deriving the
-/// owned set from the struct that captured it removes the class instead of the
-/// instance.
+/// all for an Env-owned key on neither list. Deriving the owned set from the
+/// capture removes the class instead of the instance.
 fn request_config_surfaces(
     environment: &CfEnvironment,
     structural_snapshot: &HashMap<String, String>,
     request_config: &HashMap<String, String>,
 ) -> (HashMap<String, String>, HashMap<String, String>) {
-    let mut config_map: HashMap<String, String> = structural_snapshot
-        .iter()
-        .filter(|(key, _)| !CfEnvironment::owns_config_key(key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    config_map.extend(environment.config_map());
-
-    let mut overlay = HashMap::new();
-    extend_with_request_config(&mut config_map, &mut overlay, request_config);
-    // Secrets are layered over the D1 `variables` rows for the same reason the
-    // cold fill does it: a secret then never has to be mirrored into that table.
-    for key in PROTECTED_ENV_KEYS {
-        if let Some(value) = environment.config_value(key) {
-            overlay.insert((*key).to_string(), value.to_string());
-        }
-    }
-    (config_map, overlay)
+    impresspress_core::builder::warm_config_surfaces(
+        &environment.config_map(),
+        structural_snapshot,
+        request_config,
+    )
 }
 
 /// Construct concrete services for one warm request without performing I/O.
@@ -458,69 +434,9 @@ fn request_crypto_service(
     ))
 }
 
-/// Add consumer-declared request config to the async service surfaces only.
-/// Both fills call this: the cold one through [`add_request_config`], the warm
-/// one through [`request_config_surfaces`].
-fn extend_with_request_config(
-    config: &mut HashMap<String, String>,
-    overlay: &mut HashMap<String, String>,
-    request_config: &HashMap<String, String>,
-) {
-    for (key, value) in request_config {
-        // Framework-owned protected/builder keys come from Env and must not be
-        // shadowed by a consumer-provided duplicate.
-        if CfEnvironment::owns_config_key(key) {
-            continue;
-        }
-        config.insert(key.clone(), value.clone());
-        overlay.insert(key.clone(), value.clone());
-    }
-}
-
-/// Add consumer-declared request config to a runtime's async service surface
-/// and to the `ConfigSource` overlay, and to neither snapshot: one request's
-/// secret must never be baked into the isolate-cached synchronous surface.
-///
-/// `RuntimeConfig::service_only` takes that reason as an argument, so the
-/// divergence is stated where it is created rather than inferred from a
-/// missing line.
-///
-/// A key the structural pass has already installed is skipped outright, and
-/// that rule is derived rather than listed: `service_only` REMOVES its key
-/// from the snapshot, so a collision does not shadow the structural value, it
-/// deletes it. Before `RuntimeConfig` the snapshot was cloned ahead of this
-/// merge and a collision was harmless by construction; the two name lists
-/// `extend_with_request_config` checks (`PROTECTED_ENV_KEYS`,
-/// `BUILDER_WORKER_VAR_KEYS`) cover the Env-owned families but not the keys
-/// this pass installs itself — `IMPRESSPRESS_BLOCK_SETTINGS` and
-/// `IMPRESSPRESS_RUN_MIGRATIONS`. Asking
-/// the `RuntimeConfig` what it already holds covers all of them, and covers
-/// the next structural key without anyone remembering to add it to a list.
-fn add_request_config(
-    config: &mut RuntimeConfig,
-    overlay: &mut HashMap<String, String>,
-    request_config: &HashMap<String, String>,
-) {
-    let consumer_owned: HashMap<String, String> = request_config
-        .iter()
-        .filter(|(key, _)| !config.snapshot_contains(key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    let mut service_map = HashMap::new();
-    extend_with_request_config(&mut service_map, overlay, &consumer_owned);
-    for (key, value) in service_map {
-        config.service_only(
-            key,
-            value,
-            "consumer request config is request-current: the isolate-cached \
-             snapshot must not carry one request's values into the next",
-        );
-    }
-}
-
 /// Promote the one non-secret request value lifecycle code must read from the
 /// synchronous config snapshot while preparing an isolated deploy candidate.
-/// Runs after [`add_request_config`], which has already put it on the async
+/// Runs after `add_request_config`, which has already put it on the async
 /// surface as a service-only key; `both` moves it onto the snapshot as well
 /// and retracts the recorded divergence.
 fn retain_prepare_runtime_plan_flag(

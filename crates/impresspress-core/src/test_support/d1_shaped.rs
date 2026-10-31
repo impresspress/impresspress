@@ -46,9 +46,7 @@ use wafer_core::interfaces::database::{
     codec::JsonColumns,
     exec::{BatchOp, BatchResult, DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
-    service::{
-        Column, DatabaseError, DatabaseService, Record, StatementBudget, Table, TransactionError,
-    },
+    service::{Column, DatabaseError, Record, StatementBudget, Table, TransactionError},
 };
 use wafer_sql_utils::Backend;
 
@@ -424,11 +422,10 @@ wafer_core::forward_database_service! {
             batch: forward,
             insert_guarded: forward,
             update_guarded: forward,
-            // Schema mutation reaches SQLite through the inner service's own
-            // implementations, uncounted (migrations are DDL files run through
-            // `exec_raw_transaction`, which is counted). Each drops this
-            // decorator's cached facts, as the SQLite service's own
-            // implementations drop its.
+            // Refused, as the D1 adapter refuses them: D1's schema is
+            // migration-owned, so a path that reached one of these would
+            // fail on Cloudflare, and must fail here rather than succeed
+            // uncounted.
             ensure_schema_table: custom,
             ensure_schema_tables: inherit,
             schema_table_exists: forward,
@@ -439,24 +436,31 @@ wafer_core::forward_database_service! {
         }
 
         async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-            self.cache.clear();
-            DatabaseService::ensure_schema_table(&self.inner, table).await
+            Err(schema_mutation_refused("ensure_schema_table", &table.name))
         }
 
         async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
-            self.cache.clear();
-            DatabaseService::schema_drop_table(&self.inner, name).await
+            Err(schema_mutation_refused("schema_drop_table", name))
         }
 
-        async fn schema_add_column(&self, table: &str, column: &Column) -> Result<(), DatabaseError> {
-            self.cache.clear();
-            DatabaseService::schema_add_column(&self.inner, table, column).await
+        async fn schema_add_column(&self, table: &str, _column: &Column) -> Result<(), DatabaseError> {
+            Err(schema_mutation_refused("schema_add_column", table))
         }
     }
 }
 
+/// The refusal the D1 adapter answers a runtime schema mutation with.
+fn schema_mutation_refused(method: &str, target: &str) -> DatabaseError {
+    DatabaseError::Internal(format!(
+        "runtime schema mutation unsupported on Cloudflare D1: `{method}` on `{target}` — \
+         D1 schema is migration-owned"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    use wafer_core::interfaces::database::service::DatabaseService;
+
     use super::*;
 
     fn shaped() -> (Arc<D1Shaped>, Arc<Ledger>) {
@@ -588,6 +592,18 @@ mod tests {
         assert!(DatabaseService::schema_table_exists(&db, "d1_tx_a")
             .await
             .expect("table lookup"));
+    }
+
+    /// A runtime schema mutation is refused, as D1 refuses it, and sends
+    /// nothing.
+    #[tokio::test]
+    async fn a_schema_mutation_is_refused_as_on_d1() {
+        let (db, ledger) = shaped();
+        let err = DatabaseService::schema_drop_table(&*db, "anything")
+            .await
+            .expect_err("D1 refuses a runtime schema mutation");
+        assert!(err.to_string().contains("migration-owned"), "{err}");
+        assert!(ledger.take().is_empty());
     }
 
     /// Two primitives sent together share a wave; one after the other, they

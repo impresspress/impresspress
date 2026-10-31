@@ -64,19 +64,32 @@ and the default applies.
 
 ### Cloudflare budget: counted statement by statement
 
-**What changes.** The fresh-install budget is now counted as D1 receives it:
-every statement, the executor's introspection of each table it touches
-included. The figures in the entries below counted calls, and a call can send
-more than one statement. Counted this way, a fresh Worker database sends 534
-statements for its migrations (362 in the files, 69 ledger rows, 103 of the
-runner's own), and the whole `/_deploy/prepare` 585 with every block a Worker
-can compile — within the default 1000 per invocation, though no longer within
-half of it. The budget test now holds the migrations to the limit
-(`tests/migration_history.rs`), and a new harness holds the whole
-`/_deploy/prepare` to it (`tests/d1_read_cost.rs`).
+**What changes.** The fresh-install budget is now counted as the Worker's D1
+adapter admits statements against `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION`:
+every statement, each statement of a batch included, and the executor's
+introspection of each table it touches. (D1 itself counts a batch as one
+call, so this over-counts what D1 limits.) The figures in the entries below
+counted calls, and a call can send more than one statement. Counted this way,
+a fresh Worker database sends 534 statements for its migrations (362 in the
+files, 69 ledger rows, 103 of the runner's own), and the whole
+`/_deploy/prepare` 585 with every block a Worker can compile: within the
+default 1000, but no longer within half of it.
 
-**What to do.** Nothing. Leave `[cloudflare].d1_queries_per_invocation` at its
-default.
+The half-budget line was the ledger plan's headroom, and its decision
+(U-IP5-2) was that crossing it schedules batch accounting rather than a higher
+line. It had in fact been crossed already, so batch accounting is the next
+change (PR267-review M1): the adapter will count a batch as the one call D1
+counts, and the budget re-derives in calls (172 for the migrations and
+214 for the whole prepare, measured today). Until then the tests hold the migrations
+(`tests/migration_history.rs`) and the whole `/_deploy/prepare`
+(`tests/d1_read_cost.rs`) to the limit itself, the point at which the adapter
+refuses.
+
+**What to do.** If you lowered `[cloudflare].d1_queries_per_invocation`
+(`IMPRESSPRESS_D1_QUERIES_PER_INVOCATION`) below about 585, a fresh database's
+`/_deploy/prepare` now stops at the limit: raise it, or leave it at its
+default. The figures the entries below gave (487, "within half") made 500–584
+look safe; they were not. Otherwise nothing.
 
 ### Admin: the system roles come from a migration (admin 010)
 
@@ -121,9 +134,9 @@ counts the roles table on every cold isolate again, and seeds the roles
 only into an empty table.
 
 **Cloudflare budget.** A fresh Worker database sent 487 statements for its
-migrations at this release, two more than the 485 before it (010's statement
-and its ledger row; 534 counted per statement since the D1 cost harness,
-above), within half of the default 1000.
+migrations at this release, counted per call, within half of the default 1000:
+two more than the 485 before it (010's statement and its ledger row). Counted
+per statement since the D1 cost harness it is 534 (above).
 
 ### Legalpages: the default documents come from a migration (legalpages 003)
 
@@ -167,8 +180,9 @@ only into an empty table.
 
 **Cloudflare budget.** A fresh Worker database sent 485 statements for its
 migrations at this release, two more than the 483 before it (003's statement
-and its ledger row; 487 since admin 010 and 534 counted per statement since
-the D1 cost harness, both above), within half of the default 1000.
+and its ledger row), counted per call, within half of the default 1000. It was
+487 since admin 010, and 534 counted per statement since the D1 cost harness
+(both above).
 
 ### Cloudflare: D1's daily limits and resets are reported as temporary
 
@@ -314,9 +328,9 @@ migrations is not supported.
 
 **Cloudflare budget.** A fresh Worker database sent 483 statements for its
 migrations at this release, two more than the 481 before it (018's statement
-and its ledger row; 485 since legalpages 003, 487 since admin 010 and 534
-counted per statement since the D1 cost harness, all above), within half of
-the default 1000.
+and its ledger row), counted per call, within half of the default 1000. It was
+485 since legalpages 003, 487 since admin 010, and 534 counted per statement
+since the D1 cost harness (all above).
 
 ### Native: an env file that cannot be loaded stops the boot; `serve --port` works
 
@@ -561,10 +575,10 @@ COLUMN`s on `users`, and the rebuilds of the tickets and vector tables on
 a Worker that compiles those blocks. Dev never runs on a Worker. The
 fresh-install budget test now counts only the blocks
 `impresspress-cloudflare` can compile, read from its `Cargo.toml`: a fresh
-Worker database sent 480 statements at that release (481 since wafer-run
-1272fd63, 483 since auth 018, 485 since legalpages 003, 487 since admin 010
-and 534 counted per statement since the D1 cost harness, all above), within
-half of the default 1000.
+Worker database sent 480 statements at that release, counted per call,
+within half of the default 1000 (481 since wafer-run 1272fd63, 483 since auth
+018, 485 since legalpages 003 and 487 since admin 010; 534 counted per
+statement since the D1 cost harness; all above).
 
 ### Cloudflare: workers-rs 0.8.7
 
@@ -783,10 +797,11 @@ loss, or recreate the database.
 **Cloudflare budget.** A fresh database's `/_deploy/prepare` sent 454
 statements for its migrations at this release, 480 since the
 stamped-column migrations, 481 since wafer-run 1272fd63, 483 since auth
-018, 485 since legalpages 003 and 487 since admin 010 (counted by a test
-that kept it within half of the default budget of 1000), and 534 counted per
-statement since the D1 cost harness (above). Leave
-`[cloudflare].d1_queries_per_invocation` at its default; 50 is too low for a
+018, 485 since legalpages 003 and 487 since admin 010, each counted per call
+by a test that kept it within half of the default budget of 1000; counted per
+statement since the D1 cost harness it is 534, and the whole prepare 585
+(above). Leave `[cloudflare].d1_queries_per_invocation` at its default; 50 is
+too low for a
 fresh install.
 
 **Older entries this makes false** say so where they stand: the JWT

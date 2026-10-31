@@ -418,15 +418,44 @@ fn publish_block_settings(
     published.republish(wafer, config);
 }
 
+/// The hosted target's bound secrets: Worker bindings (`wrangler secret put`)
+/// that override `variables` rows. Most config belongs in the table so admins
+/// can manage it through the dashboard — this list stays short.
+pub const PROTECTED_ENV_KEYS: &[&str] = &[crate::blocks::auth::JWT_SECRET_KEY];
+
+/// The hosted target's builder-time vars, plus the one operational knob a
+/// deploy sets in `wrangler.toml`.
+///
+/// The middleware entries are here because they cannot be deferred to the
+/// table-backed `ConfigSource`: the flow already exists by the time per-block
+/// config is resolvable.
+///
+/// `IMPRESSPRESS_REQUEST_LOG`, the knob, is read per request, long after the
+/// flow exists, so that reason does **not** apply to it. It is here because it
+/// is an infrastructure key ([`crate::config_vars::is_infrastructure_key`]),
+/// so `blocks::config` answers it from the boot map whatever the `variables`
+/// table holds and `CONFIG_SET` refuses to write it. A Worker var is the only
+/// channel it has.
+pub const BUILDER_WORKER_VAR_KEYS: &[&str] = &[
+    crate::config_vars::CORS_ALLOWED_ORIGINS_KEY,
+    crate::config_vars::CSP_DIRECTIVES_KEY,
+    crate::config_vars::REQUEST_LOG_CONFIG_KEY,
+];
+
+/// Whether a config key comes from the hosted target's environment
+/// ([`PROTECTED_ENV_KEYS`] or [`BUILDER_WORKER_VAR_KEYS`]) rather than from
+/// the `variables` table.
+pub fn environment_owns_config_key(key: &str) -> bool {
+    PROTECTED_ENV_KEYS.contains(&key) || BUILDER_WORKER_VAR_KEYS.contains(&key)
+}
+
 /// What the hosted target's structural config pass takes from its
 /// environment: everything a Worker's bindings decide, already read.
 pub struct StructuralConfigInputs {
-    /// The bound secrets (Cloudflare: its `PROTECTED_ENV_KEYS`, the JWT
-    /// secret today). They reach both config surfaces and the
+    /// The bound [`PROTECTED_ENV_KEYS`] (the JWT secret today). They reach both config surfaces and the
     /// `ConfigSource` overlay.
     pub secrets: Vec<(&'static str, String)>,
-    /// The bound builder-time vars (Cloudflare: its
-    /// `BUILDER_WORKER_VAR_KEYS`). Both config surfaces, never the overlay.
+    /// The bound [`BUILDER_WORKER_VAR_KEYS`]. Both config surfaces, never the overlay.
     pub worker_vars: Vec<(&'static str, String)>,
     /// `BlockSettings::to_config_json` for this build.
     pub block_settings_json: String,
@@ -477,6 +506,111 @@ pub fn structural_runtime_config(
         config.both(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
     }
     (config, overlay)
+}
+
+/// Add consumer-declared request config to the async service surfaces only.
+/// Both fills call this: the cold one through [`add_request_config`], the warm
+/// one through [`warm_config_surfaces`].
+fn extend_with_request_config(
+    config: &mut HashMap<String, String>,
+    overlay: &mut HashMap<String, String>,
+    request_config: &HashMap<String, String>,
+) {
+    for (key, value) in request_config {
+        // Framework-owned protected/builder keys come from the environment and
+        // must not be shadowed by a consumer-provided duplicate.
+        if environment_owns_config_key(key) {
+            continue;
+        }
+        config.insert(key.clone(), value.clone());
+        overlay.insert(key.clone(), value.clone());
+    }
+}
+
+/// Add consumer-declared request config (a forwarding consumer's
+/// `request_config`) to a build's async service surface and to the
+/// `ConfigSource` overlay, and to neither snapshot: one request's secret must
+/// never be baked into the isolate-cached synchronous surface.
+///
+/// `RuntimeConfig::service_only` takes that reason as an argument, so the
+/// divergence is stated where it is created rather than inferred from a
+/// missing line.
+///
+/// A key the structural pass has already installed is skipped outright, and
+/// that rule is derived rather than listed: `service_only` REMOVES its key
+/// from the snapshot, so a collision does not shadow the structural value, it
+/// deletes it. The two name lists `extend_with_request_config` checks
+/// ([`PROTECTED_ENV_KEYS`], [`BUILDER_WORKER_VAR_KEYS`]) cover the
+/// environment-owned families but not the keys the structural pass installs
+/// itself — `IMPRESSPRESS_BLOCK_SETTINGS` and `IMPRESSPRESS_RUN_MIGRATIONS`.
+/// Asking the `RuntimeConfig` what it already holds covers all of them, and
+/// covers the next structural key without anyone remembering to add it to a
+/// list.
+pub fn add_request_config(
+    config: &mut RuntimeConfig,
+    overlay: &mut HashMap<String, String>,
+    request_config: &HashMap<String, String>,
+) {
+    let consumer_owned: HashMap<String, String> = request_config
+        .iter()
+        .filter(|(key, _)| !config.snapshot_contains(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let mut service_map = HashMap::new();
+    extend_with_request_config(&mut service_map, overlay, &consumer_owned);
+    for (key, value) in service_map {
+        config.service_only(
+            key,
+            value,
+            "consumer request config is request-current: the isolate-cached \
+             snapshot must not carry one request's values into the next",
+        );
+    }
+}
+
+/// The config surfaces a **warm** request's services read through: the map
+/// behind that request's `ConfigService`, and the `ConfigSource` overlay
+/// layered over the `variables` rows (which [`request_config_source`] then
+/// turns into the request's own config source).
+///
+/// `bound` is every environment-owned key ([`PROTECTED_ENV_KEYS`],
+/// [`BUILDER_WORKER_VAR_KEYS`]) bound at THIS request, at the value it sees.
+/// Those come from `bound` and from nowhere else; the cached runtime's
+/// structural snapshot contributes only the keys the environment does *not*
+/// own, which today is the table-derived `IMPRESSPRESS_BLOCK_SETTINGS`. A
+/// binding removed since the runtime was built is therefore absent by
+/// construction.
+///
+/// There is no snapshot here: one request's values must never be baked into
+/// the cached runtime's, so this is a pair of maps rather than a
+/// [`RuntimeConfig`].
+pub fn warm_config_surfaces(
+    bound: &HashMap<String, String>,
+    structural_snapshot: &HashMap<String, String>,
+    request_config: &HashMap<String, String>,
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut config_map: HashMap<String, String> = structural_snapshot
+        .iter()
+        .filter(|(key, _)| !environment_owns_config_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    config_map.extend(
+        bound
+            .iter()
+            .filter(|(key, _)| environment_owns_config_key(key))
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+
+    let mut overlay = HashMap::new();
+    extend_with_request_config(&mut config_map, &mut overlay, request_config);
+    // Secrets are layered over the `variables` rows for the same reason the
+    // cold fill does it: a secret then never has to be mirrored into that table.
+    for key in PROTECTED_ENV_KEYS {
+        if let Some(value) = bound.get(*key) {
+            overlay.insert((*key).to_string(), value.clone());
+        }
+    }
+    (config_map, overlay)
 }
 
 /// The config source every hosted build and warm request uses:

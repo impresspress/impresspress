@@ -34,7 +34,9 @@ pub const DEPLOY_TOKEN_KEY: &str = "IMPRESSPRESS_DEPLOY_TOKEN";
 /// though D1 counts a batch as one call; `a_cloudflare_fresh_install_fits_the_d1_budget`
 /// (`tests/migration_history.rs`) counts what a fresh install's migrations
 /// send, and `tests/d1_read_cost.rs` the whole `/_deploy/prepare` (585 on
-/// 2026-11-01), and both keep it within the default.
+/// 2026-11-01), and both keep it within the default. That line is interim:
+/// once the adapter counts a batch as the one call D1 counts, both re-derive
+/// in calls (172 and 214 today; see the migration test's doc).
 /// The default, [`D1_QUERIES_PER_INVOCATION_DEFAULT`], therefore fits every
 /// plan. A lower value is for a Worker whose `limits.subrequests` is set
 /// below 1,000, and it bounds `/_deploy/prepare` too, which applies every

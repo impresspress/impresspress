@@ -504,8 +504,8 @@ pub const ENV_PRECEDENCE_TRANSITION_KEY: &str = "IMPRESSPRESS__ADMIN__ENV_PRECED
 /// "Native only" is structural, not merely a convention nobody has broken yet.
 /// A Cloudflare deploy cannot set it from `wrangler.toml`: that target fills its
 /// boot map from `runtime_build::structural_config_inputs`, which reads only
-/// keys on `environment::PROTECTED_ENV_KEYS` and
-/// `environment::BUILDER_WORKER_VAR_KEYS` — two `&'static [&'static str]`
+/// keys on [`crate::builder::PROTECTED_ENV_KEYS`] and
+/// [`crate::builder::BUILDER_WORKER_VAR_KEYS`] — two `&'static [&'static str]`
 /// allowlists this key is not on — so an arbitrary worker var of this name is
 /// never copied through. Worth stating because the same question is worth
 /// asking of any `__…__` key, and the answer is not the same for all of them.

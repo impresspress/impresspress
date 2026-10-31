@@ -70,11 +70,9 @@ pub(crate) const D1_ROWS_LOG_THRESHOLD_KEY: &str = "IMPRESSPRESS_D1_ROWS_LOG_THR
 /// [`D1_ROWS_LOG_THRESHOLD_KEY`] when it is unset.
 pub(crate) const D1_ROWS_LOG_THRESHOLD_DEFAULT: u64 = 1000;
 
-/// Worker `Env` bindings that override D1 variables (set via
-/// `wrangler secret put`). Most config belongs in D1 so admins can manage it
-/// through the dashboard — this list stays short.
-pub(crate) const PROTECTED_ENV_KEYS: &[&str] = &[impresspress_core::blocks::auth::JWT_SECRET_KEY];
-
+/// The Worker's bound secrets and builder-time vars: the hosted target's lists,
+/// defined beside the funnels that use them (`impresspress_core::builder`).
+pub(crate) use impresspress_core::builder::{BUILDER_WORKER_VAR_KEYS, PROTECTED_ENV_KEYS};
 /// The Worker var naming this deploy's D1 query limit and its Workers Paid
 /// default, shared with the CLI that writes it into `wrangler.toml`. Every D1
 /// service built in an invocation reports its statement budget against it
@@ -82,27 +80,6 @@ pub(crate) const PROTECTED_ENV_KEYS: &[&str] = &[impresspress_core::blocks::auth
 pub(crate) use impresspress_core::config_vars::{
     D1_QUERIES_PER_INVOCATION_DEFAULT, D1_QUERIES_PER_INVOCATION_KEY,
 };
-
-/// Shared configuration consumed synchronously while the builder constructs
-/// middleware, plus the one operational knob a deploy sets in
-/// `wrangler.toml`.
-///
-/// The middleware entries are here because they cannot be deferred to the
-/// D1-backed `ConfigSource`: the flow already exists by the time per-block
-/// config is resolvable.
-///
-/// `IMPRESSPRESS_REQUEST_LOG`, the knob, is read per request, long after the
-/// flow exists, so that reason does **not** apply to it. It is here because it
-/// is an infrastructure key
-/// ([`impresspress_core::config_vars::is_infrastructure_key`]), so
-/// `blocks::config` answers it from the boot map whatever the `variables`
-/// table holds and `CONFIG_SET` refuses to write it. A Worker var is the only
-/// channel it has.
-pub(crate) const BUILDER_WORKER_VAR_KEYS: &[&str] = &[
-    impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
-    impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
-    impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY,
-];
 
 /// Every `worker::Env` var and secret this crate reads, as one value.
 ///
@@ -283,12 +260,6 @@ impl CfEnvironment {
             return None;
         };
         field.as_deref()
-    }
-
-    /// Whether a config key comes from the Worker environment rather than from
-    /// the D1 `variables` table.
-    pub(crate) fn owns_config_key(key: &str) -> bool {
-        PROTECTED_ENV_KEYS.contains(&key) || BUILDER_WORKER_VAR_KEYS.contains(&key)
     }
 
     /// Every config key this environment owns that is actually bound, at the
@@ -1115,10 +1086,10 @@ mod tests {
                 all_set.config_value(key).is_some(),
                 "{key} is declared Env-owned but reaches no CfEnvironment field",
             );
-            assert!(CfEnvironment::owns_config_key(key));
+            assert!(impresspress_core::builder::environment_owns_config_key(key));
         }
         assert_eq!(all_set.config_map().len(), 4);
-        assert!(!CfEnvironment::owns_config_key(
+        assert!(!impresspress_core::builder::environment_owns_config_key(
             impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY
         ));
     }
@@ -1186,7 +1157,10 @@ mod tests {
                  cannot serve it either",
             );
             assert_eq!(captured.config_value(var), None, "{var}");
-            assert!(!CfEnvironment::owns_config_key(var), "{var}");
+            assert!(
+                !impresspress_core::builder::environment_owns_config_key(var),
+                "{var}"
+            );
             assert!(!map.contains_key(var), "{var} reached the config map");
         }
         for value in map.values() {

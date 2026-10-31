@@ -4,40 +4,59 @@
 # runs it with the Cloudflare block set). Regenerate with `BLESS=1 just d1-cost`
 # and review the diff: a PR that saves statements or rows shows it here.
 #
+# Section headers count statements (the unit the Worker's D1 budget admits today,
+# a batch counting each of its statements) and D1 calls (the unit D1 itself
+# limits per invocation, a batch counting once).
+#
 # Columns: table, class, statements, rows≈.
 #   COUNT       SELECT COUNT(...): reads every row it counts.
-#   SCAN        a read whose plan scans a whole table (or a whole index of it).
+#   SCAN        a read whose plan scans a table (or a whole index of it).
 #   SEARCH      a read whose plan only searches an index.
-#   INTROSPECT  pragma_table_info (one per table per cold isolate) or sqlite_master.
+#   INTROSPECT  pragma_table_info: up to two per table per cold isolate (its
+#               columns and its primary key); or a sqlite_master read that
+#               probes no single table (provisioning's).
+#   EXISTS      a table-existence probe (sqlite_master), under the table it
+#               looks for.
+#   ID-PROBE    the executor's id-kind probe before a table's first create
+#               (sqlite_master and pragmas), under the table it probes.
 #   WRITE       any write, DDL included.
 #   READ        a read whose plan could not be taken (its table is gone by the end
 #               of the phase); provisioning only.
 # rows≈ is a model, not D1's own rows_read: a SCAN reads every row of its table,
-# a COUNT every row it counts (the whole table unless an index narrows it), a
-# SEARCH the rows it matches, pragma_table_info the rows it returns, and a
-# sqlite_master probe the schema rows up to the table it looks for (all of them
-# when the table is absent). A WRITE reads none. Counted against the database as
-# it stands at the end of each phase (provisioning: before the seed).
+# or only the rows it returns when a LIMIT stops it with nothing to filter or
+# sort first; a COUNT every row it counts (the whole table unless an index
+# narrows it); a SEARCH the rows it matches; pragma_table_info the rows it
+# returns; EXISTS the schema rows up to the table it looks for (all of them when
+# it is absent); ID-PROBE those plus the table's columns. A WRITE reads none.
+# Counted against the database as it stands at the end of each phase
+# (provisioning: before the seed).
 #
 # What this cannot see:
 #   - the KV config-version probe a warm isolate makes every 5-10 minutes;
 #   - the KV row cache: the two block_settings reads of a database build are KV
 #     reads on Cloudflare and reach D1 only on a KV miss, which is what is shown;
-#   - D1's own rows_read, which the `metric=d1_cost` line reports live (PR 7).
+#   - D1's own rows_read, which the `metric=d1_cost` line reports live (PR 7);
+#   - a D1 read `build_runtime` adds around the funnels, or a consumer's
+#     `register_blocks` makes: the harness runs the production config passes,
+#     config source and funnels, but copies `build_runtime`'s sequence around
+#     them (it needs a `worker::Env`).
 #
-# The `shared` variant has no block-scoped variables row at all. A database
-# provisioned on main always has some (each auto-generated secret is stored under
-# the block that declares it, and products requires its webhook secret), so the
-# variant deletes them and forwards their values as request config instead, as a
-# consumer binding its secrets does. With no row carrying a block, the config
-# source's pre-002 rule leaves the grouped snapshot unmemoized (PR 6, R4).
+# The `shared` variant has no block-scoped variables row at all. A database the
+# main funnel provisioned always has some: products' auto-generated webhook
+# secret (re-seeded on every deploy) and the auth defaults admin's settings seed
+# stores under their blocks. So the all-shared shape exists only before a
+# repinned site's first prepare, or after a manual delete. The variant deletes
+# them and forwards their values as request config (`add_request_config`), as a
+# consumer binding its secrets does; products requires its secret. With no row
+# carrying a block, the config source's pre-002 rule leaves its grouped snapshot
+# unmemoized, so each config-declaring block re-reads the table (PR 6, R4).
 #
 # Blocks (30): impresspress/admin, impresspress/auth-ui, impresspress/body-limit, impresspress/email, impresspress/files, impresspress/legalpages, impresspress/llm, impresspress/messages, impresspress/products, impresspress/router, impresspress/signal, impresspress/system, impresspress/tickets, impresspress/userportal, impresspress/vector, wafer-run/auth, wafer-run/config, wafer-run/cors, wafer-run/crypto, wafer-run/database, wafer-run/image, wafer-run/inspector, wafer-run/llm, wafer-run/logger, wafer-run/network, wafer-run/readonly-guard, wafer-run/router, wafer-run/security-headers, wafer-run/storage, wafer-run/web
 # Config-declaring blocks (9): impresspress/auth-ui, impresspress/email, impresspress/files, impresspress/legalpages, impresspress/llm, impresspress/products, impresspress/signal, impresspress/tickets, wafer-run/network
 # Seeded (mixed): variables=26 (block-scoped 8), legal documents=300, users=500, roles=2, grants=3
-# Seeded (shared): variables=18 (block-scoped 0), legal documents=300, users=500, roles=2, grants=3
+# Seeded (shared): variables=18 (block-scoped 0), legal documents=300, users=500, roles=2, grants=3; block-scoped rows deleted and forwarded as request config: IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET, WAFER_RUN_SHARED__AUTH__PASSWORD_MIN_LENGTH, WAFER_RUN_SHARED__AUTH__SESSION_LIFETIME_DAYS, WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS
 
-## provision — 585 statements, rows≈605
+## provision — 585 statements, 214 D1 calls, rows≈605
 api_keys                                         WRITE         1       0
 auth_sessions                                    WRITE         1       0
 iam_user_roles                                   WRITE         1       0
@@ -48,6 +67,7 @@ impresspress__admin__audit_logs                  WRITE         2       0
 impresspress__admin__block_settings              SCAN          4      44
 impresspress__admin__block_settings              SEARCH       21      21
 impresspress__admin__block_settings              INTROSPECT   24      96
+impresspress__admin__block_settings              EXISTS        2      68
 impresspress__admin__block_settings              WRITE        25       0
 impresspress__admin__block_settings_v2           WRITE         3       0
 impresspress__admin__permissions                 WRITE         2       0
@@ -58,9 +78,11 @@ impresspress__admin__user_roles                  WRITE         5       0
 impresspress__admin__variables                   SCAN          6     108
 impresspress__admin__variables                   SEARCH        1       1
 impresspress__admin__variables                   INTROSPECT    6      36
+impresspress__admin__variables                   EXISTS        2       8
 impresspress__admin__variables                   WRITE        23       0
 impresspress__admin__wrap_grants                 SCAN          1       0
 impresspress__admin__wrap_grants                 INTROSPECT    2      10
+impresspress__admin__wrap_grants                 EXISTS        2      56
 impresspress__admin__wrap_grants                 WRITE         4       0
 impresspress__files__buckets                     WRITE         4       0
 impresspress__files__cloud_access_logs           WRITE         2       0
@@ -107,7 +129,6 @@ impresspress__userportal__buttons                WRITE         2       0
 impresspress__vector__registry                   WRITE         4       0
 impresspress__vector__registry_v2                WRITE         3       0
 oauth_states                                     WRITE         1       0
-sqlite_master                                    INTROSPECT    6     132
 wafer_run__auth__api_keys                        WRITE         5       0
 wafer_run__auth__bootstrap_tokens                WRITE         2       0
 wafer_run__auth__jwt_blocklist                   WRITE         6       0
@@ -123,35 +144,35 @@ wafer_run__auth__tokens                          WRITE         5       0
 wafer_run__auth__users                           COUNT         1       0
 wafer_run__auth__users                           WRITE        12       0
 
-## mixed: 3 database build — 13 statements, rows≈635
+## mixed: 3 database build — 13 statements, 13 D1 calls, rows≈635
 impresspress__admin__block_settings              SCAN          2      22
 impresspress__admin__block_settings              INTROSPECT    2       8
 impresspress__admin__variables                   SCAN          2      52
 impresspress__admin__variables                   INTROSPECT    2      12
 impresspress__admin__wrap_grants                 SCAN          1       3
 impresspress__admin__wrap_grants                 INTROSPECT    2      10
-sqlite_master                                    INTROSPECT    1      28
+impresspress__admin__wrap_grants                 EXISTS        1      28
 wafer_run__auth__users                           COUNT         1     500
 
-## mixed: 4 prepared build — 5 statements, rows≈564
+## mixed: 4 prepared build — 5 statements, 5 D1 calls, rows≈564
 impresspress__admin__variables                   SCAN          2      52
 impresspress__admin__variables                   INTROSPECT    2      12
 wafer_run__auth__users                           COUNT         1     500
 
-## mixed: 5 warm GET / — 3 statements, rows≈35, status 302
+## mixed: 5 warm GET / — 3 statements, 3 D1 calls, rows≈48, status 302
 impresspress__admin__request_logs                INTROSPECT    1      13
+impresspress__admin__request_logs                ID-PROBE      1      35
 impresspress__admin__request_logs                WRITE         1       0
-sqlite_master                                    INTROSPECT    1      22
 
-## mixed: 5 warm GET /b/legalpages/terms — 5 statements, rows≈13, status 200
+## mixed: 5 warm GET /b/legalpages/terms — 5 statements, 4 D1 calls, rows≈13, status 200
 impresspress__admin__request_logs                WRITE         1       0
 impresspress__legalpages__documents              COUNT         1       1
 impresspress__legalpages__documents              SEARCH        1       1
 impresspress__legalpages__documents              INTROSPECT    2      11
 
-## mixed: 5 warm GET /health — 0 statements, rows≈0, status 200
+## mixed: 5 warm GET /health — 0 statements, 0 D1 calls, rows≈0, status 200
 
-## mixed: 5 warm GET /b/admin/ (signed in) — 18 statements, rows≈2044, status 200
+## mixed: 5 warm GET /b/admin/ (signed in) — 18 statements, 18 D1 calls, rows≈2044, status 200
 impresspress__admin__request_logs                COUNT         2       6
 impresspress__admin__request_logs                SCAN          2       6
 impresspress__admin__request_logs                INTROSPECT    2       2
@@ -163,40 +184,40 @@ wafer_run__auth__users                           SCAN          2    1000
 wafer_run__auth__users                           SEARCH        1       1
 wafer_run__auth__users                           INTROSPECT    3      19
 
-## mixed: 5 warm GET 404 — 6 statements, rows≈33, status 404
+## mixed: 5 warm GET 404 — 6 statements, 6 D1 calls, rows≈41, status 404
 impresspress__admin__storage_access_logs         INTROSPECT    1       8
+impresspress__admin__storage_access_logs         ID-PROBE      1      33
 impresspress__admin__storage_access_logs         WRITE         4       0
-sqlite_master                                    INTROSPECT    1      25
 
-## shared: 3 database build — 21 statements, rows≈763
+## shared: 3 database build — 21 statements, 21 D1 calls, rows≈763
 impresspress__admin__block_settings              SCAN          2      22
 impresspress__admin__block_settings              INTROSPECT    2       8
 impresspress__admin__variables                   SCAN         10     180
 impresspress__admin__variables                   INTROSPECT    2      12
 impresspress__admin__wrap_grants                 SCAN          1       3
 impresspress__admin__wrap_grants                 INTROSPECT    2      10
-sqlite_master                                    INTROSPECT    1      28
+impresspress__admin__wrap_grants                 EXISTS        1      28
 wafer_run__auth__users                           COUNT         1     500
 
-## shared: 4 prepared build — 13 statements, rows≈692
+## shared: 4 prepared build — 13 statements, 13 D1 calls, rows≈692
 impresspress__admin__variables                   SCAN         10     180
 impresspress__admin__variables                   INTROSPECT    2      12
 wafer_run__auth__users                           COUNT         1     500
 
-## shared: 5 warm GET / — 3 statements, rows≈35, status 302
+## shared: 5 warm GET / — 3 statements, 3 D1 calls, rows≈48, status 302
 impresspress__admin__request_logs                INTROSPECT    1      13
+impresspress__admin__request_logs                ID-PROBE      1      35
 impresspress__admin__request_logs                WRITE         1       0
-sqlite_master                                    INTROSPECT    1      22
 
-## shared: 5 warm GET /b/legalpages/terms — 5 statements, rows≈13, status 200
+## shared: 5 warm GET /b/legalpages/terms — 5 statements, 4 D1 calls, rows≈13, status 200
 impresspress__admin__request_logs                WRITE         1       0
 impresspress__legalpages__documents              COUNT         1       1
 impresspress__legalpages__documents              SEARCH        1       1
 impresspress__legalpages__documents              INTROSPECT    2      11
 
-## shared: 5 warm GET /health — 0 statements, rows≈0, status 200
+## shared: 5 warm GET /health — 0 statements, 0 D1 calls, rows≈0, status 200
 
-## shared: 5 warm GET /b/admin/ (signed in) — 18 statements, rows≈2044, status 200
+## shared: 5 warm GET /b/admin/ (signed in) — 18 statements, 18 D1 calls, rows≈2044, status 200
 impresspress__admin__request_logs                COUNT         2       6
 impresspress__admin__request_logs                SCAN          2       6
 impresspress__admin__request_logs                INTROSPECT    2       2
@@ -208,7 +229,7 @@ wafer_run__auth__users                           SCAN          2    1000
 wafer_run__auth__users                           SEARCH        1       1
 wafer_run__auth__users                           INTROSPECT    3      19
 
-## shared: 5 warm GET 404 — 6 statements, rows≈33, status 404
+## shared: 5 warm GET 404 — 6 statements, 6 D1 calls, rows≈41, status 404
 impresspress__admin__storage_access_logs         INTROSPECT    1       8
+impresspress__admin__storage_access_logs         ID-PROBE      1      33
 impresspress__admin__storage_access_logs         WRITE         4       0
-sqlite_master                                    INTROSPECT    1      25

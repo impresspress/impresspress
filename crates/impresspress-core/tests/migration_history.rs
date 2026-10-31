@@ -204,6 +204,16 @@ fn every_registered_block_names_its_feature() {
 /// `tests/d1_read_cost.rs`'s provision phase, which asserts the same limit
 /// over all of it.
 ///
+/// **The line is interim.** It used to be half the limit, counted per call,
+/// and the ledger plan's decision U-IP5-2 was that crossing it schedules
+/// batch accounting rather than a higher line. Counted per statement, the
+/// install had already crossed it (534 > 500), so batch accounting is the
+/// next producer-first change (PR267-review M1): wafer-run counts a
+/// `db.batch()` as the one call D1 counts, then the adapter's guard — and
+/// this test, `config_vars.rs`'s budget doc and the harness's — re-derive in
+/// calls (172 for the migrations and 214 for the whole prepare, as measured today).
+/// Until then the line is the adapter's own refusal point, the limit itself.
+///
 /// It counts what a Cloudflare build migrates ([`cloudflare_blocks`]): a
 /// block the Worker cannot compile never runs in its prepare. Every one of
 /// those blocks must be compiled into this test, or the count is short.
@@ -238,8 +248,9 @@ async fn a_cloudflare_fresh_install_fits_the_d1_budget() {
     let sent: usize = trips.iter().map(RoundTrip::statements).sum();
     println!(
         "a Cloudflare fresh install sends {sent}: {statements} file statements, {files} \
-         ledger rows, {} of the runner's own",
-        sent - statements - files
+         ledger rows, {} of the runner's own; {} D1 calls",
+        sent - statements - files,
+        trips.len()
     );
     let limit = impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
     assert!(

@@ -73,9 +73,10 @@ use impresspress_core::{
     after_response::{self, AfterResponse},
     blocks::auth::{repo as auth_repo, JWT_SECRET_KEY},
     builder::{
-        boot_deploy_runtime, boot_request_runtime, request_config_source, seal_prepared_plan,
-        structural_runtime_config, ImpresspressBuilder, PreparedPlanExporter, RequestBuild,
-        RuntimeConfig, StructuralConfigInputs, PREPARE_RUNTIME_PLAN_KEY,
+        add_request_config, boot_deploy_runtime, boot_request_runtime, request_config_source,
+        seal_prepared_plan, structural_runtime_config, warm_config_surfaces, ImpresspressBuilder,
+        PreparedPlanExporter, RequestBuild, RuntimeConfig, StructuralConfigInputs,
+        PREPARE_RUNTIME_PLAN_KEY,
     },
     deferred::{self, DeferMode},
     features::BlockSettings,
@@ -152,6 +153,52 @@ struct Built {
     exporter: PreparedPlanExporter,
     block_settings: Arc<RwLock<BlockSettings>>,
     config: Arc<dyn ConfigService>,
+    source: Arc<RequestScopedSource>,
+}
+
+/// The config source a built runtime holds, standing in for the Worker's
+/// `config_source_proxy()`: it forwards to whichever source the current
+/// request installed. On Cloudflare that is a fresh `DatabaseConfigSource` per
+/// request (`warm_request_services`), so a warm request that resolved a
+/// block's config would read the table again; the harness installs one the
+/// same way before each warm request ([`warm_source`]).
+struct RequestScopedSource(RwLock<Arc<dyn wafer_run::ConfigSource>>);
+
+impl RequestScopedSource {
+    fn install(&self, source: Arc<dyn wafer_run::ConfigSource>) {
+        *self.0.write().unwrap_or_else(|p| p.into_inner()) = source;
+    }
+}
+
+#[wafer_block::wafer_async_trait]
+impl wafer_run::ConfigSource for RequestScopedSource {
+    async fn load_for_block(
+        &self,
+        block: &str,
+        declared_keys: &[wafer_run::ConfigVar],
+    ) -> Result<wafer_run::EnvBlockConfig, wafer_run::ConfigError> {
+        let current = self.0.read().unwrap_or_else(|p| p.into_inner()).clone();
+        current.load_for_block(block, declared_keys).await
+    }
+}
+
+/// The Worker environment's bound keys, as `CfEnvironment::config_map` gives
+/// them: the JWT secret, and no builder-time var.
+fn bound() -> HashMap<String, String> {
+    HashMap::from([(JWT_SECRET_KEY.to_string(), JWT_SECRET.to_string())])
+}
+
+/// A warm request's config source, built as `warm_request_services` builds it:
+/// the warm surfaces over the cached runtime's snapshot, then a fresh
+/// `request_config_source` over this request's overlay.
+fn warm_source(
+    db: &Arc<dyn DatabaseService>,
+    wafer: &Wafer,
+    request_config: &HashMap<String, String>,
+) -> Arc<dyn wafer_run::ConfigSource> {
+    let (_config_map, overlay) =
+        warm_config_surfaces(&bound(), wafer.config_snapshot(), request_config);
+    request_config_source(db.clone(), overlay)
 }
 
 /// The plan identity a Worker version carries, fixed for the harness.
@@ -164,11 +211,17 @@ fn identity() -> (String, WaferLockIdentity, PreparedReleaseAssets) {
 
 /// Build (not boot) a runtime over `db` the way `build_runtime` does: the
 /// `block_settings` read (or the plan's), the structural config pass with the
-/// bound JWT secret, the config source over its overlay, the builder.
+/// bound JWT secret, the consumer's request config, the config source over the
+/// resulting overlay, the builder. The config passes and the source are the
+/// production functions; the sequence around them is `build_runtime`'s,
+/// copied, because that function needs a `worker::Env` (the golden's header
+/// names what the copy cannot see).
 ///
-/// What differs from the Worker is only what the Worker binds: services are
-/// handed to the builder directly instead of through the request-scoped
-/// proxies, the storage is in memory, and the network refuses.
+/// What differs from the Worker is otherwise only what the Worker binds:
+/// services are handed to the builder directly instead of through the
+/// request-scoped proxies (the config source excepted, see
+/// [`RequestScopedSource`]), the storage is in memory, and the network
+/// refuses.
 async fn build(
     db: &Arc<dyn DatabaseService>,
     prepared: Option<&PreparedRuntimePlan>,
@@ -193,22 +246,21 @@ async fn build(
         block_settings_json: settings.to_config_json(),
         run_migrations: provisioning,
     });
-    // A forwarding consumer's request config, as the Worker's
-    // `add_request_config` adds it: the async surface and the config source's
-    // overlay, never the snapshot.
-    for (key, value) in request_config {
-        overlay.insert(key.clone(), value.clone());
-        runtime_config.service_only(
-            key.clone(),
-            value.clone(),
-            "consumer request config is request-current",
-        );
-    }
+    let mut request_config = request_config.clone();
     if provisioning {
-        // `/_deploy/prepare`'s request flag, which the Worker retains on both
-        // surfaces (`retain_prepare_runtime_plan_flag`).
+        // `/_deploy/prepare` adds its flag to the request config, and the
+        // Worker then retains it on both surfaces
+        // (`retain_prepare_runtime_plan_flag`).
+        request_config.insert(PREPARE_RUNTIME_PLAN_KEY.to_string(), "1".to_string());
+    }
+    add_request_config(&mut runtime_config, &mut overlay, &request_config);
+    if provisioning {
         runtime_config.both(PREPARE_RUNTIME_PLAN_KEY, "1");
     }
+    let source = Arc::new(RequestScopedSource(RwLock::new(request_config_source(
+        db.clone(),
+        overlay,
+    ))));
     let (builder, config) = install(runtime_config);
     let builder = builder
         .database(db.clone())
@@ -220,7 +272,7 @@ async fn build(
         .network(Arc::new(NoNetwork))
         .logger(Arc::new(wafer_core::service_blocks::logger::TracingLogger))
         .block_settings(settings)
-        .config_source(request_config_source(db.clone(), overlay));
+        .config_source(source.clone());
     let builder = match prepared {
         Some(plan) => {
             let (sha, lock, assets) = identity();
@@ -238,6 +290,7 @@ async fn build(
         exporter,
         block_settings,
         config,
+        source,
     }
 }
 
@@ -274,13 +327,14 @@ async fn provision(db: &Arc<dyn DatabaseService>) -> PreparedRuntimePlan {
         .expect("the plan exports")
 }
 
-/// Phases 3 and 4: a request-path build, booted.
+/// Phases 3 and 4: a request-path build, booted; with the config source a
+/// warm request installs into.
 async fn boot_request(
     db: &Arc<dyn DatabaseService>,
     build_kind: RequestBuild,
     plan: &PreparedRuntimePlan,
     request_config: &HashMap<String, String>,
-) -> Wafer {
+) -> (Wafer, Arc<RequestScopedSource>) {
     let prepared = (build_kind == RequestBuild::Prepared).then_some(plan);
     let mut built = build(db, prepared, false, request_config).await;
     boot_request_runtime(
@@ -292,7 +346,7 @@ async fn boot_request(
     )
     .await
     .unwrap_or_else(|e| panic!("the {build_kind:?} request build boots: {e}"));
-    built.wafer
+    (built.wafer, built.source)
 }
 
 // ---------------------------------------------------------------------------
@@ -566,8 +620,16 @@ enum Class {
     Scan,
     /// A read whose plan only searches an index.
     Search,
-    /// Schema introspection: `pragma_table_info`, `sqlite_master`.
+    /// Schema introspection: `pragma_table_info`, or a `sqlite_master` read
+    /// that probes no single table.
     Introspect,
+    /// A table-existence probe (`SELECT EXISTS(… sqlite_master …)`), filed
+    /// under the table it looks for.
+    Exists,
+    /// The executor's id-kind probe before a table's first create
+    /// (`CASE WHEN NOT EXISTS(… sqlite_master …) … pragma_table_info …`),
+    /// filed under the table it probes.
+    IdProbe,
     /// Any write, DDL included.
     Write,
     /// A read whose plan could not be taken (its table is gone by the end of
@@ -582,6 +644,8 @@ impl Class {
             Self::Scan => "SCAN",
             Self::Search => "SEARCH",
             Self::Introspect => "INTROSPECT",
+            Self::Exists => "EXISTS",
+            Self::IdProbe => "ID-PROBE",
             Self::Write => "WRITE",
             Self::Read => "READ",
         }
@@ -683,8 +747,10 @@ impl Classifier {
             .unwrap_or(0)
     }
 
-    /// The `SCAN`/`SEARCH` rows of `sql`'s query plan, as `(verb, table)`.
-    fn plan(&self, sent: &Sent) -> Option<Vec<(String, String)>> {
+    /// The `SCAN`/`SEARCH` rows of `sql`'s query plan, as `(verb, table)`,
+    /// and whether the plan sorts through a temporary B-tree (so a `LIMIT`
+    /// cannot stop the scan early).
+    fn plan(&self, sent: &Sent) -> Option<(Vec<(String, String)>, bool)> {
         let mut stmt = self
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", sent.sql))
@@ -697,7 +763,8 @@ impl Classifier {
             .ok()?
             .collect::<Result<_, _>>()
             .ok()?;
-        Some(
+        let sorts = details.iter().any(|d| d.contains("TEMP B-TREE"));
+        Some((
             details
                 .iter()
                 .filter_map(|d| {
@@ -708,7 +775,8 @@ impl Classifier {
                         .then(|| (verb.to_string(), unquote(table)))
                 })
                 .collect(),
-        )
+            sorts,
+        ))
     }
 
     fn classify(&self, sent: &Sent) -> Classified {
@@ -721,24 +789,33 @@ impl Classifier {
             sql: format!("{sql}  {:?}", sent.params),
         };
         if upper.contains("SQLITE_MASTER") {
-            // A probe for one table scans the schema in rowid order until it
-            // finds it, or to the end when it is absent.
             let all = self
                 .scalar("SELECT COUNT(*) FROM sqlite_master", &[])
                 .unwrap_or(0);
-            let to_match = sent
-                .params
-                .first()
-                .and_then(|name| {
-                    self.scalar(
-                        "SELECT COUNT(*) FROM sqlite_master WHERE rowid <= \
-                         (SELECT rowid FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-                        std::slice::from_ref(name),
-                    )
-                })
+            let Some(probed) = sent.params.first().and_then(Value::as_str) else {
+                return verbatim("sqlite_master".to_string(), Class::Introspect, all);
+            };
+            // A probe for one table scans the schema in rowid order until it
+            // finds it, or to the end when it is absent.
+            let to_match = self
+                .scalar(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE rowid <= \
+                     (SELECT rowid FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    &sent.params[..1],
+                )
                 .filter(|n| *n > 0)
                 .unwrap_or(all);
-            return verbatim("sqlite_master".to_string(), Class::Introspect, to_match);
+            if upper.contains("PRAGMA_TABLE_INFO") {
+                // The id-kind probe also reads the table's column list.
+                let columns = self
+                    .scalar(
+                        "SELECT COUNT(*) FROM pragma_table_info(?1)",
+                        &sent.params[..1],
+                    )
+                    .unwrap_or(0);
+                return verbatim(probed.to_string(), Class::IdProbe, to_match + columns);
+            }
+            return verbatim(probed.to_string(), Class::Exists, to_match);
         }
         if upper.contains("PRAGMA_TABLE_INFO") {
             let table = sent
@@ -758,7 +835,7 @@ impl Classifier {
                 .unwrap_or_else(|| "?".to_string());
             return verbatim(table, Class::Write, 0);
         }
-        let Some(plan) = self.plan(sent) else {
+        let Some((plan, sorts)) = self.plan(sent) else {
             let table = table_after(sql, &["FROM"]).unwrap_or_else(|| "?".to_string());
             return verbatim(table, Class::Read, 0);
         };
@@ -778,7 +855,15 @@ impl Classifier {
             return verbatim(table, Class::Count, rows);
         }
         if verb == "SCAN" {
-            let rows = self.table_rows(&table);
+            // A scan reads the whole table, unless a `LIMIT` with nothing to
+            // filter or sort ahead of it stops it after the rows it returns.
+            let stops_early = upper.contains(" LIMIT ") && !upper.contains(" WHERE ") && !sorts;
+            let rows = if stops_early {
+                self.scalar(&format!("SELECT COUNT(*) FROM ({sql})"), &sent.params)
+                    .unwrap_or(0)
+            } else {
+                self.table_rows(&table)
+            };
             verbatim(table, Class::Scan, rows)
         } else {
             let rows = self
@@ -793,6 +878,8 @@ impl Classifier {
 struct Phase {
     name: String,
     statements: Vec<Classified>,
+    /// D1 calls: round trips, a batch or transaction counting once.
+    calls: usize,
     /// Extra facts for the section header (a warm request's status).
     note: String,
 }
@@ -807,6 +894,7 @@ impl Phase {
         Self {
             name,
             statements,
+            calls: trips.len(),
             note,
         }
     }
@@ -823,9 +911,10 @@ impl Phase {
             entry.1 += s.rows;
         }
         let mut out = format!(
-            "## {} — {} statements, rows≈{}{}\n",
+            "## {} — {} statements, {} D1 calls, rows≈{}{}\n",
             self.name,
             self.statements.len(),
+            self.calls,
             self.rows(),
             self.note
         );
@@ -851,14 +940,33 @@ impl Phase {
 // The rules, asserted whatever the golden says.
 // ---------------------------------------------------------------------------
 
-/// A statement the rules would refuse, allowed with the reason it is still
-/// there and the PR that removes it. Strict: an entry that no longer occurs
-/// fails too, so the PR that removes the statement removes its entry.
+/// Statements the rules would refuse on a cold build, allowed with the reason
+/// they are still there, the PR that removes or changes them, and exactly how
+/// many each variant sends.
+///
+/// Strict both ways: a count that differs fails, and an entry that no longer
+/// occurs at all fails too, so a change that removes a statement or sends it
+/// fewer times edits its entry here — the rule, not only the golden, records
+/// it. Each `because` names the plan step that is expected to. A write is
+/// allowed the same way, with the reason it is safe on the request path.
 struct Allowed {
     phase: &'static str,
     table: &'static str,
     class: Class,
+    /// Statements the `mixed` variant sends.
+    mixed: usize,
+    /// Statements the `shared` variant sends.
+    shared: usize,
     because: &'static str,
+}
+
+impl Allowed {
+    fn count(&self, variant: Variant) -> usize {
+        match variant {
+            Variant::Mixed => self.mixed,
+            Variant::Shared => self.shared,
+        }
+    }
 }
 
 const PHASE_DATABASE: &str = "3 database build";
@@ -869,6 +977,8 @@ const ALLOWED: &[Allowed] = &[
         phase: PHASE_DATABASE,
         table: "wafer_run__auth__users",
         class: Class::Count,
+        mixed: 1,
+        shared: 1,
         because: "auth Init's bootstrap check on every build; D1-READ-COST PR 4 \
                   (provisioning-only seeds, `users::any_exists`) removes it",
     },
@@ -876,12 +986,16 @@ const ALLOWED: &[Allowed] = &[
         phase: PHASE_PREPARED,
         table: "wafer_run__auth__users",
         class: Class::Count,
+        mixed: 1,
+        shared: 1,
         because: "auth Init's bootstrap check on every build; D1-READ-COST PR 4 removes it",
     },
     Allowed {
         phase: PHASE_DATABASE,
-        table: "sqlite_master",
-        class: Class::Introspect,
+        table: "impresspress__admin__wrap_grants",
+        class: Class::Exists,
+        mixed: 1,
+        shared: 1,
         because: "`wrap_grants::load` probes before it lists; D1-READ-COST PR 5 (list \
                   first, probe only after a failure) removes it",
     },
@@ -889,20 +1003,26 @@ const ALLOWED: &[Allowed] = &[
         phase: PHASE_DATABASE,
         table: "impresspress__admin__variables",
         class: Class::Scan,
-        because: "the config source's unfiltered snapshot and the config block's; \
-                  D1-READ-COST PR 6 makes it one per build",
+        mixed: 2,
+        shared: 10,
+        because: "the config source's unfiltered snapshot and the config block's; with \
+                  no block-scoped row the source re-reads it for each of the 9 \
+                  config-declaring blocks. D1-READ-COST PR 6 makes it 1 per build",
     },
     Allowed {
         phase: PHASE_PREPARED,
         table: "impresspress__admin__variables",
         class: Class::Scan,
-        because: "the config source's unfiltered snapshot and the config block's; \
-                  D1-READ-COST PR 6 makes it one per build",
+        mixed: 2,
+        shared: 10,
+        because: "as on the database build; D1-READ-COST PR 6 makes it 1 per build",
     },
     Allowed {
         phase: PHASE_DATABASE,
         table: "impresspress__admin__block_settings",
         class: Class::Scan,
+        mixed: 2,
+        shared: 2,
         because: "a database build reads its enablement map before `build()` and again \
                   after admin's Init (`RequestBootHooks`); on Cloudflare both are served \
                   by the KV row cache and reach D1 only on a KV miss",
@@ -911,6 +1031,8 @@ const ALLOWED: &[Allowed] = &[
         phase: PHASE_DATABASE,
         table: "impresspress__admin__wrap_grants",
         class: Class::Scan,
+        mixed: 1,
+        shared: 1,
         because: "a database build loads the admin-created grants (`GrantSource::Database`); \
                   a prepared build takes them from the plan",
     },
@@ -923,38 +1045,39 @@ const BUILD_STATE: [&str; 3] = [
     "impresspress__admin__wrap_grants",
 ];
 
+/// Whether a cold build may send `s` only under an allowance: any write, any
+/// `COUNT`, any `sqlite_master` probe, and any scan of a table.
+fn needs_allowance(s: &Classified) -> bool {
+    matches!(
+        s.class,
+        Class::Write | Class::Count | Class::Exists | Class::IdProbe
+    ) || s.table == "sqlite_master"
+        || s.class == Class::Scan
+}
+
 /// Every rule a phase breaks, as messages.
 fn check_rules(variant: Variant, phases: &[Phase]) -> Vec<String> {
     let mut problems = Vec::new();
-    let mut used = vec![false; ALLOWED.len()];
+    let mut sent = vec![0usize; ALLOWED.len()];
     for phase in phases {
         let short = phase.name.split(": ").nth(1).unwrap_or(&phase.name);
         let cold_build = short == PHASE_DATABASE || short == PHASE_PREPARED;
         let warm = short.starts_with("5 warm");
         for s in &phase.statements {
-            let allowed = ALLOWED
-                .iter()
-                .position(|a| a.phase == short && a.table == s.table && a.class == s.class);
-            if let Some(i) = allowed {
-                used[i] = true;
-            }
-            if cold_build {
-                if s.class == Class::Write {
-                    problems.push(format!(
-                        "{}: a request-path build over a provisioned database writes \
-                         nothing: {}",
-                        phase.name, s.sql
-                    ));
-                }
-                let refused = s.class == Class::Count
-                    || s.table == "sqlite_master"
-                    || (s.class == Class::Scan && !s.table.starts_with("sqlite_"));
-                if refused && allowed.is_none() {
-                    problems.push(format!(
-                        "{}: no COUNT, no sqlite_master and no table SCAN on a cold build \
-                         unless allowed with a reason: {}",
-                        phase.name, s.sql
-                    ));
+            if cold_build && needs_allowance(s) {
+                match ALLOWED
+                    .iter()
+                    .position(|a| a.phase == short && a.table == s.table && a.class == s.class)
+                {
+                    Some(i) => sent[i] += 1,
+                    None => problems.push(format!(
+                        "{}: a cold build sends no write, no COUNT, no sqlite_master probe \
+                         and no table SCAN unless allowed with a reason: [{} {}] {}",
+                        phase.name,
+                        s.class.label(),
+                        s.table,
+                        s.sql
+                    )),
                 }
             }
             if warm && BUILD_STATE.contains(&s.table.as_str()) {
@@ -965,14 +1088,20 @@ fn check_rules(variant: Variant, phases: &[Phase]) -> Vec<String> {
             }
         }
     }
-    for (i, allowed) in ALLOWED.iter().enumerate() {
-        if !used[i] {
+    for (allowed, sent) in ALLOWED.iter().zip(sent) {
+        let expected = allowed.count(variant);
+        if sent != expected {
+            let fix = if sent == 0 {
+                "remove the allowance"
+            } else {
+                "change its count, with the reason"
+            };
             problems.push(format!(
-                "{}: the allowance for {} {} on `{}` is no longer used — remove it ({})",
+                "{}: `{}` sends {sent} {} on {}, the allowance says {expected} — {fix} ({})",
                 variant.name(),
+                allowed.phase,
                 allowed.class.label(),
                 allowed.table,
-                allowed.phase,
                 allowed.because
             ));
         }
@@ -1036,12 +1165,22 @@ async fn run(variant: Variant) -> Run {
         classifier.table_rows("impresspress__admin__roles"),
         classifier.table_rows(wrap_grants::TABLE),
     );
+    let mut forwarded: Vec<&str> = request_config.keys().map(String::as_str).collect();
+    forwarded.sort_unstable();
+    let sizes = if forwarded.is_empty() {
+        sizes
+    } else {
+        format!(
+            "{sizes}; block-scoped rows deleted and forwarded as request config: {}",
+            forwarded.join(", ")
+        )
+    };
 
     let mut phases = Vec::new();
 
     // 3. A database build, on a cold isolate.
     let db = cold(&path, &ledger);
-    let wafer = boot_request(&db, RequestBuild::Database, &plan, &request_config).await;
+    let (wafer, _) = boot_request(&db, RequestBuild::Database, &plan, &request_config).await;
     drop(wafer);
     drop(db);
     phases.push(Phase::new(
@@ -1053,7 +1192,7 @@ async fn run(variant: Variant) -> Run {
 
     // 4. A prepared build, on a cold isolate.
     let db = cold(&path, &ledger);
-    let wafer = boot_request(&db, RequestBuild::Prepared, &plan, &request_config).await;
+    let (wafer, source) = boot_request(&db, RequestBuild::Prepared, &plan, &request_config).await;
     phases.push(Phase::new(
         label(PHASE_PREPARED),
         &ledger.take(),
@@ -1071,6 +1210,7 @@ async fn run(variant: Variant) -> Run {
 
     // 5. Warm requests on runtime 4.
     for (name, path, signed_in, expected) in WARM {
+        source.install(warm_source(&db, &wafer, &request_config));
         let status = request(&wafer, &db, path, signed_in.then_some(token.as_str())).await;
         let phase = Phase::new(
             label(&format!("5 warm {name}")),
@@ -1105,33 +1245,52 @@ const HEADER: &str = "\
 # runs it with the Cloudflare block set). Regenerate with `BLESS=1 just d1-cost`
 # and review the diff: a PR that saves statements or rows shows it here.
 #
+# Section headers count statements (the unit the Worker's D1 budget admits today,
+# a batch counting each of its statements) and D1 calls (the unit D1 itself
+# limits per invocation, a batch counting once).
+#
 # Columns: table, class, statements, rows≈.
 #   COUNT       SELECT COUNT(...): reads every row it counts.
-#   SCAN        a read whose plan scans a whole table (or a whole index of it).
+#   SCAN        a read whose plan scans a table (or a whole index of it).
 #   SEARCH      a read whose plan only searches an index.
-#   INTROSPECT  pragma_table_info (one per table per cold isolate) or sqlite_master.
+#   INTROSPECT  pragma_table_info: up to two per table per cold isolate (its
+#               columns and its primary key); or a sqlite_master read that
+#               probes no single table (provisioning's).
+#   EXISTS      a table-existence probe (sqlite_master), under the table it
+#               looks for.
+#   ID-PROBE    the executor's id-kind probe before a table's first create
+#               (sqlite_master and pragmas), under the table it probes.
 #   WRITE       any write, DDL included.
 #   READ        a read whose plan could not be taken (its table is gone by the end
 #               of the phase); provisioning only.
 # rows≈ is a model, not D1's own rows_read: a SCAN reads every row of its table,
-# a COUNT every row it counts (the whole table unless an index narrows it), a
-# SEARCH the rows it matches, pragma_table_info the rows it returns, and a
-# sqlite_master probe the schema rows up to the table it looks for (all of them
-# when the table is absent). A WRITE reads none. Counted against the database as
-# it stands at the end of each phase (provisioning: before the seed).
+# or only the rows it returns when a LIMIT stops it with nothing to filter or
+# sort first; a COUNT every row it counts (the whole table unless an index
+# narrows it); a SEARCH the rows it matches; pragma_table_info the rows it
+# returns; EXISTS the schema rows up to the table it looks for (all of them when
+# it is absent); ID-PROBE those plus the table's columns. A WRITE reads none.
+# Counted against the database as it stands at the end of each phase
+# (provisioning: before the seed).
 #
 # What this cannot see:
 #   - the KV config-version probe a warm isolate makes every 5-10 minutes;
 #   - the KV row cache: the two block_settings reads of a database build are KV
 #     reads on Cloudflare and reach D1 only on a KV miss, which is what is shown;
-#   - D1's own rows_read, which the `metric=d1_cost` line reports live (PR 7).
+#   - D1's own rows_read, which the `metric=d1_cost` line reports live (PR 7);
+#   - a D1 read `build_runtime` adds around the funnels, or a consumer's
+#     `register_blocks` makes: the harness runs the production config passes,
+#     config source and funnels, but copies `build_runtime`'s sequence around
+#     them (it needs a `worker::Env`).
 #
-# The `shared` variant has no block-scoped variables row at all. A database
-# provisioned on main always has some (each auto-generated secret is stored under
-# the block that declares it, and products requires its webhook secret), so the
-# variant deletes them and forwards their values as request config instead, as a
-# consumer binding its secrets does. With no row carrying a block, the config
-# source's pre-002 rule leaves the grouped snapshot unmemoized (PR 6, R4).
+# The `shared` variant has no block-scoped variables row at all. A database the
+# main funnel provisioned always has some: products' auto-generated webhook
+# secret (re-seeded on every deploy) and the auth defaults admin's settings seed
+# stores under their blocks. So the all-shared shape exists only before a
+# repinned site's first prepare, or after a manual delete. The variant deletes
+# them and forwards their values as request config (`add_request_config`), as a
+# consumer binding its secrets does; products requires its secret. With no row
+# carrying a block, the config source's pre-002 rule leaves its grouped snapshot
+# unmemoized, so each config-declaring block re-reads the table (PR 6, R4).
 ";
 
 fn render(runs: &[Run]) -> String {
@@ -1238,8 +1397,10 @@ async fn a_cold_isolate_sends_d1_the_golden_statements() {
     assert!(problems.is_empty(), "{}", problems.join("\n\n"));
 }
 
-/// Every `block-*` feature this build has compiled in, by name.
-const COMPILED_BLOCK_FEATURES: &[(&str, bool)] = &[
+/// Every `impresspress-core` feature, and whether this build has it.
+const COMPILED_FEATURES: &[(&str, bool)] = &[
+    ("block-dev", cfg!(feature = "block-dev")),
+    ("block-fastembed", cfg!(feature = "block-fastembed")),
     ("block-files", cfg!(feature = "block-files")),
     ("block-legalpages", cfg!(feature = "block-legalpages")),
     ("block-llm", cfg!(feature = "block-llm")),
@@ -1249,26 +1410,69 @@ const COMPILED_BLOCK_FEATURES: &[(&str, bool)] = &[
     ("block-tickets", cfg!(feature = "block-tickets")),
     ("block-userportal", cfg!(feature = "block-userportal")),
     ("block-vector", cfg!(feature = "block-vector")),
+    ("embed-assets", cfg!(feature = "embed-assets")),
+    ("llm", cfg!(feature = "llm")),
+    ("migration-fixtures", cfg!(feature = "migration-fixtures")),
+    ("native-embedding", cfg!(feature = "native-embedding")),
+    ("postgres", cfg!(feature = "postgres")),
+    ("site-runtime", cfg!(feature = "site-runtime")),
+    ("sqlite", cfg!(feature = "sqlite")),
+    ("storage-local", cfg!(feature = "storage-local")),
+    ("storage-s3", cfg!(feature = "storage-s3")),
+    ("test-hooks", cfg!(feature = "test-hooks")),
+    ("test-support", cfg!(feature = "test-support")),
+    ("wasm", cfg!(feature = "wasm")),
 ];
 
-/// **The golden is the Worker's block set.** Every `block-*` feature
-/// `impresspress-cloudflare` passes through (`X = ["impresspress-core/X"]`
-/// in its manifest) is compiled into this run, and nothing else is: a block
-/// a Worker can compile and this run lacks, or the reverse, would pin another
-/// runtime's statements. A new passthrough fails here until `just d1-cost`
-/// and the CI step name it.
-#[test]
-fn the_harness_compiles_exactly_the_blocks_a_worker_can() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../impresspress-cloudflare/Cargo.toml");
+/// The `[features]` table of the manifest at `crate_dir`.
+fn manifest_features(crate_dir: &str) -> toml::Table {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(crate_dir)
+        .join("Cargo.toml");
     let manifest: toml::Table = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
         .parse()
-        .expect("parse the Cloudflare manifest");
-    let features = manifest
+        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    manifest
         .get("features")
         .and_then(toml::Value::as_table)
-        .expect("a [features] table");
-    let passthroughs: std::collections::BTreeSet<&str> = features
+        .cloned()
+        .expect("a [features] table")
+}
+
+/// **The golden is the Worker's runtime, feature for feature.** Every
+/// `impresspress-core` feature is named here and is on exactly when a Worker
+/// with every block it can compile has it:
+///
+/// - each `block-*` feature `impresspress-cloudflare` passes through
+///   (`X = ["impresspress-core/X"]`) — on;
+/// - `test-support` (and `migration-fixtures`, which it implies) — on: the
+///   harness's own fixtures, no block and no boot step;
+/// - everything else — off. That includes `embed-assets`, which a Worker can
+///   pass through but serves from its assets binding instead, and `llm`,
+///   `block-dev`, `site-runtime` and the native embedding features, which no
+///   Worker has.
+///
+/// A feature added to either manifest fails here until it is classified, and
+/// `just d1-cost` and the CI step name the result.
+#[test]
+fn the_harness_compiles_exactly_what_a_worker_can() {
+    let core = manifest_features("impresspress-core");
+    let declared: std::collections::BTreeSet<&str> = core
+        .keys()
+        .map(String::as_str)
+        .filter(|name| *name != "default")
+        .collect();
+    let named: std::collections::BTreeSet<&str> =
+        COMPILED_FEATURES.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        named, declared,
+        "classify every impresspress-core feature in COMPILED_FEATURES"
+    );
+
+    let cloudflare = manifest_features("impresspress-cloudflare");
+    let mut expected: std::collections::BTreeSet<&str> = cloudflare
         .iter()
         .filter(|(name, implied)| {
             name.starts_with("block-")
@@ -1278,22 +1482,14 @@ fn the_harness_compiles_exactly_the_blocks_a_worker_can() {
         })
         .map(|(name, _)| name.as_str())
         .collect();
-    let compiled: std::collections::BTreeSet<&str> = COMPILED_BLOCK_FEATURES
+    expected.extend(["test-support", "migration-fixtures"]);
+    let compiled: std::collections::BTreeSet<&str> = COMPILED_FEATURES
         .iter()
         .filter(|(_, on)| *on)
         .map(|(name, _)| *name)
         .collect();
-    let named: std::collections::BTreeSet<&str> = COMPILED_BLOCK_FEATURES
-        .iter()
-        .map(|(name, _)| *name)
-        .collect();
-    assert!(
-        passthroughs.is_subset(&named),
-        "a Cloudflare block feature this file does not name: {:?}",
-        passthroughs.difference(&named).collect::<Vec<_>>()
-    );
     assert_eq!(
-        compiled, passthroughs,
-        "this run must compile exactly the block features a Worker can"
+        compiled, expected,
+        "this run must compile exactly what a Worker with every block it can compile has"
     );
 }
