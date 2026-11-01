@@ -2633,7 +2633,6 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "wafer-block",

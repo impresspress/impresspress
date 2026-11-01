@@ -1166,7 +1166,8 @@ impl LoggerService for ScopedLoggerService {
 /// test constructs) there is no source to ask. That is
 /// [`ConfigError::Transient`], not [`ConfigError::SourceFault`], although it
 /// is a bug rather than an outage: a source fault is cached as the block's
-/// permanent failure for the slot's lifetime — the isolate's — so one
+/// permanent failure for the slot's lifetime — the cached runtime's, up to the
+/// isolate's — so one
 /// misscoped load would leave the block dead on every later request, where a
 /// transient failure is retried by the next load inside a scope. It is logged
 /// at `error!` so the scope bug is seen, not retried silently.

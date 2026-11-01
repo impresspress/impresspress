@@ -313,13 +313,19 @@ impl VariablesConfigBlock {
             //   failed stored-config read — unavailable, never defaults — so a
             //   fault is not told apart from an outage here; which status a
             //   handler gives `Unavailable` is the handler's mapping.
-            // - An `Init` that reads here retries, `Unavailable` being
-            //   transient. A fault cannot hide behind that retry: a boot
-            //   initializes every block, and every block that declares config
-            //   keys (auth-ui, email, files, … in every impresspress runtime)
-            //   reads the table through this same snapshot via the config
-            //   source at its own `Init`, which classifies a fault as
-            //   permanent.
+            // - An `Init` that reads here fails transiently, `Unavailable` being
+            //   transient — a fault included. Today that is how every boot
+            //   meets a failed variables read: admin initializes first, and its
+            //   `Init` reads the database backend through here
+            //   (`migration_helper::db_backend`) before any block's config
+            //   source load runs, so the boot's `Strict` policy stops on a
+            //   transient admin failure whatever failed, and the config
+            //   source's `SourceFault` is not reached on a real boot. A fault
+            //   is told apart only by a boot that goes on past admin's
+            //   transient failure to a config-declaring block's source load,
+            //   with the failure still remembered when it does; the boot
+            //   policy that would do that is the outage plan's step IP-B, not
+            //   this block's to decide.
             Err(
                 e @ (UnfilteredReadError::Read(_) | UnfilteredReadError::MayBeTruncated { .. }),
             ) => {

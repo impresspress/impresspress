@@ -257,6 +257,7 @@ async fn build(
     prepared: Option<&PreparedRuntimePlan>,
     provisioning: bool,
     request_config: &HashMap<String, String>,
+    variables: Arc<VariablesSnapshot>,
 ) -> Built {
     let settings = match prepared {
         Some(plan) => BlockSettings::from_blocks(
@@ -287,7 +288,6 @@ async fn build(
     if provisioning {
         runtime_config.both(PREPARE_RUNTIME_PLAN_KEY, "1");
     }
-    let variables = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
     let source = Arc::new(RequestScopedSource(RwLock::new(request_config_source(
         db.clone(),
         overlay,
@@ -328,6 +328,12 @@ async fn build(
     }
 }
 
+/// The variables snapshot `build_runtime` creates: retrying a failed read on
+/// its own, on the wall clock.
+fn workers_snapshot() -> Arc<VariablesSnapshot> {
+    Arc::new(VariablesSnapshot::new(RetryMode::Backoff))
+}
+
 fn install(runtime_config: RuntimeConfig) -> (ImpresspressBuilder, Arc<dyn ConfigService>) {
     runtime_config.install(ImpresspressBuilder::new(), |map| {
         let service = impresspress_core::builder::fill_config_service(
@@ -341,7 +347,7 @@ fn install(runtime_config: RuntimeConfig) -> (ImpresspressBuilder, Arc<dyn Confi
 /// Phase 1: the deploy funnel over an empty database, then the prepare
 /// closing sequence; returns the plan.
 async fn provision(db: &Arc<dyn DatabaseService>) -> PreparedRuntimePlan {
-    let mut built = build(db, None, true, &HashMap::new()).await;
+    let mut built = build(db, None, true, &HashMap::new(), workers_snapshot()).await;
     let report = boot_deploy_runtime(
         &mut built.wafer,
         db,
@@ -370,7 +376,7 @@ async fn boot_request(
     request_config: &HashMap<String, String>,
 ) -> (Wafer, Arc<RequestScopedSource>, Arc<VariablesSnapshot>) {
     let prepared = (build_kind == RequestBuild::Prepared).then_some(plan);
-    let mut built = build(db, prepared, false, request_config).await;
+    let mut built = build(db, prepared, false, request_config, workers_snapshot()).await;
     boot_request_runtime(
         &mut built.wafer,
         db,
@@ -1815,14 +1821,15 @@ async fn make_site_shaped(wafer: &mut Wafer) {
         .expect("register the site's flow");
 }
 
-/// A prepared build over `db`, booted on the request path; `site_shaped`
-/// makes it the wafer-site-shaped deployment first.
+/// A prepared build over `db` and `variables`, booted on the request path;
+/// `site_shaped` makes it the wafer-site-shaped deployment first.
 async fn boot_prepared(
     db: &Arc<dyn DatabaseService>,
     plan: &PreparedRuntimePlan,
     site_shaped: bool,
+    variables: Arc<VariablesSnapshot>,
 ) -> (Wafer, Arc<VariablesSnapshot>) {
-    let mut built = build(db, Some(plan), false, &HashMap::new()).await;
+    let mut built = build(db, Some(plan), false, &HashMap::new(), variables).await;
     if site_shaped {
         make_site_shaped(&mut built.wafer).await;
     }
@@ -1836,6 +1843,30 @@ async fn boot_prepared(
     .await
     .unwrap_or_else(|e| panic!("the prepared request build boots: {e}"));
     (built.wafer, built.variables)
+}
+
+/// The clock an outage test's snapshot measures its retry on, moved by hand:
+/// a remembered failure is replayed with no query until the test moves it
+/// past the retry time, however slowly the test runs.
+#[derive(Clone, Default)]
+struct HandClock(Arc<std::sync::atomic::AtomicU64>);
+
+impl HandClock {
+    /// Long past any retry a failure stored at time 0 schedules (60 s at most).
+    const RETRY_DUE: u64 = 3_600_000;
+
+    fn set(&self, ms: u64) {
+        self.0.store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// `build_runtime`'s snapshot (`Backoff`), on this clock.
+    fn snapshot(&self) -> Arc<VariablesSnapshot> {
+        let now = Arc::clone(&self.0);
+        Arc::new(VariablesSnapshot::with_clock(
+            RetryMode::Backoff,
+            move || now.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    }
 }
 
 /// Put `variables` into its failed state as an outage leaves a published
@@ -1867,10 +1898,16 @@ fn reads_variables(trips: &[RoundTrip]) -> bool {
 /// failed — every stored-config read `Unavailable` — a wafer-site-shaped
 /// deployment still answers `/` 200 from its content block, sending D1 no
 /// variables read on that request: the middleware chain and the router read
-/// no table config. An impresspress site's `/` reads its landing switch
+/// no table config. Its request runs with the failure's retry due, so a
+/// stored-config read on the path — through the snapshot or straight at the
+/// table — would reach D1 and be seen, not be answered from the memo. An
+/// impresspress site's `/` reads its landing switch
 /// (`HAS_LANDING_PAGE`, a table key), which fails closed: an error, never the
 /// redirect it answers healthy and never a page decided by the switch's
-/// declared default. (Today's 500 becomes the outage plan's 503 in its I4b.)
+/// declared default; its request runs before the retry, so the remembered
+/// failure answers with no query. The snapshots' clock is the test's
+/// ([`HandClock`]), so neither half depends on how fast the test runs.
+/// (Today's 500 becomes the outage plan's 503 in its I4b.)
 #[tokio::test]
 async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     let _generation = GENERATION.lock().await;
@@ -1882,9 +1919,11 @@ async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     // The wafer-site-shaped deployment.
     let shaped = Arc::new(D1Shaped::open(&path, Arc::clone(&ledger)));
     let db: Arc<dyn DatabaseService> = shaped.clone();
-    let (wafer, variables) = boot_prepared(&db, &plan, true).await;
+    let clock = HandClock::default();
+    let (wafer, variables) = boot_prepared(&db, &plan, true, clock.snapshot()).await;
     assert_eq!(request_flow(&wafer, &db, SITE_FLOW, "/", None).await, 200);
     fail_stored_config(&shaped, &db, &variables).await;
+    clock.set(HandClock::RETRY_DUE);
     ledger.take();
     assert_eq!(
         request_flow(&wafer, &db, SITE_FLOW, "/", None).await,
@@ -1894,7 +1933,7 @@ async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     let trips = ledger.take();
     assert!(
         !reads_variables(&trips),
-        "the content path sent D1 a variables read: {trips:#?}"
+        "the content path read stored config: {trips:#?}"
     );
     shaped.clear_fault();
     drop(wafer);
@@ -1902,7 +1941,8 @@ async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     // An impresspress site.
     let shaped = Arc::new(D1Shaped::open(&path, Arc::clone(&ledger)));
     let db: Arc<dyn DatabaseService> = shaped.clone();
-    let (wafer, variables) = boot_prepared(&db, &plan, false).await;
+    let clock = HandClock::default();
+    let (wafer, variables) = boot_prepared(&db, &plan, false, clock.snapshot()).await;
     assert_eq!(
         request(&wafer, &db, "/", None).await,
         302,
@@ -1917,7 +1957,7 @@ async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     );
     assert!(
         !reads_variables(&ledger.take()),
-        "the remembered failure answers with no query"
+        "before its retry, the remembered failure answers with no query"
     );
 }
 

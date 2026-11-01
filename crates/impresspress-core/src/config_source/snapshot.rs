@@ -183,7 +183,8 @@ enum State {
     /// [`VariablesSnapshot::read`]). Its rows are deliberately not memoized, so
     /// every reader reads again, exactly as from `Empty`; what is remembered is
     /// only that this generation's shape has been warned about, so the warning
-    /// is one line per config-write generation rather than one per read — a
+    /// is one line per config-write generation (or one per reader racing that
+    /// generation's first read) rather than one per read — a
     /// cold build reads once per config-declaring block, and every
     /// `CONFIG_GET` reads too.
     PreMigration002 { warned_at: u64 },
@@ -332,6 +333,10 @@ impl VariablesSnapshot {
             Ok(read) => {
                 let rows = Arc::new(VariablesRows::new(read.rows));
                 if read.returned > 0 && !read.any_record_has_block_key {
+                    // Check, then store: not atomic across readers interleaved
+                    // at an `.await`, so readers racing a generation's first
+                    // read may each warn once. Bounded by those readers, and
+                    // making it exact would need a guard across the read.
                     let warned = matches!(
                         self.load(),
                         State::PreMigration002 { warned_at } if warned_at == generation

@@ -37,7 +37,7 @@ use impresspress_core::{
     platform_state::variables::{self, NewVariable},
     test_support::{
         d1_shaped::{D1Shaped, Fault, Ledger},
-        migrate_sqlite, TestContext,
+        migrate_sqlite, MessageCapture, TestContext,
     },
 };
 use wafer_block::ConfigVar;
@@ -525,46 +525,6 @@ async fn rows_without_a_block_column_are_not_memoized_as_empty() {
     assert_eq!(counting.lists(), 2);
 }
 
-/// Lines a test's subscriber wrote.
-#[derive(Clone, Default)]
-struct Logged(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for Logged {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Logged {
-    /// Install a subscriber writing into this buffer, for the current thread
-    /// until the guard drops.
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let logged = self.clone();
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_writer(move || logged.clone())
-                .with_ansi(false)
-                .finish(),
-        )
-    }
-
-    /// How many lines contain `needle`.
-    fn count(&self, needle: &str) -> usize {
-        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|p| p.into_inner()))
-            .lines()
-            .filter(|line| line.contains(needle))
-            .count()
-    }
-}
-
 /// The pre-migration-002 shape is read again by every reader, deliberately,
 /// but warned about once per config-write generation — not once per read,
 /// which on a cold build is once per config-declaring block, and once per
@@ -591,8 +551,8 @@ async fn the_pre_migration_002_shape_is_warned_about_once_per_generation() {
         .await
         .expect("seed a pre-002 row");
     let source = DatabaseConfigSource::new(db.clone(), Arc::default());
-    let logged = Logged::default();
-    let _subscriber = logged.install();
+    let logged = MessageCapture::default();
+    let _subscriber = tracing::subscriber::set_default(logged.clone());
     let load_all = || async {
         for block in ["wafer-run/auth", "impresspress/email", "impresspress/files"] {
             source
@@ -605,7 +565,7 @@ async fn the_pre_migration_002_shape_is_warned_about_once_per_generation() {
     load_all().await;
     assert_eq!(counting.lists(), 3, "the shape is still read every time");
     assert_eq!(
-        logged.count("pre-migration-002"),
+        logged.count_containing("pre-migration-002"),
         1,
         "one warning, not one per block"
     );
@@ -614,7 +574,7 @@ async fn the_pre_migration_002_shape_is_warned_about_once_per_generation() {
     load_all().await;
     assert_eq!(counting.lists(), 6);
     assert_eq!(
-        logged.count("pre-migration-002"),
+        logged.count_containing("pre-migration-002"),
         2,
         "a new generation is warned about once more"
     );
@@ -1092,12 +1052,13 @@ async fn a_remembered_failure_is_unavailable_never_a_default_or_the_boot_map() {
     );
 }
 
-/// D1's "no such table" on the variables table of a migrated database.
-fn no_such_variables_table() -> Fault {
-    Fault::Internal(format!(
-        "D1_ERROR: no such table: {}: SQLITE_ERROR",
-        variables::TABLE
-    ))
+/// A D1 failure nobody has classified as one that clears (an `Internal`
+/// text), on every statement naming the variables table: the list fails, and
+/// so does the schema probe after it, so the read is a failed `Read`, not the
+/// cold start's `Absent`. What a fault the source cannot retry away looks
+/// like; a genuinely missing table is not one (its probe answers "absent").
+fn unclassified_variables_fault() -> Fault {
+    Fault::Internal("D1_ERROR: some unclassified fault: SQLITE_ERROR".to_string())
 }
 
 /// `load_for_block`'s error for a read failing with `fault`, fresh, and then
@@ -1144,17 +1105,16 @@ fn database_error_behind(err: &ConfigError) -> &DatabaseError {
 }
 
 /// **A read retrying cannot fix is a `SourceFault`**, fresh and remembered:
-/// D1's "no such table" on a migrated database (the list fails, and so does
-/// the probe after it, so it is not the cold start). Classified by
+/// an unclassified D1 failure ([`unclassified_variables_fault`]). Classified by
 /// wafer-run's `init_failure_is_transient`, which calls `Internal` permanent:
 /// the block's `Init` is cached as failed, where `Transient` would retry it
 /// on every backoff for the isolate's life.
 #[tokio::test]
 async fn a_read_retrying_cannot_fix_is_a_source_fault_fresh_and_remembered() {
     let _generation = GENERATION.lock().await;
-    for err in fresh_and_remembered(no_such_variables_table()).await {
+    for err in fresh_and_remembered(unclassified_variables_fault()).await {
         assert!(
-            matches!(&err, ConfigError::SourceFault { source, .. } if source.to_string().contains("no such table")),
+            matches!(&err, ConfigError::SourceFault { source, .. } if source.to_string().contains("some unclassified fault")),
             "{err:?}"
         );
         assert!(
@@ -1300,7 +1260,7 @@ async fn a_source_fault_is_the_blocks_permanent_init_failure_and_an_outage_is_no
     // database answers again — the read is re-read (a config write), but the
     // slot never asks.
     let (counting, faulty, db) = shaped().await;
-    faulty.fail_table(variables::TABLE, no_such_variables_table());
+    faulty.fail_table(variables::TABLE, unclassified_variables_fault());
     let (wafer, block) =
         configured_runtime(&db, Arc::new(VariablesSnapshot::new(RetryMode::Backoff)));
     let report = wafer.validate_all_block_configs().await;
@@ -1317,7 +1277,7 @@ async fn a_source_fault_is_the_blocks_permanent_init_failure_and_an_outage_is_no
         .await
         .expect_err("the source fault fails the Init");
     assert!(
-        matches!(&fault, wafer_run::InitError::Permanent(m) if m.contains("no such table")),
+        matches!(&fault, wafer_run::InitError::Permanent(m) if m.contains("some unclassified fault")),
         "{fault:?}"
     );
     faulty.clear_fault();
@@ -1328,7 +1288,7 @@ async fn a_source_fault_is_the_blocks_permanent_init_failure_and_an_outage_is_no
         .await
         .expect_err("a source fault is cached for the slot's life");
     assert!(
-        matches!(&cached, wafer_run::InitError::Permanent(m) if m.contains("no such table")),
+        matches!(&cached, wafer_run::InitError::Permanent(m) if m.contains("some unclassified fault")),
         "{cached:?}"
     );
     assert_eq!(counting.lists(), lists, "a cached failure reads nothing");

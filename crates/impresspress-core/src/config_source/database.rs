@@ -109,10 +109,12 @@ impl DatabaseConfigSource {
 ///   platform's "Too many API requests by single Worker invocation") are
 ///   [`ConfigError::Transient`]: wafer-run does not cache them in the block
 ///   slot, and retries the block's `Init` after its transient backoff. Every
-///   other variant — a missing table on a migrated database, a malformed
-///   query, a D1 text nobody has classified as one that clears — is
-///   [`ConfigError::SourceFault`]: an answer retrying cannot change, cached as
-///   the block's permanent failure.
+///   other variant — a malformed query, a constraint, a D1 text nobody has
+///   classified as one that clears — is [`ConfigError::SourceFault`]: an
+///   answer retrying cannot change, cached as the block's permanent failure.
+///   A missing table is not one of these: its failed list is followed by a
+///   schema probe that answers "absent", which is `Absent` below, whether the
+///   database was ever migrated or not.
 /// - [`UnfilteredReadError::Absent`]: `Transient`. The table does not exist
 ///   yet — a fresh database before admin's migrations — so a block
 ///   initialized before them is retried once they have run and the deploy
@@ -121,8 +123,8 @@ impl DatabaseConfigSource {
 ///   be a permanent `MissingRequired`.
 /// - [`UnfilteredReadError::MayBeTruncated`]: `SourceFault`. A page that came
 ///   back exactly full is a table too large for one bounded read; reading it
-///   again returns the same page, and only a change to the read (a raised
-///   limit, pagination) cures it.
+///   again returns the same page until the table shrinks (an admin deleting
+///   rows: a config write) or the read changes (a raised limit, pagination).
 ///
 /// The typed error stays behind either variant (`source`), so a reader of the
 /// [`ConfigError`] can still downcast to the [`UnfilteredReadError`].
