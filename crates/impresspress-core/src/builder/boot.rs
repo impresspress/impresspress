@@ -35,9 +35,16 @@ pub enum InitPolicy {
     /// one misconfigured block cannot wedge a whole page. Used by the browser,
     /// whose runtime is long-lived, inspectable and rebuilt on demand.
     ///
-    /// Two failures are treated differently here, deliberately. A failed seed
-    /// hook still aborts: it leaves the config and enablement snapshots the
-    /// runtime would serve from unknown. A failed grants read boots on: the
+    /// Three failures are treated differently here, deliberately. A failed
+    /// seed hook still aborts: it leaves the config and enablement snapshots
+    /// the runtime would serve from unknown. So does a failed admin `Init`:
+    /// admin's `Init` is the first half of the same seeding — its migrations
+    /// create the tables the seed hook reads, and on a provisioning build
+    /// (every browser build is one) it seeds the shared variables, so a
+    /// failed one leaves the same snapshots unknown. Booting on would also
+    /// leave the admin block failed for the runtime's lifetime (a permanent
+    /// `Init` error is cached in its slot), the very surface that would repair
+    /// the row. A failed grants read boots on: the
     /// admin-created grants only ever *add* access (`Wafer::add_wrap_grants`
     /// is additive), so a runtime without them denies what they would have
     /// allowed and never allows more — the fail-safe direction, and the page
@@ -205,7 +212,9 @@ pub trait BootHooks {
 /// 2. `seal()` — finalize composite/uses/capability/snapshot wiring.
 /// 3. `init_block(admin)` FIRST — admin's migrations create the variables /
 ///    block_settings tables before any other block's `Init` writes to them,
-///    and before the seed step reads them.
+///    and before the seed step reads them; on a provisioning build it also
+///    seeds the shared variables. A failure aborts under
+///    [`InitPolicy::Strict`] and [`InitPolicy::Tolerant`].
 /// 4. `hooks.seed_after_admin_init` — seed + publish (see [`BootHooks`]).
 /// 5. every remaining block, in `Wafer::block_names()` order (sorted, so the
 ///    sequence is identical across processes and platforms).
@@ -284,7 +293,17 @@ pub async fn boot(
     //    the seed step reads, and migration 002's `block` column the auto-gen
     //    seeder writes.
     if names.iter().any(|name| name == admin_id) {
-        blocks.push(init_one(wafer, admin_id, policy).await?);
+        let admin = init_one(wafer, admin_id, policy).await?;
+        // `Strict` has already returned; `Reported` keeps going so its report
+        // is complete. `Tolerant` aborts, as for a failed seed hook (see
+        // `InitPolicy::Tolerant`).
+        if policy == InitPolicy::Tolerant && !admin.ok {
+            return Err(RuntimeError::Config(format!(
+                "block `{admin_id}` Init failed: {}",
+                admin.error.as_deref().unwrap_or_default()
+            )));
+        }
+        blocks.push(admin);
     }
 
     // 4. Seed + publish.
@@ -676,6 +695,54 @@ mod tests {
             taken(&order).contains(&"test/zeta".to_string()),
             "the block after the failing one must still initialize",
         );
+    }
+
+    /// A failed admin `Init` aborts a `Tolerant` boot before the seed hook
+    /// and every later block, as a failed seed hook does: admin's `Init`
+    /// seeds the shared variables on a provisioning build, so the snapshots
+    /// the runtime would serve from are unknown. `Reported` keeps going.
+    #[tokio::test]
+    async fn a_failed_admin_init_aborts_a_tolerant_boot() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut wafer = wafer_with_probes(&order, Some(crate::blocks::admin::ADMIN_BLOCK_ID));
+        let error = boot(
+            &mut wafer,
+            &ProbeHooks {
+                order: order.clone(),
+                fail: false,
+            },
+            GrantSource::PreInstalled("test fixture declares none"),
+            InitPolicy::Tolerant,
+        )
+        .await
+        .expect_err("a failed admin Init aborts a Tolerant boot");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::blocks::admin::ADMIN_BLOCK_ID),
+            "{error}"
+        );
+        assert_eq!(
+            taken(&order),
+            vec![crate::blocks::admin::ADMIN_BLOCK_ID.to_string()],
+            "neither the seed hook nor any later block runs"
+        );
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut wafer = wafer_with_probes(&order, Some(crate::blocks::admin::ADMIN_BLOCK_ID));
+        let report = boot(
+            &mut wafer,
+            &ProbeHooks {
+                order: order.clone(),
+                fail: false,
+            },
+            GrantSource::PreInstalled("test fixture declares none"),
+            InitPolicy::Reported,
+        )
+        .await
+        .expect("a Reported boot returns its report");
+        assert!(!report.ok);
+        assert!(taken(&order).contains(&"test/zeta".to_string()));
     }
 
     #[tokio::test]

@@ -320,10 +320,27 @@ pub async fn find_by_email(ctx: &dyn Context, email: &str) -> Result<Option<User
     }
 }
 
-/// Returns the number of rows currently in `wafer_run__auth__users`.
-///
-/// Used by the block's bootstrap logic to decide whether to create the first
-/// admin user. A non-zero count means "already bootstrapped — no-op".
+/// Whether the table holds any account, live or not: one row read, never a
+/// `COUNT(*)` over the table (`limit 1`, `skip_count`). The question the
+/// bootstrap asks, and the one "has the bootstrap token been redeemed" is.
+pub async fn any_exists(ctx: &dyn Context) -> Result<bool, WaferError> {
+    let page = db::list(
+        ctx,
+        TABLE,
+        &ListOptions {
+            limit: Some(1),
+            skip_count: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| db_failed("users any_exists", e))?;
+    Ok(!page.records.is_empty())
+}
+
+/// The number of rows in `wafer_run__auth__users`: a `COUNT(*)` that reads
+/// every account. Nothing on a boot or request path asks it — "is there an
+/// account" is [`any_exists`]; tests count accounts with it.
 pub async fn count(ctx: &dyn Context) -> Result<u64, WaferError> {
     let n = db::count(ctx, TABLE, &[])
         .await

@@ -238,13 +238,18 @@ crate::impresspress_feature_block! {
         }
     },
     lifecycle: |_this, ctx, event| {
-        crate::migration_helper::lifecycle_init(
+        let outcome = crate::migration_helper::lifecycle_init(
             ctx,
             &event,
             &migrations::MIGRATIONS)
         .await?;
-        if matches!(event.event_type, wafer_run::LifecycleType::Init) {
-            legacy_names::rename_legacy_indexes(ctx).await?;
+        // The legacy-name move is provisioning: it runs where
+        // `migration_helper::provisions` says so, not on every Cloudflare
+        // cold isolate.
+        if let Some(outcome) = outcome {
+            if crate::migration_helper::provisions(ctx, outcome) {
+                legacy_names::rename_legacy_indexes(ctx).await?;
+            }
         }
         Ok(())
     },

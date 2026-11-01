@@ -28,10 +28,12 @@
 //!   backend reports either — so both are left, and an error log names them
 //!   for the operator.
 //!
-//! Idempotent, so every start runs it: a name already lowercase is skipped,
-//! and `NotFound` from the rename with the lowercase index present means an
-//! earlier start moved the index and stopped before its registry row, which is
-//! then fixed.
+//! Idempotent, so every provisioning build runs it, and so does a
+//! request-path build whose vector migrations ran now
+//! (`migration_helper::provisions`): a name already lowercase is skipped, and
+//! `NotFound` from the rename with the lowercase index present means an
+//! earlier start moved the index and stopped before its registry row, which
+//! is then fixed.
 //!
 //! Failures: a transient failure reading the registry, the catalog or the
 //! moved index (`Unavailable`) fails the block's `Init`, so the runtime
@@ -397,6 +399,55 @@ mod tests {
             .into_iter()
             .map(|m| m.id)
             .collect()
+    }
+
+    /// The move is provisioning: the vector block's
+    /// `Init` on a settled build that does not migrate — a Cloudflare cold
+    /// isolate — leaves a legacy name where it is, and a provisioning build
+    /// moves it.
+    #[tokio::test]
+    async fn the_block_moves_legacy_names_on_a_provisioning_build_only() {
+        use wafer_run::{Block as _, LifecycleEvent, LifecycleType};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = legacy_index_file(&dir);
+        let mut ctx = ctx_over(&path).await;
+        register(&ctx, LEGACY, "bge-m3").await;
+        let vector = &crate::blocks::vector::migrations::MIGRATIONS;
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({
+                vector.block: { "migration": {
+                    "current_hash": crate::migration_helper::migration_set_hash(vector.sqlite)
+                } }
+            })
+            .to_string(),
+        );
+        let init = || LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: Vec::new(),
+        };
+
+        crate::blocks::vector::VectorBlock::new()
+            .lifecycle(&ctx, init())
+            .await
+            .expect("Init");
+        assert_eq!(
+            registry(&ctx).await,
+            vec![(LEGACY.to_string(), "bge-m3".to_string())],
+            "a settled request-path build moves nothing"
+        );
+
+        ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
+        crate::blocks::vector::VectorBlock::new()
+            .lifecycle(&ctx, init())
+            .await
+            .expect("Init");
+        assert_eq!(
+            registry(&ctx).await,
+            vec![(LOWERCASE.to_string(), "bge-m3".to_string())],
+            "a provisioning build moves the legacy name"
+        );
     }
 
     /// An index stored under a mixed-case name is moved to its lowercase

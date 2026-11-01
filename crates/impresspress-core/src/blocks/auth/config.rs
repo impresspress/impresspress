@@ -246,6 +246,15 @@ impl AuthConfig {
         }
     }
 
+    /// Whether a credential that can create the first admin is configured:
+    /// an email and a password, or a token. An email alone cannot (it is the
+    /// misconfiguration `bootstrap::run` refuses), and it is the normal
+    /// leftover once an account exists.
+    pub fn can_bootstrap_an_admin(&self) -> bool {
+        (self.bootstrap_admin_email.is_some() && self.bootstrap_admin_password.is_some())
+            || self.bootstrap_admin_token.is_some()
+    }
+
     /// Build an [`AuthConfig`] by reading from the runtime config client.
     ///
     /// Called once at `Init` time from `AuthBlock::lifecycle`. Each key is

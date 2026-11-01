@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use wafer_core::clients::database as db;
-use wafer_run::{context::Context, ConfigVar, InputStream, Message, OutputStream};
+use wafer_run::{
+    context::Context, ConfigVar, ErrorCode, InputStream, Message, OutputStream, WaferError,
+};
 
 use super::{
     contracts::{AdminSettingView, AdminSettingsResponse},
@@ -373,17 +375,31 @@ fn seed_payload_hash(vars: &[ConfigVar]) -> String {
     crate::migration_helper::sha256_hex_bytes(buf.as_bytes())
 }
 
-pub async fn seed_defaults(ctx: &dyn Context) {
+/// Seed every declared shared variable admin's `Init` owns: insert a missing
+/// row (from the process environment when it holds a valid value, else the
+/// declared default), refresh a stored row's descriptive metadata, and repair
+/// a stored URL for a built-in asset this build no longer serves.
+///
+/// Runs at admin's `Init` on a provisioning build, or when admin's own
+/// migrations ran now (`migration_helper::provisions`) — never on every
+/// Cloudflare cold isolate. Hash-gated on top of that, so a settled database
+/// reads nothing.
+///
+/// Every key is attempted. Any failed read or write returns `Err` naming the
+/// failed keys, and leaves the gate unstamped so the next provisioning build
+/// runs the seed again; admin's `Init` propagates it, so a Cloudflare deploy
+/// fails before promotion and a native server refuses to start.
+pub async fn seed_defaults(ctx: &dyn Context) -> Result<(), WaferError> {
     let vars = crate::config_vars::shared_config_vars();
 
     // Hash-gate: if the cached `block_settings.seed_defaults_hash` row for
     // the admin block already matches the current declared-vars hash, every
     // shared var was seeded against the same metadata last time — there is
-    // no outcome change possible and we can skip the entire seed (zero D1
-    // queries). Mirrors `migration_helper::apply_pending`'s gate; reads
-    // the same in-memory snapshot the migration helper does, so warm cold
-    // starts cost zero round-trips. See 2026-05-14 config-snapshot spec
-    // § "Hash-gate seed_defaults like migrations" (PR 3).
+    // no outcome change possible and we can skip the entire seed (zero
+    // queries). Mirrors `migration_helper::apply_pending`'s gate; reads the
+    // same in-memory snapshot the migration helper does, so a settled
+    // provisioning build costs zero round-trips. See 2026-05-14
+    // config-snapshot spec § "Hash-gate seed_defaults like migrations" (PR 3).
     let code_hash = seed_payload_hash(&vars);
     let json = ctx
         .config_get(crate::features::BLOCK_SETTINGS_CONFIG_KEY)
@@ -391,33 +407,36 @@ pub async fn seed_defaults(ctx: &dyn Context) {
     let cached_hash =
         crate::features::BlockSettings::state_for(json, ADMIN_BLOCK_NAME).seed_defaults_hash;
     if cached_hash == code_hash && !code_hash.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Single bulk fetch of every existing variable, then in-memory diff
-    // per declared shared var, instead of a `get_by_field` per var — two D1
-    // queries per shared var per cold isolate otherwise. Without this read
-    // there is nothing to diff against: inserting every key blind would
-    // collide with each row it could not see. So a failed read ends the run
-    // here, unstamped, and the next boot tries again.
-    let existing: HashMap<String, _> = match variables::list_all(ctx).await {
-        Ok(rows) => rows.into_iter().map(|row| (row.key.clone(), row)).collect(),
-        Err(e) => {
-            tracing::warn!(
-                err = %e,
-                "seed_defaults: could not read the variables table; nothing seeded, and \
-                 the seed hash is left unstamped so the next boot runs it again"
-            );
-            return;
-        }
-    };
+    // per declared shared var, instead of a `get_by_field` per var — two
+    // queries per shared var otherwise. Without this read there is nothing
+    // to diff against: inserting every key blind would collide with each row
+    // it could not see. So a failed read ends the run here, unstamped.
+    let existing: HashMap<String, _> = variables::list_all(ctx)
+        .await
+        .map_err(|e| {
+            WaferError::new(
+                e.code,
+                format!(
+                    "seed the shared variables: could not read the variables table, so \
+                     nothing was seeded: {}",
+                    e.message
+                ),
+            )
+        })?
+        .into_iter()
+        .map(|row| (row.key.clone(), row))
+        .collect();
 
-    // Keys whose write failed. The hash gate below may only be stamped when
-    // this stays empty: the gate skips the whole function on every later
-    // boot, so stamping over a failed write would leave that row un-seeded,
-    // its metadata stale, or its dead asset URL unrepaired, until a release
-    // happens to change a declaration.
-    let mut failed: Vec<&str> = Vec::new();
+    // Keys whose write failed, with the error. The hash gate below may only
+    // be stamped when this stays empty: the gate skips the whole function on
+    // every later provisioning build, so stamping over a failed write would
+    // leave that row un-seeded, its metadata stale, or its dead asset URL
+    // unrepaired, until a release happens to change a declaration.
+    let mut failed: Vec<(&str, WaferError)> = Vec::new();
 
     for var in &vars {
         // What the DECLARATION requires. Not what gets written unconditionally:
@@ -441,8 +460,16 @@ pub async fn seed_defaults(ctx: &dyn Context) {
                 // alone it renders a broken image on every page that shows
                 // the brand.
                 //
-                // Repaired here, in `seed_defaults`, which runs on every
-                // boot's `Init`. It costs one manifest scan per stored value per boot and is
+                // Repaired here, in `seed_defaults`, which runs only on a
+                // provisioning build whose declared shared vars changed (the
+                // hash gate above). A release that changes a content-hashed
+                // default (`LOGO_ICON_URL`, `FAVICON_URL`) changes a
+                // declaration, so its deploy opens the gate. One that only
+                // removes a built-in file a stored `LOGO_URL` or
+                // `AUTH_LOGO_URL` points at (their defaults are "") changes
+                // none, and its deploy does not repair the row; the next
+                // release that changes a declaration does. It costs one
+                // manifest scan per stored value and is
                 // idempotent: once repaired the value names a served file, so
                 // it no longer matches. Scoped to the built-in route by
                 // `is_stale_builtin_asset_url`, so a white-labelled URL is
@@ -450,9 +477,9 @@ pub async fn seed_defaults(ctx: &dyn Context) {
                 let stale_builtin_asset = crate::ui::assets::is_stale_builtin_asset_url(&row.value);
 
                 // Only refresh metadata when at least one declared field
-                // actually differs. Without this guard every isolate cold-start
-                // re-writes every shared config var (~80 vars × cold-starts/day
-                // ≈ ~900 useless UPDATEs/day in prod).
+                // actually differs. Without this guard every seed run
+                // re-writes every shared config var (~80 useless UPDATEs per
+                // run).
                 let same_name = row.name == *name;
                 let same_desc = row.description == var.description;
                 let same_warn = row.warning == var.warning;
@@ -485,8 +512,7 @@ pub async fn seed_defaults(ctx: &dyn Context) {
                     patch.value = Some(var.default.clone());
                 }
                 if let Err(e) = variables::upsert_by_key(ctx, &var.key, patch).await {
-                    tracing::warn!(key = %var.key, err = %e, "seed_defaults: metadata refresh failed");
-                    failed.push(&var.key);
+                    failed.push((&var.key, e));
                 }
             }
             None => {
@@ -525,8 +551,7 @@ pub async fn seed_defaults(ctx: &dyn Context) {
                     )
                     .await;
                     if let Err(e) = inserted {
-                        tracing::warn!(key = %var.key, err = %e, "seed_defaults: insert failed");
-                        failed.push(&var.key);
+                        failed.push((&var.key, e));
                     }
                 }
             }
@@ -534,40 +559,67 @@ pub async fn seed_defaults(ctx: &dyn Context) {
     }
 
     if !failed.is_empty() {
-        tracing::warn!(
-            failed = ?failed,
-            "seed_defaults: some writes failed; the seed hash is left unstamped so the next \
-             boot runs the seed again"
-        );
-        return;
+        return Err(failed_writes(&failed, vars.len()));
     }
 
     // Every read and write above succeeded: stamp the new hash on the admin
-    // block_settings row so the next cold start short-circuits before issuing
-    // `list_all`. The `block_settings` row may not exist yet (admin
+    // block_settings row so the next provisioning build short-circuits before
+    // issuing `list_all`. The `block_settings` row may not exist yet (admin
     // migrations create it on the same `Init` pass), which is why this is
-    // `upsert_fields` rather than an update. A failed stamp is only logged:
-    // it errs toward re-running, costing the next boot the same bulk read
-    // this one paid.
+    // `upsert_fields` rather than an update.
     //
-    // An outage heals because a failed read or write never reaches this
-    // stamp: the read returns early above, a failed write returns at the
-    // `failed` check, and the gate stays open until a boot on which every
-    // read and write lands. The same holds for a write that fails
-    // PERMANENTLY — a row the database refuses on every attempt: the gate
-    // never closes, so every cold start pays the bulk `list_all` again,
-    // retries that write, and logs the "some writes failed" warning above,
-    // until the row is repaired.
+    // A failed read or write never reaches this stamp: the read returns
+    // above, a failed write at the `failed` check, so the gate stays open and
+    // the next provisioning build runs the whole seed again. The same holds
+    // for a write that fails PERMANENTLY — a row the database refuses on
+    // every attempt — which therefore fails every deploy until the row is
+    // repaired. A failed stamp is a failed write too: the seed is complete
+    // but unrecorded, and the deploy that cannot record it fails rather than
+    // promoting a version whose every provisioning build re-runs it.
     let patch = BlockSettingsPatch {
         seed_defaults_hash: Some(code_hash),
         ..Default::default()
     };
-    if let Err(e) = block_settings::upsert_fields(ctx, ADMIN_BLOCK_NAME, patch).await {
-        tracing::warn!(
-            err = %e,
-            "seed_defaults: failed to stamp seed_defaults_hash; next cold start will re-run the bulk list_all"
-        );
-    }
+    block_settings::upsert_fields(ctx, ADMIN_BLOCK_NAME, patch)
+        .await
+        .map_err(|e| {
+            WaferError::new(
+                e.code,
+                format!(
+                    "seed the shared variables: every key was seeded, but recording the seed \
+                     (block_settings.seed_defaults_hash) failed: {}",
+                    e.message
+                ),
+            )
+        })
+}
+
+/// The error for a seed whose writes to `failed` keys failed, of `declared`
+/// keys it attempted.
+///
+/// Its code is `Unavailable` only when every failure was: then a retry may
+/// clear all of them, and the runtime's retry of a transient `Init` is the
+/// right answer. One write the database refused for any other reason will
+/// not clear by retrying, so its code wins.
+fn failed_writes(failed: &[(&str, WaferError)], declared: usize) -> WaferError {
+    let code = failed
+        .iter()
+        .map(|(_, e)| e.code)
+        .find(|code| *code != ErrorCode::Unavailable)
+        .unwrap_or(ErrorCode::Unavailable);
+    let keys = failed
+        .iter()
+        .map(|(key, e)| format!("{key} ({})", e.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    WaferError::new(
+        code,
+        format!(
+            "seed the shared variables: {} of {declared} keys could not be written, and the \
+             seed is left unrecorded so the next provisioning build runs it again: {keys}",
+            failed.len()
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -750,7 +802,9 @@ mod tests {
             .expect("apply admin migrations");
 
         // 2. First seed run — populates variables + stamps the hash row.
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
         let var_count_after_first = variables::list_all(&ctx)
             .await
             .expect("list variables")
@@ -797,7 +851,9 @@ mod tests {
 
         // 5. seed_defaults should short-circuit before any list_all on
         //    variables — leaving the (empty) variables table untouched.
-        seed_defaults(&next_ctx).await;
+        seed_defaults(&next_ctx)
+            .await
+            .expect("seed the shared variables");
         let var_count_after_second = variables::list_all(&next_ctx)
             .await
             .expect("list variables on next ctx")
@@ -831,7 +887,9 @@ mod tests {
         .to_string();
         ctx.set_config(crate::features::BLOCK_SETTINGS_CONFIG_KEY, &snapshot);
 
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
         let count = variables::list_all(&ctx)
             .await
             .expect("list variables")
@@ -864,8 +922,9 @@ mod tests {
         ctx.set_config(crate::features::BLOCK_SETTINGS_CONFIG_KEY, &snapshot);
     }
 
-    /// One failed write mid-seed leaves the hash gate unstamped, so the next
-    /// boot runs the seed again and finishes it.
+    /// One failed write mid-seed fails the seed, naming the key, and leaves
+    /// the hash gate unstamped, so the next provisioning build runs the seed
+    /// again and finishes it.
     ///
     /// The gate skips the whole function once the stamped hash matches the
     /// declarations. Stamping it over a dropped write — which the seed did,
@@ -901,7 +960,19 @@ mod tests {
 
         let failing =
             FailingDbOpContext::new(ctx.clone(), vec![("database.update", variables::TABLE)]);
-        seed_defaults(&failing).await;
+        let err = seed_defaults(&failing)
+            .await
+            .expect_err("a seed with a failed write fails");
+        assert!(
+            err.message.contains(&stale.key),
+            "the error names the key whose write failed: {}",
+            err.message
+        );
+        assert_eq!(
+            err.code,
+            ErrorCode::Internal,
+            "a write refused for anything but unavailability keeps its code"
+        );
 
         assert!(
             variables::get_by_key(&ctx, &last.key)
@@ -918,7 +989,9 @@ mod tests {
         );
 
         snapshot_stored_hash(&mut ctx).await;
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
         assert_eq!(
             variables::get_by_key(&ctx, &stale.key)
                 .await
@@ -935,8 +1008,8 @@ mod tests {
         );
     }
 
-    /// A failed read of the variables table seeds nothing and stamps
-    /// nothing. There is nothing to diff against, and treating it as an
+    /// A failed read of the variables table seeds nothing, stamps nothing
+    /// and fails. There is nothing to diff against, and treating it as an
     /// empty table stamped the gate over a seed that never happened.
     ///
     /// Names `variables::TABLE` only to aim the fault injector;
@@ -954,12 +1027,121 @@ mod tests {
 
         let failing =
             FailingDbOpContext::new(ctx.clone(), vec![("database.list", variables::TABLE)]);
-        seed_defaults(&failing).await;
+        seed_defaults(&failing)
+            .await
+            .expect_err("a seed that cannot read the table fails");
 
         assert_ne!(
             stored_seed_hash(&ctx).await,
             seed_payload_hash(&crate::config_vars::shared_config_vars()),
             "a seed that could not read the table must not stamp the gate"
+        );
+    }
+
+    /// Admin's `Init` seeds on a provisioning build, never on a settled
+    /// build that does not migrate (a Cloudflare cold isolate), even when the
+    /// declarations changed: the seed's read is refused here, so a seed that
+    /// ran would fail `Init`. On a provisioning build it runs, and its failed
+    /// read fails `Init`.
+    ///
+    /// Names `variables::TABLE` only to aim the fault injector.
+    #[tokio::test]
+    async fn admin_init_seeds_on_a_provisioning_build_only_and_fails_with_it() {
+        use wafer_run::{Block as _, LifecycleEvent, LifecycleType};
+
+        use crate::test_support::FailingDbOpContext;
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let admin = &crate::blocks::admin::migrations::MIGRATIONS;
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({
+                ADMIN_BLOCK_NAME: {
+                    "migration": {
+                        "current_hash": crate::migration_helper::migration_set_hash(admin.sqlite)
+                    },
+                    "seed_defaults_hash": "a hash an older release stamped",
+                }
+            })
+            .to_string(),
+        );
+        let init = || LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: Vec::new(),
+        };
+        let refusing = |ctx: &TestContext| {
+            FailingDbOpContext::new(ctx.clone(), vec![("database.list", variables::TABLE)])
+        };
+
+        crate::blocks::admin::AdminBlock::new()
+            .lifecycle(&refusing(&ctx), init())
+            .await
+            .expect("a settled request-path Init does not seed, so reads nothing to refuse");
+
+        ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
+        let err = crate::blocks::admin::AdminBlock::new()
+            .lifecycle(&refusing(&ctx), init())
+            .await
+            .expect_err("a provisioning build seeds, and the failed seed fails Init");
+        assert!(
+            err.message.contains("seed the shared variables"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// A seed whose every write landed but whose stamp failed fails too: a
+    /// deploy that cannot record its seed is not promoted with the gate open.
+    ///
+    /// Names `block_settings::TABLE` only to aim the fault injector.
+    #[tokio::test]
+    async fn a_failed_stamp_fails_the_seed() {
+        use crate::test_support::FailingDbOpContext;
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.list", block_settings::TABLE)]);
+        let err = seed_defaults(&failing)
+            .await
+            .expect_err("an unrecorded seed fails");
+        assert!(
+            err.message.contains("seed_defaults_hash"),
+            "{}",
+            err.message
+        );
+        assert!(
+            variables::get_by_key(&ctx, crate::config_vars::APP_NAME_KEY)
+                .await
+                .expect("read")
+                .is_some(),
+            "precondition: the seed's writes landed"
+        );
+    }
+
+    /// The seed's error is `Unavailable` only when every failed write was,
+    /// so the runtime retries a transient `Init` and nothing else.
+    #[test]
+    fn a_failed_seed_is_unavailable_only_when_every_write_was() {
+        let unavailable = || WaferError::new(ErrorCode::Unavailable, "d1 down");
+        let refused = WaferError::new(ErrorCode::InvalidArgument, "refused");
+        assert_eq!(
+            failed_writes(&[("A", unavailable()), ("B", unavailable())], 9).code,
+            ErrorCode::Unavailable
+        );
+        let mixed = failed_writes(&[("A", unavailable()), ("B", refused)], 9);
+        assert_eq!(mixed.code, ErrorCode::InvalidArgument);
+        assert!(
+            mixed.message.contains("2 of 9") && mixed.message.contains("A (d1 down)"),
+            "{}",
+            mixed.message
         );
     }
 
@@ -1072,7 +1254,9 @@ mod tests {
         .await
         .expect("store the pre-upgrade row");
 
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
 
         let declared = crate::config_vars::shared_var(key);
         let row = variables::get_by_key(&ctx, key)
@@ -1811,7 +1995,9 @@ mod tests {
         )
         .await;
 
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
 
         assert_eq!(
             stored_value(&ctx, crate::config_vars::LOGO_URL_KEY)
@@ -1868,7 +2054,9 @@ mod tests {
         )
         .await;
 
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
 
         assert_eq!(
             stored_value(&ctx, crate::config_vars::LOGO_URL_KEY)
@@ -1898,7 +2086,9 @@ mod tests {
         )
         .await;
 
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
 
         assert_eq!(
             stored_value(&ctx, crate::config_vars::LOGO_URL_KEY)
@@ -1942,7 +2132,9 @@ mod tests {
         )
         .await;
 
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
 
         assert_eq!(
             stored_value(&ctx, LOGO_ICON_URL_KEY).await.as_deref(),
@@ -1970,7 +2162,9 @@ mod tests {
         let current = crate::ui::assets::logo_icon_url();
         seed_var(&ctx, LOGO_ICON_URL_KEY, &current, false).await;
 
-        seed_defaults(&ctx).await;
+        seed_defaults(&ctx)
+            .await
+            .expect("seed the shared variables");
 
         assert_eq!(
             stored_value(&ctx, LOGO_ICON_URL_KEY).await.as_deref(),

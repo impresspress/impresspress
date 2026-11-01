@@ -25,13 +25,50 @@
 //! trigger. So every one of these values is spent once an account exists,
 //! and a later settings edit cannot fail a running site's `Init`.
 //!
-//! Until then [`run`] runs on every `Init`, and every runtime build runs
-//! `Init`: each native start, each Cloudflare isolate and prepared plan, each
-//! browser rebuild. So the token step installs a token once, on the first
-//! `Init` that sees it, and every later one finds that row and leaves it
-//! alone ([`bootstrap_tokens::insert_if_absent`]). The token stays redeemable
-//! for 24 hours from that first install, however often the runtime is
-//! rebuilt; a token that expired unredeemed stays expired, and the operator
+//! # When it runs
+//!
+//! Auth's `Init` calls [`run`] when [`should_run`] says so:
+//!
+//! - on a **provisioning build** (`migration_helper::is_provisioning_build`):
+//!   each native start, each browser build, Cloudflare's deploy funnel;
+//! - when auth's own migrations ran at this `Init`
+//!   (`MigrationOutcome::Applied`): no recorded migration state for auth,
+//!   even on Cloudflare's request path;
+//! - and on **any** build while a credential that can create the first
+//!   admin is configured — an email and a password, or a token
+//!   ([`AuthConfig::can_bootstrap_an_admin`]). That is how a credential
+//!   configured after the first deploy still bootstraps. A key counts
+//!   wherever `CONFIG_GET` finds it:
+//!   - a row in the variables table (the admin settings write one);
+//!   - on Cloudflare, a consumer's forwarded `request_config`
+//!     (`builder::request_path::add_request_config`), which lands on the
+//!     request's boot map: the Worker captures no bootstrap key of its own,
+//!     so a key bound as a Worker secret is invisible to it.
+//!
+//!   It costs every cold isolate one `users` row read ([`users::any_exists`],
+//!   plus the table's column introspection on a cold schema cache) for as
+//!   long as the credential stays configured, plus, on the token path with
+//!   no account yet, the token row's `INSERT … ON CONFLICT DO NOTHING` until
+//!   the token is redeemed. So clear a spent credential where it lives:
+//!   in the admin settings for a stored row (the password and a redeemed
+//!   token are clearable there), with `wrangler secret delete` on the
+//!   consumer for a forwarded one.
+//!
+//! An email alone is not such a credential. Before the first account it is
+//! a misconfiguration [`run`] refuses by name, which every provisioning build
+//! reports; after it, it is the normal leftover (it may stay set, and the dev
+//! sandbox reads it), so it must not cost a cold isolate anything.
+//!
+//! A Cloudflare cold isolate with no such credential configured reads
+//! nothing from `users`. "Has the bootstrap happened" is not stamped anywhere: the
+//! `users` table is the fact, and a stamp written from the request path
+//! would bump the fleet's config version.
+//!
+//! The token step installs a token once, on the first `Init` that sees it
+//! with no account yet, and every later one finds that row and leaves it alone
+//! ([`bootstrap_tokens::insert_if_absent`]). The token stays redeemable for
+//! 24 hours from that first install, however often the runtime is rebuilt;
+//! a token that expired unredeemed stays expired, and the operator
 //! configures a different one.
 //!
 //! Configuring a different token installs a row of its own and does not
@@ -55,6 +92,7 @@ use super::{
     repo::{bootstrap_tokens, local_credentials, users},
     service::hash_token,
 };
+use crate::migration_helper::{self, MigrationOutcome};
 
 /// Why [`run`] did not complete.
 ///
@@ -71,14 +109,23 @@ pub enum RunError {
     Failed(WaferError),
 }
 
+/// Whether auth's `Init` runs [`run`] at all: on a provisioning build or an
+/// `Init` whose migrations ran now (`migration_helper::provisions`), or
+/// whenever a credential that can create the first admin is configured
+/// (module docs, "When it runs").
+pub fn should_run(ctx: &dyn Context, outcome: MigrationOutcome, cfg: &AuthConfig) -> bool {
+    migration_helper::provisions(ctx, outcome) || cfg.can_bootstrap_an_admin()
+}
+
 /// Run the bootstrap step. Idempotent: returns `Ok(())` without side-effects
-/// when the `users` table is already populated.
+/// when the `users` table already holds an account, which it asks with one
+/// row read ([`users::any_exists`]).
 pub async fn run(ctx: &dyn Context, cfg: &AuthConfig) -> Result<(), RunError> {
-    let user_count = users::count(ctx)
+    if users::any_exists(ctx)
         .await
-        .map_err(|e| RunError::Failed(bootstrap_failed(e)))?;
-    if user_count > 0 {
-        tracing::debug!("auth: bootstrap skipped, users table already has {user_count} row(s)");
+        .map_err(|e| RunError::Failed(bootstrap_failed(e)))?
+    {
+        tracing::debug!("auth: bootstrap skipped, the users table already has an account");
         return Ok(());
     }
 

@@ -757,7 +757,8 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             "blocks/dev/data_snapshot.rs",
             // A fault injector: the seed's tests fail its one metadata
             // refresh (`database.update`) and its bulk read (`database.list`)
-            // on this table, to prove neither stamps the seed hash gate.
+            // on this table, to prove neither stamps the seed hash gate and
+            // both fail the seed.
             "blocks/admin/settings.rs",
             // Fault injectors: each admin route's WRAP-denial test refuses
             // the table its database site reads or writes, so the denial
@@ -778,6 +779,9 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // names the table only to aim the fault injector
             // (`FailingDbOpContext`) at it in the toggle handler's tests
             "blocks/admin/pages/blocks.rs",
+            // the same: the seed's test fails its hash stamp's read of this
+            // table, to prove an unrecorded seed fails
+            "blocks/admin/settings.rs",
             "blocks/dev/data_snapshot.rs",
             // Fault injectors: each admin route's WRAP-denial test refuses
             // the table its database site reads or writes, so the denial
@@ -920,6 +924,11 @@ const IDENT_ALLOWED: &[(&str, &[&str])] = &[
             // password are undone with it. Only an in-database failure of
             // the batch's last statement reaches that, and it names a table.
             "blocks/auth/bootstrap.rs",
+            // A fault injector: auth's `Init` tests refuse every users read
+            // to prove a settled request-path build sends none, and that a
+            // provisioning or freshly migrated one does.
+            // No other read decides it, so only this table can be named.
+            "blocks/auth/service.rs",
             // A fault injector: the security page reads the provider links
             // and THEN the user's `email_verified` flag, and the branch under
             // test is the flag read. `break_reads` fails the link list first;
