@@ -460,11 +460,16 @@ pub async fn seed_defaults(ctx: &dyn Context) -> Result<(), WaferError> {
                 // alone it renders a broken image on every page that shows
                 // the brand.
                 //
-                // Repaired here, in `seed_defaults`, which runs on every
-                // provisioning build whose declarations changed — and a
-                // release that changes the artwork changes `LOGO_URL`'s or
-                // another asset var's declared default, so its deploy opens
-                // the gate. It costs one manifest scan per stored value and is
+                // Repaired here, in `seed_defaults`, which runs only on a
+                // provisioning build whose declared shared vars changed (the
+                // hash gate above). A release that changes a content-hashed
+                // default (`LOGO_ICON_URL`, `FAVICON_URL`) changes a
+                // declaration, so its deploy opens the gate. One that only
+                // removes a built-in file a stored `LOGO_URL` or
+                // `AUTH_LOGO_URL` points at (their defaults are "") changes
+                // none, and its deploy does not repair the row; the next
+                // release that changes a declaration does. It costs one
+                // manifest scan per stored value and is
                 // idempotent: once repaired the value names a served file, so
                 // it no longer matches. Scoped to the built-in route by
                 // `is_stale_builtin_asset_url`, so a white-labelled URL is

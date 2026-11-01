@@ -24,8 +24,10 @@ what it did happens on every native boot.
 **What changes.** Four `Init` steps that depend on config now run only on a
 **provisioning build**: every native start, every browser build, and
 Cloudflare's deploy funnel (`/_deploy/prepare`, `/_deploy/init`). They also
-run when the block's own migrations ran at that `Init`, which on Cloudflare's
-request path happens only for a block with no schema yet. The steps are:
+run when the block's own migrations ran at that `Init`. On Cloudflare's
+request path that happens only for a block with no recorded migration state:
+a database the deploy funnel never prepared, or one whose `block_settings`
+row was lost. The steps are:
 
 - admin's shared-variable seed (`WAFER_RUN_SHARED__*` rows);
 - the bootstrap admin (below);
@@ -45,7 +47,12 @@ the seed is left unrecorded so the next provisioning build runs it again:
 - on Cloudflare, `/_deploy/prepare` reports the failure and the version is
   not promoted;
 - a native server refuses to start;
-- a browser build logs it, and admin's `Init` is reported failed.
+- a browser build stops: `initialize()` fails with the error, at the same
+  stage as a migration file that fails on the data (`initialize`), and the
+  boot shell shows the cause. Any failed admin `Init` now stops a browser
+  boot; before, the runtime booted on with the admin block failed for its
+  lifetime. A bundle built with `opfs_wipe_on_recovery` offers to erase the
+  local data for it, as it does for that stage.
 
 Before, the failure was only logged, and the deploy promoted a version with
 the row missing. The next Cloudflare cold isolate retried it, which is gone
@@ -53,41 +60,55 @@ now. A row the database refuses on every attempt therefore fails every
 deploy until it is repaired.
 
 **The bootstrap admin.** Auth's `Init` runs the bootstrap on a provisioning
-build, after its own migrations ran, and on **any** build while a bootstrap
-key is configured (`WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`,
-`..._PASSWORD` or `..._TOKEN`). It asks whether an account exists with a
-one-row read instead of a `COUNT(*)`. Once one does, the bootstrap does
-nothing, as before.
+build, after its own migrations ran, and on **any** build while a credential
+that can create the first admin is configured: an email and a password
+(`WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` and `..._PASSWORD`), or a
+token (`..._TOKEN`). It asks whether an account exists with a one-row read
+instead of a `COUNT(*)`. Once one does, the bootstrap does nothing, as
+before.
 
-- **No bootstrap key configured:** a Cloudflare cold isolate reads nothing
-  from `users` or `bootstrap_tokens`.
-- **A key still configured after the first account:** each cold isolate reads
-  one `users` row (plus, on a cold isolate, the table's column introspection)
-  and does nothing else. Remove the key once the admin exists.
+- **No such credential configured** (an email left set after the bootstrap
+  included): a Cloudflare cold isolate reads nothing from `users` or
+  `bootstrap_tokens`. An email alone before the first account is still
+  refused by name, at the deploy.
+- **A credential still configured after the first account:** each cold
+  isolate reads one `users` row (plus, on a cold isolate, the table's column
+  introspection) and does nothing else. Clear it once the admin exists
+  (below).
 - **A token configured and no account yet:** each cold isolate also sends the
   token row's `INSERT … ON CONFLICT DO NOTHING`, until someone redeems the
   token. `bootstrap_tokens` does not change the config version, so this
   rebuilds no other isolate.
 
-**A credential set after the first deploy still bootstraps — through a
-forwarding consumer.** The Worker captures no bootstrap key of its own: a
-bootstrap key bound as a Worker secret is invisible to it. The path that
-works is a consumer Worker that reads its secret with `Env::secret` and
-passes it in `request_config`; the key lands on the request's config and the
-next cold isolate's auth `Init` reads it. A native server or browser picks
-the key up at its next start, as before.
+**Where a credential counts from.** Wherever the config read finds it:
 
-**Clearing a spent credential** means removing it where it is bound: for a
-forwarding consumer, `wrangler secret delete` **on the consumer** (and stop
-forwarding it), not a clear in the admin UI. While it stays bound, every cold
-isolate pays the read above.
+- **a row in the variables table**, as the admin settings write one. This
+  counts on every target;
+- on Cloudflare, **a forwarding consumer's request config.** The Worker
+  captures no bootstrap key of its own: a bootstrap key bound as a Worker
+  secret is invisible to it. A consumer Worker that reads its secret with
+  `Env::secret` and passes it in `request_config` puts the key on the
+  request's config, and the next cold isolate's auth `Init` reads it. That
+  is how a credential set after the first deploy still bootstraps there.
+
+A native server or browser picks a key up at its next start, as before.
+
+**Clearing a spent credential** means removing it where it lives:
+
+- a stored row: clear it in the admin **Settings**. The password is
+  clearable once an account exists, and the token once it is redeemed;
+- a forwarded key: `wrangler secret delete` **on the consumer**, and stop
+  forwarding it.
+
+While it stays configured, every Cloudflare cold isolate pays the read
+above.
 
 **What to do.**
 - Nothing, if your deploys succeed.
 - If a deploy now fails naming `seed the shared variables`, the message names
   the keys whose write failed and the database's error. Fix the cause (often
   a transient D1 error; deploy again), or repair the row.
-- Remove bootstrap credentials once the first admin exists.
+- Clear bootstrap credentials once the first admin exists.
 
 ### Cloudflare: each invocation can log the D1 rows it read and wrote
 

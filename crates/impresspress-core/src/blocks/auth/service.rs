@@ -717,7 +717,9 @@ mod tests {
     }
 
     /// The same build on a provisioning build, or with auth's schema fresh,
-    /// does run the bootstrap: the refused read fails `Init`.
+    /// does run the bootstrap: the refused read fails `Init`. Each case also
+    /// boots with the reads allowed, so the only thing that fails it is the
+    /// `users` read (the error itself is masked, as every backend fault is).
     #[tokio::test]
     async fn a_provisioning_or_freshly_migrated_init_runs_the_bootstrap() {
         let mut provisioning = settled_request_path_ctx().await;
@@ -726,17 +728,46 @@ mod tests {
             .init(&refusing_users_reads(&provisioning))
             .await
             .expect_err("a provisioning build asks whether an account exists");
-
-        let fresh = TestContext::with_admin()
-            .await
-            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
-        assert!(!crate::migration_helper::is_provisioning_build(&fresh));
         AuthServiceImpl
-            .init(&refusing_users_reads(&fresh))
+            .init(&provisioning)
+            .await
+            .expect("with the users read allowed, the same Init succeeds");
+
+        let fresh = || async {
+            TestContext::with_admin()
+                .await
+                .running_as(crate::blocks::auth::AUTH_BLOCK_ID)
+        };
+        let refused = fresh().await;
+        assert!(!crate::migration_helper::is_provisioning_build(&refused));
+        AuthServiceImpl
+            .init(&refusing_users_reads(&refused))
             .await
             .expect_err(
                 "an Init that applied auth's schema asks too, even off a provisioning build",
             );
+        AuthServiceImpl
+            .init(&fresh().await)
+            .await
+            .expect("with the users read allowed, the same Init succeeds");
+    }
+
+    /// An email left configured after the bootstrap is not a credential that
+    /// can create an admin, so a settled cold isolate reads no `users` for it
+    /// (and neither for a password alone).
+    #[tokio::test]
+    async fn a_leftover_bootstrap_email_costs_a_cold_isolate_no_users_read() {
+        for key in [
+            crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
+            crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY,
+        ] {
+            let mut ctx = settled_request_path_ctx().await;
+            ctx.set_config(key, "left-over@example.com");
+            AuthServiceImpl
+                .init(&refusing_users_reads(&ctx))
+                .await
+                .unwrap_or_else(|e| panic!("{key} alone sends no users read: {e:?}"));
+        }
     }
 
     /// A bootstrap credential bound after the first deploy — on Cloudflare,

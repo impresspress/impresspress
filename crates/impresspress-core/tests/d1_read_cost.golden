@@ -163,6 +163,14 @@ impresspress__admin__variables                   INTROSPECT    2      12
 impresspress__admin__wrap_grants                 SCAN          1       3
 impresspress__admin__wrap_grants                 INTROSPECT    2      10
 
+## mixed: 3b database build, seed hash stale — 10 statements, 10 D1 calls, rows≈81
+impresspress__admin__block_settings              SCAN          2      22
+impresspress__admin__block_settings              INTROSPECT    2       8
+impresspress__admin__variables                   SCAN          1      26
+impresspress__admin__variables                   INTROSPECT    2      12
+impresspress__admin__wrap_grants                 SCAN          1       3
+impresspress__admin__wrap_grants                 INTROSPECT    2      10
+
 ## mixed: 4 prepared build — 3 statements, 3 D1 calls, rows≈38
 impresspress__admin__variables                   SCAN          1      26
 impresspress__admin__variables                   INTROSPECT    2      12
@@ -172,6 +180,10 @@ impresspress__admin__variables                   SCAN          1      26
 impresspress__admin__variables                   INTROSPECT    2      12
 wafer_run__auth__users                           SCAN          1       1
 wafer_run__auth__users                           INTROSPECT    2      18
+
+## mixed: 4c prepared build, only the bootstrap email forwarded — 3 statements, 3 D1 calls, rows≈38
+impresspress__admin__variables                   SCAN          1      26
+impresspress__admin__variables                   INTROSPECT    2      12
 
 ## mixed: 5 warm GET / — 3 statements, 3 D1 calls, rows≈48, status 302
 impresspress__admin__request_logs                INTROSPECT    1      13
@@ -219,6 +231,14 @@ impresspress__admin__variables                   INTROSPECT    2      12
 impresspress__admin__wrap_grants                 SCAN          1       3
 impresspress__admin__wrap_grants                 INTROSPECT    2      10
 
+## shared: 3b database build, seed hash stale — 10 statements, 10 D1 calls, rows≈73
+impresspress__admin__block_settings              SCAN          2      22
+impresspress__admin__block_settings              INTROSPECT    2       8
+impresspress__admin__variables                   SCAN          1      18
+impresspress__admin__variables                   INTROSPECT    2      12
+impresspress__admin__wrap_grants                 SCAN          1       3
+impresspress__admin__wrap_grants                 INTROSPECT    2      10
+
 ## shared: 4 prepared build — 3 statements, 3 D1 calls, rows≈30
 impresspress__admin__variables                   SCAN          1      18
 impresspress__admin__variables                   INTROSPECT    2      12
@@ -228,6 +248,10 @@ impresspress__admin__variables                   SCAN          1      18
 impresspress__admin__variables                   INTROSPECT    2      12
 wafer_run__auth__users                           SCAN          1       1
 wafer_run__auth__users                           INTROSPECT    2      18
+
+## shared: 4c prepared build, only the bootstrap email forwarded — 3 statements, 3 D1 calls, rows≈30
+impresspress__admin__variables                   SCAN          1      18
+impresspress__admin__variables                   INTROSPECT    2      12
 
 ## shared: 5 warm GET / — 3 statements, 3 D1 calls, rows≈48, status 302
 impresspress__admin__request_logs                INTROSPECT    1      13

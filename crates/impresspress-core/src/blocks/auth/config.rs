@@ -246,13 +246,12 @@ impl AuthConfig {
         }
     }
 
-    /// Whether any bootstrap key is configured. Any one, not only a complete
-    /// pair: an email alone is a misconfiguration [`super::bootstrap::run`]
-    /// refuses by name, and it must be refused on every build that would
-    /// otherwise act on it.
-    pub fn names_a_bootstrap_admin(&self) -> bool {
-        self.bootstrap_admin_email.is_some()
-            || self.bootstrap_admin_password.is_some()
+    /// Whether a credential that can create the first admin is configured:
+    /// an email and a password, or a token. An email alone cannot (it is the
+    /// misconfiguration `bootstrap::run` refuses), and it is the normal
+    /// leftover once an account exists.
+    pub fn can_bootstrap_an_admin(&self) -> bool {
+        (self.bootstrap_admin_email.is_some() && self.bootstrap_admin_password.is_some())
             || self.bootstrap_admin_token.is_some()
     }
 

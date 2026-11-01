@@ -326,8 +326,9 @@ async fn a_block_sees_only_its_own_rows() {
 /// THE boot-ordering hazard, reproduced.
 ///
 /// A runtime build reads config and writes it in the same pass: admin
-/// initializes first, its `Init` runs `settings::seed_defaults`, and the
-/// Cloudflare hook then runs `seed_auto_generated` — all after the database
+/// initializes first, its `Init` runs `settings::seed_defaults` on a
+/// provisioning build, and the Cloudflare deploy hook then runs
+/// `seed_auto_generated` — all after the database
 /// service block (which declares a config key of its own, so the no-keys
 /// short-circuit does not skip it) has already been lazily initialized by
 /// admin's own seeding query, filling the snapshot.

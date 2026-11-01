@@ -26,10 +26,15 @@
 //!    them as request config (see the golden's header).
 //! 3. **database build** — `boot_request_runtime(RequestBuild::Database)`,
 //!    with the build's own pre-`build()` `block_settings` read.
+//!    - **3b** — the same with admin's `seed_defaults_hash` stale, as a
+//!      release that changes a declared shared variable leaves it before its
+//!      deploy: the request path still seeds nothing.
 //! 4. **prepared build** — `boot_request_runtime(RequestBuild::Prepared)`,
 //!    hydrated from phase 1's plan.
 //!    - **4b** — the same, with a bootstrap email and password forwarded
 //!      while accounts exist: what a still-bound credential costs.
+//!    - **4c** — the same, with only the bootstrap email forwarded: the
+//!      normal leftover, which costs nothing.
 //! 5. **warm** — five requests on runtime 4 (its warm schema cache): `GET /`,
 //!    the terms page, `/health`, an authenticated admin page, and a 404. Each
 //!    counts the statements its response waited on and the ones it left to
@@ -1048,9 +1053,18 @@ impl Allowed {
 const PHASE_TOKEN: &str = "1b prepared build, bootstrap token forwarded, no account yet";
 const PHASE_DATABASE: &str = "3 database build";
 const PHASE_PREPARED: &str = "4 prepared build";
+const PHASE_STALE_SEED: &str = "3b database build, seed hash stale";
 const PHASE_PASSWORD: &str = "4b prepared build, bootstrap email and password forwarded";
+const PHASE_EMAIL: &str = "4c prepared build, only the bootstrap email forwarded";
 /// Every phase that stands for a cold isolate's build.
-const COLD_BUILDS: [&str; 4] = [PHASE_TOKEN, PHASE_DATABASE, PHASE_PREPARED, PHASE_PASSWORD];
+const COLD_BUILDS: [&str; 6] = [
+    PHASE_TOKEN,
+    PHASE_DATABASE,
+    PHASE_STALE_SEED,
+    PHASE_PREPARED,
+    PHASE_PASSWORD,
+    PHASE_EMAIL,
+];
 
 /// The bootstrap credentials a consumer forwards after the first deploy.
 const BOOTSTRAP_TOKEN: &str = "d1-read-cost-harness-bootstrap-token";
@@ -1074,6 +1088,43 @@ const ALLOWED: &[Allowed] = &[
         mixed: 1,
         shared: 1,
         because: "the runtime's variables snapshot, as on the database build",
+    },
+    Allowed {
+        phase: PHASE_STALE_SEED,
+        table: "impresspress__admin__variables",
+        class: Class::Scan,
+        mixed: 1,
+        shared: 1,
+        because: "the runtime's variables snapshot, as on the database build; a stale \
+                  seed hash adds nothing, because the shared-variable seed runs only on \
+                  provisioning builds (D1-READ-COST PR 4b)",
+    },
+    Allowed {
+        phase: PHASE_STALE_SEED,
+        table: "impresspress__admin__block_settings",
+        class: Class::Scan,
+        mixed: 2,
+        shared: 2,
+        because: "as on the database build: before `build()` and after admin's Init, \
+                  KV-cached on Cloudflare",
+    },
+    Allowed {
+        phase: PHASE_STALE_SEED,
+        table: "impresspress__admin__wrap_grants",
+        class: Class::Scan,
+        mixed: 1,
+        shared: 1,
+        because: "as on the database build: the admin-created grants",
+    },
+    Allowed {
+        phase: PHASE_EMAIL,
+        table: "impresspress__admin__variables",
+        class: Class::Scan,
+        mixed: 1,
+        shared: 1,
+        because: "the runtime's variables snapshot, as on every prepared build; an email \
+                  alone cannot create an admin, so it costs no users read \
+                  (D1-READ-COST PR 4c)",
     },
     Allowed {
         phase: PHASE_TOKEN,
@@ -1317,6 +1368,47 @@ async fn run(variant: Variant) -> Run {
         String::new(),
     ));
 
+    // 3b. A database build whose admin seed hash is stale, as a release that
+    //     changes a declared shared variable leaves it until its deploy runs:
+    //     the request path still seeds nothing. The hash is restored after.
+    let stale_seed_hash = |hash: Option<String>| {
+        let path = path.clone();
+        async move {
+            let plain: Arc<dyn DatabaseService> = Arc::new(
+                SQLiteDatabaseService::open(path.to_str().expect("utf-8")).expect("open the db"),
+            );
+            let admin = "impresspress/admin";
+            let before = block_settings::load(&plain)
+                .await
+                .expect("read block_settings")
+                .state(admin)
+                .seed_defaults_hash;
+            block_settings::upsert_fields_via_service(
+                &plain,
+                admin,
+                block_settings::BlockSettingsPatch {
+                    seed_defaults_hash: Some(hash.unwrap_or_else(|| "stale".to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("set the seed hash");
+            before
+        }
+    };
+    let stamped = stale_seed_hash(None).await;
+    let db = cold(&path, &ledger);
+    let (wafer, _, _) = boot_request(&db, RequestBuild::Database, &plan, &request_config).await;
+    drop(wafer);
+    drop(db);
+    phases.push(Phase::new(
+        label(PHASE_STALE_SEED),
+        &ledger.take(),
+        &classifier,
+        String::new(),
+    ));
+    stale_seed_hash(Some(stamped)).await;
+
     // 4. A prepared build, on a cold isolate.
     let db = cold(&path, &ledger);
     let (wafer, source, variables) =
@@ -1354,6 +1446,25 @@ async fn run(variant: Variant) -> Run {
             users,
             "a bootstrap credential creates no account once one exists"
         );
+    }
+
+    // 4c. Only the bootstrap email still bound once accounts exist: the
+    //     normal leftover, which cannot create an admin.
+    {
+        let db = cold(&path, &ledger);
+        let mut bound = request_config.clone();
+        bound.insert(
+            BOOTSTRAP_ADMIN_EMAIL_KEY.to_string(),
+            ADMIN_EMAIL.to_string(),
+        );
+        let (wafer, _, _) = boot_request(&db, RequestBuild::Prepared, &plan, &bound).await;
+        drop(wafer);
+        phases.push(Phase::new(
+            label(PHASE_EMAIL),
+            &ledger.take(),
+            &classifier,
+            String::new(),
+        ));
     }
 
     let blocks = wafer.block_names();
