@@ -57,7 +57,16 @@ struct Counting {
     /// Fail every list of the variables table, and nothing else: the table
     /// is there, and asking the schema says so.
     fail_lists: std::sync::atomic::AtomicBool,
+    /// Park the next unfiltered list of the variables table AFTER it has read
+    /// its rows: say so on the first sender, then wait on the receiver. An
+    /// in-flight read, held open for a write to land under it.
+    park: std::sync::Mutex<Option<Park>>,
 }
+
+type Park = (
+    futures::channel::oneshot::Sender<()>,
+    futures::channel::oneshot::Receiver<()>,
+);
 
 impl Counting {
     fn inner_service(&self) -> &dyn DatabaseService {
@@ -122,6 +131,15 @@ wafer_core::forward_database_service! {
                         ),
                     );
                 }
+                if opts.filters.is_empty() && opts.filter_tree.is_none() {
+                    let park = self.park.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    if let Some((read, release)) = park {
+                        let listed = self.inner.list(collection, opts).await;
+                        read.send(()).expect("the test waits for the read");
+                        release.await.expect("the test releases the read");
+                        return listed;
+                    }
+                }
             }
             self.inner.list(collection, opts).await
         }
@@ -142,6 +160,7 @@ fn counted(inner: Arc<dyn DatabaseService>) -> (Arc<Counting>, Arc<dyn DatabaseS
         lists: AtomicUsize::new(0),
         filtered_lists: AtomicUsize::new(0),
         fail_lists: std::sync::atomic::AtomicBool::new(false),
+        park: std::sync::Mutex::new(None),
     });
     let db: Arc<dyn DatabaseService> = counting.clone();
     (counting, db)
@@ -350,6 +369,58 @@ async fn config_seeded_mid_boot_is_visible_to_blocks_initialized_after_it() {
         counting.lists(),
         2,
         "exactly one re-read: the write invalidated the snapshot once"
+    );
+}
+
+/// A write that lands while a read is in flight is not masked by that read.
+///
+/// The snapshot tags what it read with the config-write generation captured
+/// BEFORE the read. Here the read has its rows when an admin write commits
+/// and bumps the generation; it then returns and is stored under the old
+/// generation, so the next load re-reads and sees the write. Captured after
+/// the read instead, the pre-write rows would be stored under the new
+/// generation and served until the next write or a restart — the admin's
+/// "Settings saved" silently not served.
+#[tokio::test]
+async fn a_write_during_an_in_flight_read_is_not_masked_by_it() {
+    let _generation = GENERATION.lock().await;
+    let (counting, db) = migrated().await;
+    seed(&db, "WAFER_RUN__AUTH__K", "before").await;
+    let source = DatabaseConfigSource::new(db.clone(), Arc::default());
+    let declared = [optional("WAFER_RUN__AUTH__K")];
+    let (read_tx, read_rx) = futures::channel::oneshot::channel();
+    let (release_tx, release_rx) = futures::channel::oneshot::channel();
+    *counting.park.lock().expect("park") = Some((read_tx, release_rx));
+
+    let in_flight = source.load_for_block("wafer-run/auth", &declared);
+    let write = async {
+        read_rx.await.expect("the read has its rows");
+        // The real write path, which records the config write itself.
+        variables::set(&db, "WAFER_RUN__AUTH__K", "after", "", "", None)
+            .await
+            .expect("the write lands");
+        release_tx.send(()).expect("the read is parked");
+    };
+    let (raced, ()) = futures::join!(in_flight, write);
+    assert_eq!(
+        raced.expect("resolves").get("WAFER_RUN__AUTH__K"),
+        Some("before"),
+        "precondition: the read had its rows before the write"
+    );
+
+    let next = source
+        .load_for_block("wafer-run/auth", &declared)
+        .await
+        .expect("resolves");
+    assert_eq!(
+        next.get("WAFER_RUN__AUTH__K"),
+        Some("after"),
+        "a write that raced a read must not be masked by it"
+    );
+    assert_eq!(
+        counting.lists() - counting.filtered_lists.load(Ordering::SeqCst),
+        2,
+        "the raced read, then one re-read"
     );
 }
 

@@ -124,9 +124,9 @@ impl<'a> SettingsSection<'a> {
 /// per field. Both fail on an unreadable table (the config block fails closed),
 /// but `get_many` reads the whole form in one call and refuses the whole batch
 /// when WRAP denies the caller ONE of the keys. Per field, a denied key would
-/// be one error among values — and `submit_js` posts every field, so a page
-/// that rendered a var its block may not read with its default would write
-/// that default over the stored one on Save. Refused as a batch, it is an
+/// be one `Err` among values, leaving the renderer to choose per field — and
+/// `submit_js` posts every field, so a renderer that showed the default there
+/// would write it over the stored value on Save. Refused as a batch, it is an
 /// error page instead.
 async fn current_values<'v>(
     ctx: &dyn Context,

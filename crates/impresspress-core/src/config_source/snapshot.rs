@@ -163,7 +163,8 @@ struct Failure {
     /// When [`RetryMode::Backoff`] next reads (`util::now_millis` scale).
     retry_at_ms: u64,
     /// Consecutive failed reads, this one included. A successful read ends
-    /// the streak; a config write does not (it only makes the next read
+    /// the streak, and so does a read that finds no table (`Absent`, stored as
+    /// `Empty`); a config write does not (it only makes the next read
     /// immediate), so a database that keeps failing keeps backing off.
     failures: u32,
 }

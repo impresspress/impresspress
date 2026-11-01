@@ -1652,9 +1652,17 @@ pub enum UnfilteredReadError {
     /// The database failed the read.
     Read(wafer_core::interfaces::database::service::DatabaseError),
     /// The table does not exist yet: the list failed (with this error), and
-    /// the schema answered that the table is absent. A fresh database before
+    /// the schema probe then answered "absent". A fresh database before
     /// admin's migrations — not a failed read, since nothing can be stored
-    /// yet. Each reader decides what that means for it (the config source
+    /// yet.
+    ///
+    /// How definite that "absent" is rests on the probe's decode. At the
+    /// pinned wafer-run rev, `schema_table_exists` decodes leniently: a probe
+    /// that succeeds with no row, a NULL or a non-number reads as `false`, so a
+    /// malformed answer after a failed list would be taken for this cold start
+    /// (and the config block would read on to the boot map). The strict decode
+    /// that refuses such an answer arrives with the wafer-run repin (#475,
+    /// IP-A0), which also retires the adapters' own probe overrides. Each reader decides what that means for it (the config source
     /// retries the block, the config block reads on down its read order), and
     /// the runtime's snapshot never remembers it: the migration that creates
     /// the table runs as raw SQL and records no config write.

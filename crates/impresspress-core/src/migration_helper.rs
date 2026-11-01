@@ -318,9 +318,10 @@ pub const DATABASE_BACKEND_KEY: &str = "WAFER_RUN_SHARED__DATABASE__BACKEND";
 /// `Backend::Sqlite`, so a postgres deployment renders postgres-dialect SQL
 /// at runtime, matching the migrations it applied at boot.
 ///
-/// Cheap to call per request: the value comes from the in-memory config
-/// snapshot via `config::get_default` (no DB hop), so call sites read it
-/// inline rather than threading a cached `Backend` through every signature.
+/// Cheap to call per request: `config::get_default` answers from the runtime's
+/// variables snapshot (a memoized read, `Unavailable` while the table cannot
+/// be read) or the boot map, so call sites read it inline rather than
+/// threading a cached `Backend` through every signature.
 ///
 /// A failed read is returned: rendering the other dialect's SQL against the
 /// database would fail anyway, further from the cause.

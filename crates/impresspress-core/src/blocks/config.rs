@@ -229,10 +229,11 @@ pub struct VariablesConfigBlock {
     ///
     /// `impresspress__admin__variables` belongs to the ADMIN block, and
     /// `db::list_all` sends the collection as a WRAP resource, so reaching it
-    /// through `ctx` is a cross-block read that WRAP denies by default. This
-    /// block would then fall back to the boot map and serve compiled-in
-    /// defaults on every page — which is exactly what a live Cloudflare
-    /// deploy did before this field existed.
+    /// through `ctx` is a cross-block read that WRAP denies by default. Every
+    /// stored-config read would then answer `Unavailable` (the module's "Fail
+    /// closed"), so every page that reads stored config would be an error
+    /// page. (Before reads failed closed, a live Cloudflare deploy served
+    /// compiled-in defaults on every page that way, until this field existed.)
     ///
     /// Reading the platform's own config store through the raw service is the
     /// established shape, not a workaround: `variables`' boot-flavour API is
@@ -1051,8 +1052,8 @@ mod tests {
                 .expect("config read"),
             saved,
             "the config block must read the variables table under WRAP; if it \
-             cannot it falls back to the boot map and every page serves the \
-             compiled-in default while the admin's saved value sits in the table"
+             cannot, every stored-config read is `Unavailable` and every page \
+             reading stored config is an error page"
         );
     }
 }
