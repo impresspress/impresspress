@@ -3,7 +3,8 @@
 //! Exists because a runtime build both READS config and WRITES it, in that
 //! order, within one pass. `builder::boot` initializes the admin block
 //! first, under every `InitPolicy`; admin's `Init` runs its migrations and
-//! then `settings::seed_defaults`, and the Cloudflare boot hook follows with
+//! then, on a provisioning build, `settings::seed_defaults`, and the
+//! Cloudflare deploy hook follows with
 //! `platform_state::variables::seed_auto_generated`. Every one of those inserts rows into the
 //! variables table AFTER some other block has already resolved its config —
 //! the database service block, for one, is lazily initialized by admin's own

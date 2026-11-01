@@ -58,7 +58,7 @@
 # Seeded (mixed): variables=26 (block-scoped 8), legal documents=300, users=500, roles=2, grants=3
 # Seeded (shared): variables=18 (block-scoped 0), legal documents=300, users=500, roles=2, grants=3; block-scoped rows deleted and forwarded as request config: IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET, WAFER_RUN_SHARED__AUTH__PASSWORD_MIN_LENGTH, WAFER_RUN_SHARED__AUTH__SESSION_LIFETIME_DAYS, WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS
 
-## provision — 589 statements, 218 D1 calls, rows≈605
+## provision — 591 statements, 220 D1 calls, rows≈623
 api_keys                                         WRITE         1       0
 auth_sessions                                    WRITE         1       0
 iam_user_roles                                   WRITE         1       0
@@ -143,22 +143,35 @@ wafer_run__auth__provider_links                  WRITE         4       0
 wafer_run__auth__rate_limits                     WRITE         2       0
 wafer_run__auth__sessions                        WRITE         5       0
 wafer_run__auth__tokens                          WRITE         5       0
-wafer_run__auth__users                           COUNT         1       0
+wafer_run__auth__users                           SCAN          1       0
+wafer_run__auth__users                           INTROSPECT    2      18
 wafer_run__auth__users                           WRITE        12       0
 
-## mixed: 3 database build — 11 statements, 11 D1 calls, rows≈581
+## mixed: 1b prepared build, bootstrap token forwarded, no account yet — 8 statements, 8 D1 calls, rows≈53
+impresspress__admin__variables                   SCAN          1      18
+impresspress__admin__variables                   INTROSPECT    2      12
+wafer_run__auth__bootstrap_tokens                INTROSPECT    1       5
+wafer_run__auth__bootstrap_tokens                WRITE         1       0
+wafer_run__auth__users                           SCAN          1       0
+wafer_run__auth__users                           INTROSPECT    2      18
+
+## mixed: 3 database build — 10 statements, 10 D1 calls, rows≈81
 impresspress__admin__block_settings              SCAN          2      22
 impresspress__admin__block_settings              INTROSPECT    2       8
 impresspress__admin__variables                   SCAN          1      26
 impresspress__admin__variables                   INTROSPECT    2      12
 impresspress__admin__wrap_grants                 SCAN          1       3
 impresspress__admin__wrap_grants                 INTROSPECT    2      10
-wafer_run__auth__users                           COUNT         1     500
 
-## mixed: 4 prepared build — 4 statements, 4 D1 calls, rows≈538
+## mixed: 4 prepared build — 3 statements, 3 D1 calls, rows≈38
 impresspress__admin__variables                   SCAN          1      26
 impresspress__admin__variables                   INTROSPECT    2      12
-wafer_run__auth__users                           COUNT         1     500
+
+## mixed: 4b prepared build, bootstrap email and password forwarded — 6 statements, 6 D1 calls, rows≈57
+impresspress__admin__variables                   SCAN          1      26
+impresspress__admin__variables                   INTROSPECT    2      12
+wafer_run__auth__users                           SCAN          1       1
+wafer_run__auth__users                           INTROSPECT    2      18
 
 ## mixed: 5 warm GET / — 3 statements, 3 D1 calls, rows≈48, status 302
 impresspress__admin__request_logs                INTROSPECT    1      13
@@ -190,19 +203,31 @@ impresspress__admin__storage_access_logs         INTROSPECT    1       8
 impresspress__admin__storage_access_logs         ID-PROBE      1      33
 impresspress__admin__storage_access_logs         WRITE         4       0
 
-## shared: 3 database build — 11 statements, 11 D1 calls, rows≈573
+## shared: 1b prepared build, bootstrap token forwarded, no account yet — 8 statements, 8 D1 calls, rows≈53
+impresspress__admin__variables                   SCAN          1      18
+impresspress__admin__variables                   INTROSPECT    2      12
+wafer_run__auth__bootstrap_tokens                INTROSPECT    1       5
+wafer_run__auth__bootstrap_tokens                WRITE         1       0
+wafer_run__auth__users                           SCAN          1       0
+wafer_run__auth__users                           INTROSPECT    2      18
+
+## shared: 3 database build — 10 statements, 10 D1 calls, rows≈73
 impresspress__admin__block_settings              SCAN          2      22
 impresspress__admin__block_settings              INTROSPECT    2       8
 impresspress__admin__variables                   SCAN          1      18
 impresspress__admin__variables                   INTROSPECT    2      12
 impresspress__admin__wrap_grants                 SCAN          1       3
 impresspress__admin__wrap_grants                 INTROSPECT    2      10
-wafer_run__auth__users                           COUNT         1     500
 
-## shared: 4 prepared build — 4 statements, 4 D1 calls, rows≈530
+## shared: 4 prepared build — 3 statements, 3 D1 calls, rows≈30
 impresspress__admin__variables                   SCAN          1      18
 impresspress__admin__variables                   INTROSPECT    2      12
-wafer_run__auth__users                           COUNT         1     500
+
+## shared: 4b prepared build, bootstrap email and password forwarded — 6 statements, 6 D1 calls, rows≈49
+impresspress__admin__variables                   SCAN          1      18
+impresspress__admin__variables                   INTROSPECT    2      12
+wafer_run__auth__users                           SCAN          1       1
+wafer_run__auth__users                           INTROSPECT    2      18
 
 ## shared: 5 warm GET / — 3 statements, 3 D1 calls, rows≈48, status 302
 impresspress__admin__request_logs                INTROSPECT    1      13

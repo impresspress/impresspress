@@ -16,6 +16,9 @@
 //! 1. **provision** — `boot_deploy_runtime` (`RUN_MIGRATIONS=1`, `Reported`,
 //!    the deploy hooks) over an empty database, then `seal_prepared_plan`;
 //!    the plan is exported. Recorded once (the `mixed` run's).
+//!    - **1b** — a prepared build before the first account, with a bootstrap
+//!      token forwarded as request config, as a consumer that binds the
+//!      token after the first deploy forwards it: the token is installed.
 //! 2. **seed** — fixture rows, uncounted: legal documents, users, variables,
 //!    grants, an admin session. `shared` deletes every block-scoped variables
 //!    row — products' auto-generated webhook secret and the three auth
@@ -25,6 +28,8 @@
 //!    with the build's own pre-`build()` `block_settings` read.
 //! 4. **prepared build** — `boot_request_runtime(RequestBuild::Prepared)`,
 //!    hydrated from phase 1's plan.
+//!    - **4b** — the same, with a bootstrap email and password forwarded
+//!      while accounts exist: what a still-bound credential costs.
 //! 5. **warm** — five requests on runtime 4 (its warm schema cache): `GET /`,
 //!    the terms page, `/health`, an authenticated admin page, and a 404. Each
 //!    counts the statements its response waited on and the ones it left to
@@ -73,7 +78,12 @@ use std::{
 
 use impresspress_core::{
     after_response::{self, AfterResponse},
-    blocks::auth::{repo as auth_repo, JWT_SECRET_KEY},
+    blocks::auth::{
+        config::{
+            BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY, BOOTSTRAP_ADMIN_TOKEN_KEY,
+        },
+        repo as auth_repo, JWT_SECRET_KEY,
+    },
     builder::{
         add_request_config, boot_deploy_runtime, boot_request_runtime, request_config_source,
         seal_prepared_plan, structural_runtime_config, warm_config_surfaces, ImpresspressBuilder,
@@ -1035,27 +1045,18 @@ impl Allowed {
     }
 }
 
+const PHASE_TOKEN: &str = "1b prepared build, bootstrap token forwarded, no account yet";
 const PHASE_DATABASE: &str = "3 database build";
 const PHASE_PREPARED: &str = "4 prepared build";
+const PHASE_PASSWORD: &str = "4b prepared build, bootstrap email and password forwarded";
+/// Every phase that stands for a cold isolate's build.
+const COLD_BUILDS: [&str; 4] = [PHASE_TOKEN, PHASE_DATABASE, PHASE_PREPARED, PHASE_PASSWORD];
+
+/// The bootstrap credentials a consumer forwards after the first deploy.
+const BOOTSTRAP_TOKEN: &str = "d1-read-cost-harness-bootstrap-token";
+const BOOTSTRAP_PASSWORD: &str = "d1-read-cost-harness-bootstrap-password";
 
 const ALLOWED: &[Allowed] = &[
-    Allowed {
-        phase: PHASE_DATABASE,
-        table: "wafer_run__auth__users",
-        class: Class::Count,
-        mixed: 1,
-        shared: 1,
-        because: "auth Init's bootstrap check on every build; D1-READ-COST PR 4 \
-                  (provisioning-only seeds, `users::any_exists`) removes it",
-    },
-    Allowed {
-        phase: PHASE_PREPARED,
-        table: "wafer_run__auth__users",
-        class: Class::Count,
-        mixed: 1,
-        shared: 1,
-        because: "auth Init's bootstrap check on every build; D1-READ-COST PR 4 removes it",
-    },
     Allowed {
         phase: PHASE_DATABASE,
         table: "impresspress__admin__variables",
@@ -1073,6 +1074,54 @@ const ALLOWED: &[Allowed] = &[
         mixed: 1,
         shared: 1,
         because: "the runtime's variables snapshot, as on the database build",
+    },
+    Allowed {
+        phase: PHASE_TOKEN,
+        table: "impresspress__admin__variables",
+        class: Class::Scan,
+        mixed: 1,
+        shared: 1,
+        because: "the runtime's variables snapshot, as on every prepared build",
+    },
+    Allowed {
+        phase: PHASE_PASSWORD,
+        table: "impresspress__admin__variables",
+        class: Class::Scan,
+        mixed: 1,
+        shared: 1,
+        because: "the runtime's variables snapshot, as on every prepared build",
+    },
+    Allowed {
+        phase: PHASE_TOKEN,
+        table: "wafer_run__auth__users",
+        class: Class::Scan,
+        mixed: 1,
+        shared: 1,
+        because: "a bootstrap key is configured, so auth's Init asks whether an account \
+                  exists: `users::any_exists`, one row at most (D1-READ-COST PR 4c), for \
+                  as long as the key stays bound",
+    },
+    Allowed {
+        phase: PHASE_PASSWORD,
+        table: "wafer_run__auth__users",
+        class: Class::Scan,
+        mixed: 1,
+        shared: 1,
+        because: "a bootstrap key is still bound after the first account: \
+                  `users::any_exists` reads one row, then the bootstrap is a no-op \
+                  (D1-READ-COST PR 4c)",
+    },
+    Allowed {
+        phase: PHASE_TOKEN,
+        table: "wafer_run__auth__bootstrap_tokens",
+        class: Class::Write,
+        mixed: 1,
+        shared: 1,
+        because: "the token path with no account yet: `bootstrap_tokens::insert_if_absent`, \
+                  one INSERT … ON CONFLICT DO NOTHING per cold build until the token is \
+                  redeemed. The table does not bump the config version \
+                  (`cache_key::bumps_config_version`), so no fleet rebuild \
+                  (D1-READ-COST PR 4c/4e)",
     },
     Allowed {
         phase: PHASE_DATABASE,
@@ -1118,7 +1167,7 @@ fn check_rules(variant: Variant, phases: &[Phase]) -> Vec<String> {
     let mut sent = vec![0usize; ALLOWED.len()];
     for phase in phases {
         let short = phase.name.split(": ").nth(1).unwrap_or(&phase.name);
-        let cold_build = short == PHASE_DATABASE || short == PHASE_PREPARED;
+        let cold_build = COLD_BUILDS.contains(&short);
         let warm = short.starts_with("5 warm");
         for s in &phase.statements {
             if cold_build && needs_allowance(s) {
@@ -1203,6 +1252,29 @@ async fn run(variant: Variant) -> Run {
         String::new(),
     );
 
+    // 1b. A bootstrap token forwarded after the first deploy, before any
+    //     account exists: the next cold build installs it.
+    let mut phases = Vec::new();
+    let db = cold(&path, &ledger);
+    let forwarded = HashMap::from([(
+        BOOTSTRAP_ADMIN_TOKEN_KEY.to_string(),
+        BOOTSTRAP_TOKEN.to_string(),
+    )]);
+    let (wafer, _, _) = boot_request(&db, RequestBuild::Prepared, &plan, &forwarded).await;
+    drop(wafer);
+    drop(db);
+    phases.push(Phase::new(
+        label(PHASE_TOKEN),
+        &ledger.take(),
+        &classifier,
+        String::new(),
+    ));
+    assert_eq!(
+        classifier.table_rows(auth_repo::bootstrap_tokens::TABLE),
+        1,
+        "a bootstrap token forwarded after provisioning is installed by the next cold build"
+    );
+
     // 2. Seed.
     let (token, request_config) = seed(&path, variant).await;
     let sizes = format!(
@@ -1233,8 +1305,6 @@ async fn run(variant: Variant) -> Run {
         )
     };
 
-    let mut phases = Vec::new();
-
     // 3. A database build, on a cold isolate.
     let db = cold(&path, &ledger);
     let (wafer, _, _) = boot_request(&db, RequestBuild::Database, &plan, &request_config).await;
@@ -1257,6 +1327,35 @@ async fn run(variant: Variant) -> Run {
         &classifier,
         String::new(),
     ));
+    // 4b. A bootstrap credential still bound once accounts exist, on another
+    //     cold isolate.
+    {
+        let db = cold(&path, &ledger);
+        let mut bound = request_config.clone();
+        bound.insert(
+            BOOTSTRAP_ADMIN_EMAIL_KEY.to_string(),
+            ADMIN_EMAIL.to_string(),
+        );
+        bound.insert(
+            BOOTSTRAP_ADMIN_PASSWORD_KEY.to_string(),
+            BOOTSTRAP_PASSWORD.to_string(),
+        );
+        let users = classifier.table_rows(auth_repo::users::TABLE);
+        let (wafer, _, _) = boot_request(&db, RequestBuild::Prepared, &plan, &bound).await;
+        drop(wafer);
+        phases.push(Phase::new(
+            label(PHASE_PASSWORD),
+            &ledger.take(),
+            &classifier,
+            String::new(),
+        ));
+        assert_eq!(
+            classifier.table_rows(auth_repo::users::TABLE),
+            users,
+            "a bootstrap credential creates no account once one exists"
+        );
+    }
+
     let blocks = wafer.block_names();
     let mut config_blocks: Vec<String> = wafer
         .block_infos()

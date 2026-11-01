@@ -342,7 +342,8 @@ async fn ensure_active(ctx: &dyn Context, user_id: &str) -> Result<(), AuthError
 
 #[wafer_block::wafer_async_trait]
 impl AuthService for AuthServiceImpl {
-    /// Apply auth migrations and run the bootstrap admin step. Invoked by the
+    /// Apply auth migrations and run the bootstrap admin step where
+    /// [`super::bootstrap::should_run`] says so. Invoked by the
     /// framework `AuthBlock::lifecycle(Init)` (wafer-run #41/#45) once at
     /// startup. Mirrors the body of the custom impresspress `AuthBlock::lifecycle`
     /// so the framework block has a self-sufficient service to delegate to.
@@ -355,12 +356,16 @@ impl AuthService for AuthServiceImpl {
         // and goes back as the `WaferError` `lifecycle_init` would have made,
         // code included: a refusal stays `FailedPrecondition`, an unavailable
         // database `Unavailable`, so the runtime retries only what may clear.
-        crate::migration_helper::apply_migrations(ctx, &super::migrations::MIGRATIONS)
-            .await
-            .map_err(|e| AuthError::Backend(e.to_wafer_error()))?;
+        let outcome =
+            crate::migration_helper::apply_migrations(ctx, &super::migrations::MIGRATIONS)
+                .await
+                .map_err(|e| AuthError::Backend(e.to_wafer_error()))?;
         let cfg = super::config::AuthConfig::from_ctx(ctx)
             .await
             .map_err(|e| backend_error(e, "auth init: config"))?;
+        if !super::bootstrap::should_run(ctx, outcome, &cfg) {
+            return Ok(());
+        }
         super::bootstrap::run(ctx, &cfg)
             .await
             .map_err(|e| match e {
@@ -659,6 +664,98 @@ mod tests {
                 .contains(crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY),
             "the boot error names the missing key: {}",
             refusal.message
+        );
+    }
+
+    /// Auth's `Init` as a settled Cloudflare cold isolate runs it: the
+    /// schema is applied and the snapshot says so (the fast path), and the
+    /// build does not carry `IMPRESSPRESS_RUN_MIGRATIONS`.
+    async fn settled_request_path_ctx() -> TestContext {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        crate::blocks::auth::migrations::apply(&ctx)
+            .await
+            .expect("apply auth migrations");
+        let auth = &crate::blocks::auth::migrations::MIGRATIONS;
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({
+                auth.block: { "migration": {
+                    "current_hash": crate::migration_helper::migration_set_hash(auth.sqlite)
+                } }
+            })
+            .to_string(),
+        );
+        assert!(!crate::migration_helper::is_provisioning_build(&ctx));
+        ctx
+    }
+
+    /// The `users` reads the bootstrap could send, refused.
+    fn refusing_users_reads(ctx: &TestContext) -> crate::test_support::FailingDbOpContext {
+        crate::test_support::FailingDbOpContext::new(
+            ctx.clone(),
+            vec![
+                ("database.list", users::TABLE),
+                ("database.count", users::TABLE),
+            ],
+        )
+    }
+
+    /// A settled cold isolate with no bootstrap key reads nothing from
+    /// `users`: the bootstrap is provisioning, not every-build work. The
+    /// refused reads would fail `Init` if sent.
+    ///
+    /// Names `users::TABLE` only to aim the fault injector.
+    #[tokio::test]
+    async fn a_settled_request_path_init_without_a_bootstrap_key_reads_no_users() {
+        let ctx = settled_request_path_ctx().await;
+        AuthServiceImpl
+            .init(&refusing_users_reads(&ctx))
+            .await
+            .expect("no users read, so nothing to refuse");
+    }
+
+    /// The same build on a provisioning build, or with auth's schema fresh,
+    /// does run the bootstrap: the refused read fails `Init`.
+    #[tokio::test]
+    async fn a_provisioning_or_freshly_migrated_init_runs_the_bootstrap() {
+        let mut provisioning = settled_request_path_ctx().await;
+        provisioning.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
+        AuthServiceImpl
+            .init(&refusing_users_reads(&provisioning))
+            .await
+            .expect_err("a provisioning build asks whether an account exists");
+
+        let fresh = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        assert!(!crate::migration_helper::is_provisioning_build(&fresh));
+        AuthServiceImpl
+            .init(&refusing_users_reads(&fresh))
+            .await
+            .expect_err(
+                "an Init that applied auth's schema asks too, even off a provisioning build",
+            );
+    }
+
+    /// A bootstrap credential bound after the first deploy — on Cloudflare,
+    /// forwarded by a consumer's `request_config` — still bootstraps on the
+    /// next cold isolate, which is not a provisioning build.
+    #[tokio::test]
+    async fn a_bound_bootstrap_credential_bootstraps_on_a_request_path_build() {
+        let mut ctx = settled_request_path_ctx().await;
+        let token = "a-bootstrap-token-forwarded-after-deploy";
+        ctx.set_config(
+            crate::blocks::auth::config::BOOTSTRAP_ADMIN_TOKEN_KEY,
+            token,
+        );
+        AuthServiceImpl.init(&ctx).await.expect("init");
+        assert!(
+            super::super::repo::bootstrap_tokens::is_valid(&ctx, &hash_token(token))
+                .await
+                .expect("read"),
+            "the bound credential installed its token"
         );
     }
 

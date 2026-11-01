@@ -195,8 +195,12 @@ crate::impresspress_feature_block! {
     lifecycle: |_this, ctx, event| {
         // No schema — the email block is stateless. The only Init work is a
         // config sanity warning (no migrations, so this does NOT go through
-        // `migration_helper::lifecycle_init`).
-        if event.event_type == LifecycleType::Init {
+        // `migration_helper::lifecycle_init`). It is a provisioning step: it
+        // is said once per deploy or boot, not by every Cloudflare cold
+        // isolate.
+        if event.event_type == LifecycleType::Init
+            && crate::migration_helper::is_provisioning_build(ctx)
+        {
             let patterns = allowed_recipient_patterns(ctx).await?;
             if patterns.trim().is_empty() {
                 tracing::warn!(

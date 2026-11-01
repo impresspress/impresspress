@@ -282,7 +282,7 @@ pub const MIGRATIONS: crate::migration_helper::BlockMigrations =
 /// no-raw-migration-runner rule (CLAUDE.md).
 pub async fn apply(
     ctx: &dyn wafer_run::context::Context,
-) -> Result<(), crate::migration_helper::MigrationError> {
+) -> Result<crate::migration_helper::MigrationOutcome, crate::migration_helper::MigrationError> {
     crate::migration_helper::apply_migrations(ctx, &MIGRATIONS).await
 }
 

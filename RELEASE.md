@@ -19,6 +19,76 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Seeds and the bootstrap admin run on deploys and boots, not on every cold isolate; a failed seed fails the deploy
+
+**What changes.** Four `Init` steps that depend on config now run only on a
+**provisioning build**: every native start, every browser build, and
+Cloudflare's deploy funnel (`/_deploy/prepare`, `/_deploy/init`). They also
+run when the block's own migrations ran at that `Init`, which on Cloudflare's
+request path happens only for a block with no schema yet. The steps are:
+
+- admin's shared-variable seed (`WAFER_RUN_SHARED__*` rows);
+- the bootstrap admin (below);
+- vector's move of legacy upper-case index names;
+- email's warning that `IMPRESSPRESS__EMAIL__ALLOWED_RECIPIENT_PATTERNS` is
+  unset.
+
+Until now Cloudflare ran each of them on every cold isolate. The bootstrap's
+check alone was one `SELECT COUNT(*)` over `wafer_run__auth__users` per
+isolate: on one deployment about 10,200 calls a day, reading every account
+each time.
+
+**A failed shared-variable seed now fails the deploy.** The seed tries every
+key. If any read or write fails, admin's `Init` fails and names the keys, and
+the seed is left unrecorded so the next provisioning build runs it again:
+
+- on Cloudflare, `/_deploy/prepare` reports the failure and the version is
+  not promoted;
+- a native server refuses to start;
+- a browser build logs it, and admin's `Init` is reported failed.
+
+Before, the failure was only logged, and the deploy promoted a version with
+the row missing. The next Cloudflare cold isolate retried it, which is gone
+now. A row the database refuses on every attempt therefore fails every
+deploy until it is repaired.
+
+**The bootstrap admin.** Auth's `Init` runs the bootstrap on a provisioning
+build, after its own migrations ran, and on **any** build while a bootstrap
+key is configured (`WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL`,
+`..._PASSWORD` or `..._TOKEN`). It asks whether an account exists with a
+one-row read instead of a `COUNT(*)`. Once one does, the bootstrap does
+nothing, as before.
+
+- **No bootstrap key configured:** a Cloudflare cold isolate reads nothing
+  from `users` or `bootstrap_tokens`.
+- **A key still configured after the first account:** each cold isolate reads
+  one `users` row (plus, on a cold isolate, the table's column introspection)
+  and does nothing else. Remove the key once the admin exists.
+- **A token configured and no account yet:** each cold isolate also sends the
+  token row's `INSERT … ON CONFLICT DO NOTHING`, until someone redeems the
+  token. `bootstrap_tokens` does not change the config version, so this
+  rebuilds no other isolate.
+
+**A credential set after the first deploy still bootstraps — through a
+forwarding consumer.** The Worker captures no bootstrap key of its own: a
+bootstrap key bound as a Worker secret is invisible to it. The path that
+works is a consumer Worker that reads its secret with `Env::secret` and
+passes it in `request_config`; the key lands on the request's config and the
+next cold isolate's auth `Init` reads it. A native server or browser picks
+the key up at its next start, as before.
+
+**Clearing a spent credential** means removing it where it is bound: for a
+forwarding consumer, `wrangler secret delete` **on the consumer** (and stop
+forwarding it), not a clear in the admin UI. While it stays bound, every cold
+isolate pays the read above.
+
+**What to do.**
+- Nothing, if your deploys succeed.
+- If a deploy now fails naming `seed the shared variables`, the message names
+  the keys whose write failed and the database's error. Fix the cause (often
+  a transient D1 error; deploy again), or repair the row.
+- Remove bootstrap credentials once the first admin exists.
+
 ### Cloudflare: each invocation can log the D1 rows it read and wrote
 
 **What changes.** The Worker now adds up, per invocation, the rows D1 reports

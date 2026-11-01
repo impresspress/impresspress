@@ -246,6 +246,16 @@ impl AuthConfig {
         }
     }
 
+    /// Whether any bootstrap key is configured. Any one, not only a complete
+    /// pair: an email alone is a misconfiguration [`super::bootstrap::run`]
+    /// refuses by name, and it must be refused on every build that would
+    /// otherwise act on it.
+    pub fn names_a_bootstrap_admin(&self) -> bool {
+        self.bootstrap_admin_email.is_some()
+            || self.bootstrap_admin_password.is_some()
+            || self.bootstrap_admin_token.is_some()
+    }
+
     /// Build an [`AuthConfig`] by reading from the runtime config client.
     ///
     /// Called once at `Init` time from `AuthBlock::lifecycle`. Each key is

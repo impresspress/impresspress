@@ -246,6 +246,7 @@ crate::impresspress_feature_block! {
             &event,
             &migrations::MIGRATIONS)
         .await
+        .map(drop)
     },
 }
 

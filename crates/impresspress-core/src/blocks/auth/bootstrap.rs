@@ -25,13 +25,38 @@
 //! trigger. So every one of these values is spent once an account exists,
 //! and a later settings edit cannot fail a running site's `Init`.
 //!
-//! Until then [`run`] runs on every `Init`, and every runtime build runs
-//! `Init`: each native start, each Cloudflare isolate and prepared plan, each
-//! browser rebuild. So the token step installs a token once, on the first
-//! `Init` that sees it, and every later one finds that row and leaves it
-//! alone ([`bootstrap_tokens::insert_if_absent`]). The token stays redeemable
-//! for 24 hours from that first install, however often the runtime is
-//! rebuilt; a token that expired unredeemed stays expired, and the operator
+//! # When it runs
+//!
+//! Auth's `Init` calls [`run`] when [`should_run`] says so:
+//!
+//! - on a **provisioning build** (`migration_helper::is_provisioning_build`):
+//!   each native start, each browser build, Cloudflare's deploy funnel;
+//! - when auth's own migrations ran at this `Init`
+//!   (`MigrationOutcome::Applied`): a fresh auth schema, even on Cloudflare's
+//!   request path;
+//! - and on **any** build while a bootstrap key is configured
+//!   ([`AuthConfig::names_a_bootstrap_admin`]). That is how a credential
+//!   configured after the first deploy still bootstraps: on Cloudflare the
+//!   Worker captures no bootstrap key of its own, so it arrives from a
+//!   forwarding consumer's `request_config`
+//!   (`builder::request_path::add_request_config`), lands on the request's
+//!   boot map, and the next cold isolate's `Init` reads it. It costs that
+//!   isolate one `users` row read ([`users::any_exists`], plus the table's
+//!   column introspection on a cold schema cache) for as long as the key
+//!   stays bound, plus, on the token path with no account yet, the token
+//!   row's `INSERT … ON CONFLICT DO NOTHING` until the token is redeemed —
+//!   so clear the spent key on the consumer (`wrangler secret delete`).
+//!
+//! A Cloudflare cold isolate with no bootstrap key configured reads nothing
+//! from `users`. "Has the bootstrap happened" is not stamped anywhere: the
+//! `users` table is the fact, and a stamp written from the request path
+//! would bump the fleet's config version.
+//!
+//! The token step installs a token once, on the first `Init` that sees it
+//! with no account yet, and every later one finds that row and leaves it alone
+//! ([`bootstrap_tokens::insert_if_absent`]). The token stays redeemable for
+//! 24 hours from that first install, however often the runtime is rebuilt;
+//! a token that expired unredeemed stays expired, and the operator
 //! configures a different one.
 //!
 //! Configuring a different token installs a row of its own and does not
@@ -55,6 +80,7 @@ use super::{
     repo::{bootstrap_tokens, local_credentials, users},
     service::hash_token,
 };
+use crate::migration_helper::{self, MigrationOutcome};
 
 /// Why [`run`] did not complete.
 ///
@@ -71,14 +97,22 @@ pub enum RunError {
     Failed(WaferError),
 }
 
+/// Whether auth's `Init` runs [`run`] at all: on a provisioning build or an
+/// `Init` whose migrations ran now (`migration_helper::provisions`), or
+/// whenever a bootstrap key is configured (module docs, "When it runs").
+pub fn should_run(ctx: &dyn Context, outcome: MigrationOutcome, cfg: &AuthConfig) -> bool {
+    migration_helper::provisions(ctx, outcome) || cfg.names_a_bootstrap_admin()
+}
+
 /// Run the bootstrap step. Idempotent: returns `Ok(())` without side-effects
-/// when the `users` table is already populated.
+/// when the `users` table already holds an account, which it asks with one
+/// row read ([`users::any_exists`]).
 pub async fn run(ctx: &dyn Context, cfg: &AuthConfig) -> Result<(), RunError> {
-    let user_count = users::count(ctx)
+    if users::any_exists(ctx)
         .await
-        .map_err(|e| RunError::Failed(bootstrap_failed(e)))?;
-    if user_count > 0 {
-        tracing::debug!("auth: bootstrap skipped, users table already has {user_count} row(s)");
+        .map_err(|e| RunError::Failed(bootstrap_failed(e)))?
+    {
+        tracing::debug!("auth: bootstrap skipped, the users table already has an account");
         return Ok(());
     }
 

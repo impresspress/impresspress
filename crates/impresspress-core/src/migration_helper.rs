@@ -179,6 +179,11 @@
 //! Cloudflare's request-path builds are the only ones that do not, so step 2
 //! is reached only there, by a version serving before its deploy funnel ran.
 //!
+//! The same flag marks a **provisioning build** ([`is_provisioning_build`]),
+//! and [`apply_pending`]'s [`MigrationOutcome`] says what this `Init` applied:
+//! a block's config-dependent provisioning runs only where [`provisions`]
+//! says so, never on every Cloudflare cold isolate.
+//!
 //! # A shipped file's statements are immutable
 //!
 //! A file's ledger row holds the [`content_hash`] of the statements that ran,
@@ -230,6 +235,48 @@ pub mod legacy_runner;
 /// the config snapshot by the target's boot code, never read from the
 /// process environment or the variables table.
 pub const RUN_MIGRATIONS_KEY: &str = "IMPRESSPRESS_RUN_MIGRATIONS";
+
+/// Whether this runtime build is a **provisioning build**: one that carries
+/// [`RUN_MIGRATIONS_KEY`] as `"1"` — every native boot, every browser build
+/// and Cloudflare's deploy funnel (`/_deploy/prepare`, `/_deploy/init`). A
+/// Cloudflare request-path build is the only kind that is not.
+///
+/// Config-dependent provisioning — admin's shared-variable seed, the
+/// bootstrap admin, vector's legacy-name rename, email's recipient warning —
+/// runs on a provisioning build, or on a build whose own migrations
+/// [`Applied`](MigrationOutcome::Applied) something ([`provisions`]). A
+/// Cloudflare request-path build is a cold isolate: what it runs at `Init`
+/// it runs about ten thousand times a day, and a write from it to a
+/// version-bumping table rebuilds the whole fleet
+/// (`builder::request_path::RequestBootHooks`).
+pub fn is_provisioning_build(ctx: &dyn Context) -> bool {
+    ctx.config_get(RUN_MIGRATIONS_KEY) == Some("1")
+}
+
+/// What one block's [`apply_pending`] did, one variant per way it returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationOutcome {
+    /// The runner ran: the block's ledger was planned and the list stamped.
+    /// `files_run` counts the pending files it took through the runner, 0
+    /// when nothing was pending and it only stamped a lost `block_settings`
+    /// row again (module docs, step 7).
+    Applied { files_run: usize },
+    /// The snapshot's `current_hash` already matched the list (step 1).
+    UpToDate,
+    /// The list is not applied and this build does not apply it: a
+    /// Cloudflare request-path build over an existing schema, which logs
+    /// `schema drift` and leaves the list to the next deploy (step 2).
+    Deferred,
+}
+
+/// Whether config-dependent provisioning runs at this `Init`: on a
+/// [provisioning build](is_provisioning_build), or when the block's own
+/// migrations ran now ([`MigrationOutcome::Applied`] — on Cloudflare's
+/// request path, a block that never applied anything, which even that path
+/// creates).
+pub fn provisions(ctx: &dyn Context, outcome: MigrationOutcome) -> bool {
+    is_provisioning_build(ctx) || matches!(outcome, MigrationOutcome::Applied { .. })
+}
 
 /// One migration file: its basename (`"003_block_settings_seed_hash"`, the
 /// file name without the dialect suffix) and its SQL. A block's list of them,
@@ -348,7 +395,7 @@ pub fn backend_named(name: &str) -> Backend {
 pub async fn apply_migrations(
     ctx: &dyn Context,
     migrations: &BlockMigrations,
-) -> Result<(), MigrationError> {
+) -> Result<MigrationOutcome, MigrationError> {
     let backend = db_backend(ctx).await.map_err(|e| {
         MigrationError::step(
             migrations.block,
@@ -363,21 +410,24 @@ pub async fn apply_migrations(
 /// `lifecycle(Init)` body shared by every impresspress feature block: on the
 /// [`Init`](LifecycleType::Init) event, apply the block's migrations and turn
 /// a failure into a [`WaferError`] ([`MigrationError::to_wafer_error`]).
-/// Non-`Init` events are a no-op.
+/// Returns what the migrations did, or `None` for a non-`Init` event, which
+/// is a no-op.
 ///
 /// Blocks with extra `Init` work (admin's seed steps, llm's legacy-provider
-/// copy + reload) call this first, then run their extra steps; blocks with no
-/// migrations at all (the embedding wrappers) simply omit `lifecycle`.
+/// copy + reload) call this first, then run their extra steps — gated by
+/// [`provisions`] when the step is config-dependent provisioning; blocks with
+/// no migrations at all (the embedding wrappers) simply omit `lifecycle`.
 pub async fn lifecycle_init(
     ctx: &dyn Context,
     event: &LifecycleEvent,
     migrations: &BlockMigrations,
-) -> Result<(), WaferError> {
+) -> Result<Option<MigrationOutcome>, WaferError> {
     if !matches!(event.event_type, LifecycleType::Init) {
-        return Ok(());
+        return Ok(None);
     }
     apply_migrations(ctx, migrations)
         .await
+        .map(Some)
         .map_err(|e| e.to_wafer_error())
 }
 
@@ -388,23 +438,24 @@ pub async fn lifecycle_init(
 /// dialect of `files`, consulted only for a block with no ledger rows.
 ///
 /// `block_name` is the full block name (e.g. `"impresspress/files"`); every
-/// error names it.
+/// error names it. The [`MigrationOutcome`] says which of the three ways it
+/// returned.
 pub async fn apply_pending(
     ctx: &dyn Context,
     block_name: &str,
     files: &[MigrationFile<'_>],
     history: &[HistoricalState],
-) -> Result<(), MigrationError> {
+) -> Result<MigrationOutcome, MigrationError> {
     let code_hash = migration_set_hash(files);
     let state = read_state(ctx, block_name);
     if state.current_hash == code_hash {
-        return Ok(());
+        return Ok(MigrationOutcome::UpToDate);
     }
 
-    // Read directly from the config snapshot: `IMPRESSPRESS_RUN_MIGRATIONS`
-    // is an infrastructure key each target's boot code sets on the snapshot,
-    // never a variables-table row. Tests set it via `ctx.set_config(...)`.
-    let run_requested = ctx.config_get(RUN_MIGRATIONS_KEY) == Some("1");
+    // `IMPRESSPRESS_RUN_MIGRATIONS` is an infrastructure key each target's
+    // boot code sets on the snapshot, never a variables-table row. Tests set
+    // it via `ctx.set_config(...)`.
+    let run_requested = is_provisioning_build(ctx);
     // A block that never applied anything has no prior schema to protect, so
     // even a build that does not migrate (Cloudflare's request path) creates
     // it.
@@ -416,7 +467,7 @@ pub async fn apply_pending(
             code = %code_hash,
             "schema drift; this build does not apply migrations, the next deploy does"
         );
-        return Ok(());
+        return Ok(MigrationOutcome::Deferred);
     }
 
     let backend = db_backend(ctx).await.map_err(|e| {
@@ -432,7 +483,7 @@ pub async fn apply_pending(
     if let Err(e) = &outcome {
         tracing::warn!(error = %e, "migration failed");
     }
-    outcome
+    outcome.map(|files_run| MigrationOutcome::Applied { files_run })
 }
 
 /// Apply `block_name`'s pending migrations straight through a
@@ -481,6 +532,7 @@ pub async fn apply_pending_via_service(
     }
     .apply(files, history, &current_hash, &code_hash)
     .await
+    .map(drop)
 }
 
 /// The hash that identifies a block's migration list: SHA-256 hex of the
@@ -1035,7 +1087,7 @@ impl Ledger<'_> {
         history: &[HistoricalState],
         current_hash: &str,
         code_hash: &str,
-    ) -> Result<(), MigrationError> {
+    ) -> Result<usize, MigrationError> {
         let internal = |message: String| StepError {
             code: ErrorCode::Internal,
             detail_code: None,
@@ -1079,14 +1131,16 @@ impl Ledger<'_> {
             (self.plan(files, &rows)?, false)
         };
 
-        for &(name, sql) in &files[first_pending..] {
+        let pending = &files[first_pending..];
+        for &(name, sql) in pending {
             self.run_file(files, name, sql, fresh).await?;
         }
 
         self.db
             .stamp(self.block, code_hash)
             .await
-            .map_err(|e| self.step_error("record the applied migrations", e))
+            .map_err(|e| self.step_error("record the applied migrations", e))?;
+        Ok(pending.len())
     }
 
     fn step_error(&self, step: &str, error: StepError) -> MigrationError {
@@ -1748,6 +1802,70 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
             owned(&[("001_runs", Origin::Ran), ("002_more", Origin::Ran)])
         );
         assert_eq!(stamped(&ctx).await, Some(migration_set_hash(&files)));
+    }
+
+    /// Each way `apply_pending` returns says which it was: the runner's run
+    /// with the files it took, the fast path, and a build that defers.
+    #[tokio::test]
+    async fn the_outcome_says_what_the_run_did() {
+        let ctx = ledger_ctx().await;
+        let files = [F1, F2];
+        assert_eq!(
+            apply_pending(&ctx, BLOCK, &files, &[])
+                .await
+                .expect("apply"),
+            MigrationOutcome::Applied { files_run: 2 },
+            "a fresh block runs both files"
+        );
+        assert_eq!(
+            apply_pending(&ctx, BLOCK, &files, &[])
+                .await
+                .expect("apply"),
+            MigrationOutcome::Applied { files_run: 0 },
+            "with no snapshot hash the ledger is planned again, finds nothing \
+             pending, and only stamps"
+        );
+
+        let applied = ledger_ctx_with_hash(&migration_set_hash(&files)).await;
+        assert_eq!(
+            apply_pending(&applied, BLOCK, &files, &[])
+                .await
+                .expect("apply"),
+            MigrationOutcome::UpToDate,
+            "the snapshot's hash matches: the fast path"
+        );
+
+        let mut request_path = ledger_ctx_with_hash(&migration_set_hash(&[F1])).await;
+        request_path.set_config(RUN_MIGRATIONS_KEY, "");
+        assert_eq!(
+            apply_pending(&request_path, BLOCK, &files, &[])
+                .await
+                .expect("apply"),
+            MigrationOutcome::Deferred,
+            "a build that does not migrate leaves a drifted list to the deploy"
+        );
+    }
+
+    /// Config-dependent provisioning runs on a provisioning build whatever
+    /// the outcome, and elsewhere only when this `Init` applied something.
+    #[tokio::test]
+    async fn provisioning_runs_on_a_provisioning_build_or_after_an_apply() {
+        let mut ctx = ledger_ctx().await;
+        let applied = MigrationOutcome::Applied { files_run: 0 };
+        assert!(!is_provisioning_build(&ctx));
+        assert!(provisions(&ctx, applied));
+        assert!(!provisions(&ctx, MigrationOutcome::UpToDate));
+        assert!(!provisions(&ctx, MigrationOutcome::Deferred));
+
+        ctx.set_config(RUN_MIGRATIONS_KEY, "1");
+        assert!(is_provisioning_build(&ctx));
+        for outcome in [
+            applied,
+            MigrationOutcome::UpToDate,
+            MigrationOutcome::Deferred,
+        ] {
+            assert!(provisions(&ctx, outcome), "{outcome:?}");
+        }
     }
 
     /// A list that grows runs only the new file.
