@@ -369,7 +369,7 @@ impl DbExec for D1Shaped {
         self.inner.run_scalar_f64(sql, params).await
     }
 
-    /// One round trip for every statement, all-or-nothing as D1's
+    /// One round trip carrying every statement, all-or-nothing as D1's
     /// `db.batch()` is (the SQLite service's own transaction), and failing
     /// as a batch fails: one error for the whole call, its classified code
     /// and message kept and no statement named, because D1's rejection names

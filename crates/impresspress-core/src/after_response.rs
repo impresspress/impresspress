@@ -745,8 +745,9 @@ mod tests {
 
     /// A database whose `create_many` is refused by the platform although the
     /// adapter's own call count had room — D1 answering "Too many API
-    /// requests by single Worker invocation" because KV or R2 operations
-    /// share the invocation's limit, which the Cloudflare adapter maps to
+    /// requests by single Worker invocation", which it can when KV or R2
+    /// operations share the invocation's limit (neither Cloudflare page says
+    /// whether they do), and which the Cloudflare adapter maps to
     /// `CallBudgetExhausted`. Every other operation is the in-memory SQLite
     /// service's and is never called.
     struct RefusingDb {

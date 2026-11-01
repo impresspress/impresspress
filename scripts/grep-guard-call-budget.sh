@@ -19,11 +19,12 @@
 # `QUERIES_PER_INVOCATION`, `d1_queries_per_invocation` and `D1QueryCount`.
 #
 # Where it looks: every tracked file under `crates/`, `packages/` and
-# `scripts/` (by `git ls-files`, never a shell glob), except:
-#   * this script, which names the patterns;
-#   * `crates/impresspress/tests/helpers_cloudflare_env.rs`, whose test
-#     writes the old TOML key to prove the strict `[cloudflare]` table refuses
-#     it by name.
+# `scripts/` (by `git ls-files`, never a shell glob), except this script,
+# which names the patterns. One line is exempt, by file and exact content
+# rather than the whole file: the one in
+# `crates/impresspress/tests/helpers_cloudflare_env.rs` whose test writes the
+# old TOML key to prove the strict `[cloudflare]` table refuses it by name.
+# Any other line of that file is scanned.
 # RELEASE.md and `docs/` are outside the scan: they record what earlier
 # releases did.
 #
@@ -52,8 +53,19 @@ self_check || exit 2
 
 exempt=(
   scripts/grep-guard-call-budget.sh
-  crates/impresspress/tests/helpers_cloudflare_env.rs
 )
+# `file:content` of each exempt line, matched exactly (the line number may
+# move; the content may not).
+exempt_lines=(
+  'crates/impresspress/tests/helpers_cloudflare_env.rs:            "d1_queries_per_invocation = 50",'
+)
+for entry in "${exempt_lines[@]}"; do
+  file="${entry%%:*}" content="${entry#*:}"
+  if ! grep -qxF -- "$content" "$file"; then
+    echo "grep-guard-call-budget: exempted line no longer in $file; update the list: $content" >&2
+    exit 1
+  fi
+done
 for f in "${exempt[@]}"; do
   if [ ! -f "$f" ]; then
     echo "grep-guard-call-budget: exempted $f does not exist; update the list" >&2
@@ -68,6 +80,16 @@ if ! files="$(git ls-files -- crates packages scripts | grep -v -x -F -f <(print
 fi
 
 violations="$(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 grep -niE "$pattern" -- || true)"
+# Drop the exempt lines: `file:N:content` whose file and content match one.
+violations="$(printf '%s\n' "$violations" | while IFS= read -r hit; do
+  [ -z "$hit" ] && continue
+  file="${hit%%:*}" rest="${hit#*:}"
+  content="${rest#*:}"
+  for entry in "${exempt_lines[@]}"; do
+    [ "$file:$content" = "$entry" ] && continue 2
+  done
+  printf '%s\n' "$hit"
+done)"
 
 if [ -n "$violations" ]; then
   printf '%s\n' "$violations" >&2
