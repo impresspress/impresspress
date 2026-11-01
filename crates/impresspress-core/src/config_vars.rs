@@ -31,16 +31,16 @@ pub const DEPLOY_TOKEN_KEY: &str = "IMPRESSPRESS_DEPLOY_TOKEN";
 /// D1's page still lists 50 for Free, which is not what D1 enforces there.
 ///
 /// A fresh database's `/_deploy/prepare` runs in one invocation. Its
-/// migrations make {MIG_CALLS} calls ({MIG_STATEMENTS} statements, every
-/// migration file and its ledger row one call), and the whole prepare
-/// {PREP_CALLS} ({PREP_STATEMENTS} statements), measured {MEASURED_AT}.
-/// `a_cloudflare_fresh_install_fits_the_d1_budget` (`tests/migration_history.rs`)
-/// holds the migrations to half of the default, and `tests/d1_read_cost.rs`
-/// the whole prepare to the default. The default,
-/// [`D1_CALLS_PER_INVOCATION_DEFAULT`], therefore fits every plan. A lower
-/// value is for a Worker whose `limits.subrequests` is set below 1,000, and
-/// it bounds `/_deploy/prepare` too: below about {PREP_CALLS} calls a fresh
-/// database cannot provision.
+/// migrations make 172 calls (534 statements; every migration file and its
+/// ledger row are one call), and the whole prepare 220 (591 statements),
+/// measured 2026-11-02 at wafer-run 2cf5a593.
+/// `a_cloudflare_fresh_install_fits_the_d1_budget`
+/// (`tests/migration_history.rs`) holds the migrations to half of the
+/// default, and `tests/d1_read_cost.rs` the whole prepare to the default.
+/// The default, [`D1_CALLS_PER_INVOCATION_DEFAULT`], therefore fits every
+/// plan. A lower value is for a Worker whose `limits.subrequests` is set
+/// below 1,000, and it bounds `/_deploy/prepare` too: below about 220 calls
+/// a fresh database cannot provision.
 ///
 /// Shared by both sides of a deploy: `impresspress build`/`deploy --target
 /// cloudflare` writes it into the generated `wrangler.toml` `[vars]` from
