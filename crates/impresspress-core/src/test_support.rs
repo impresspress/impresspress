@@ -120,6 +120,12 @@ pub struct TestContext {
     /// database — true once the `variables` table exists (admin migrations)
     /// or a test booted the config service. See [`Self::install_config_block`].
     config_store: bool,
+    /// The fixture's runtime-owned variables snapshot, which the config block
+    /// reads through. One per fixture, as one per runtime: wrapping the
+    /// database (an outage, [`Self::break_reads`]) re-installs the block over
+    /// the wrapper but keeps the snapshot, as an outage keeps a warm
+    /// runtime's. [`Self::with_warm_config`] fills it.
+    variables_snapshot: Arc<crate::config_source::VariablesSnapshot>,
     /// The blocks [`Self::register_block`] registered, by name.
     pub blocks: Arc<Mutex<HashMap<String, Arc<dyn Block>>>>,
     /// `BlockInfo` for every block registered via [`Self::register_block`],
@@ -334,6 +340,7 @@ impl TestContext {
             database_block,
             config: Arc::new(HashMap::new()),
             config_store: false,
+            variables_snapshot: Arc::default(),
             blocks: Arc::new(Mutex::new(HashMap::new())),
             block_infos: Vec::new(),
             frame: dispatch::Frame::Unframed,
@@ -1618,6 +1625,7 @@ impl TestContext {
         let block: Arc<dyn Block> = Arc::new(crate::blocks::config::VariablesConfigBlock::new(
             svc,
             self.db_service.clone(),
+            self.variables_snapshot.clone(),
         ));
         self.register_block("wafer-run/config", block);
         self.config_store = true;
@@ -1788,6 +1796,27 @@ impl TestContext {
         if self.config_store {
             self.install_config_block();
         }
+        self
+    }
+
+    /// Read the `variables` table into the fixture's snapshot now, as a warm
+    /// runtime already has it.
+    ///
+    /// For an outage test of a handler that reads stored config on the way:
+    /// on a warm runtime that read is served from the snapshot, so breaking
+    /// the database afterwards ([`Self::break_reads`]) fails only the reads
+    /// under test. Without it the stored-config read fails first and the
+    /// handler fails closed (`Unavailable`), which is what a cold runtime
+    /// does — and what tests of the fail-closed rule want.
+    ///
+    /// # Panics
+    ///
+    /// When the table cannot be read: this is fixture setup.
+    pub async fn with_warm_config(self) -> Self {
+        self.variables_snapshot
+            .read(&self.db_service)
+            .await
+            .expect("read the variables table into the snapshot");
         self
     }
 

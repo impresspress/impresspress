@@ -1508,19 +1508,17 @@ pub async fn load_all(db: &Arc<dyn DatabaseService>) -> Result<HashMap<String, S
 
 /// Every decodable row. The shared body of [`load_all`] and the boot-time
 /// sensitive-flag repair, which needs the whole row rather than the value.
+///
+/// The same one bounded page [`read_unfiltered`] reads, refused the same way
+/// when it may be truncated: every whole-table read of this table has one
+/// page limit, and none of them carries on from a page that may have dropped
+/// rows.
 async fn load_rows(db: &Arc<dyn DatabaseService>) -> Result<Vec<LoadedRow>, String> {
-    let opts = ListOptions {
-        offset: 0,
-        limit: Some(100_000),
-        skip_count: true,
-        ..Default::default()
-    };
-    let listed = db
-        .list(TABLE, &opts)
+    let records = list_whole_table(db)
         .await
         .map_err(|e| format!("load variables from {TABLE}: {e}"))?;
-    let mut rows = Vec::with_capacity(listed.records.len());
-    for record in listed.records {
+    let mut rows = Vec::with_capacity(records.len());
+    for record in records {
         match VariableRow::from_record(&record.id, &record.data) {
             Ok(row) => {
                 // Compared against the canonical value directly. A shape test
@@ -1542,8 +1540,26 @@ async fn load_rows(db: &Arc<dyn DatabaseService>) -> Result<Vec<LoadedRow>, Stri
     Ok(rows)
 }
 
-/// The whole table as one bounded, unfiltered read: what a config snapshot is
-/// built from.
+/// The whole table as one bounded page, refused when it may be truncated: the
+/// one list every whole-table read here sends.
+async fn list_whole_table(
+    db: &Arc<dyn DatabaseService>,
+) -> Result<Vec<wafer_core::interfaces::database::service::Record>, UnfilteredReadError> {
+    let opts = crate::cache_key::full_table_list_opts();
+    let listed = db
+        .list(TABLE, &opts)
+        .await
+        .map_err(UnfilteredReadError::Read)?;
+    let returned = listed.records.len();
+    if let Some(limit) = opts.limit.filter(|&limit| returned >= limit as usize) {
+        return Err(UnfilteredReadError::MayBeTruncated { returned, limit });
+    }
+    Ok(listed.records)
+}
+
+/// The whole table as one bounded, unfiltered read: what the runtime's
+/// variables snapshot ([`crate::config_source::VariablesSnapshot`]) is built
+/// from.
 ///
 /// Read with [`cache_key::full_table_list_opts`](crate::cache_key::full_table_list_opts),
 /// a shape `cache_key::read_key` deliberately refuses to cache (pinned by
@@ -1555,26 +1571,56 @@ async fn load_rows(db: &Arc<dyn DatabaseService>) -> Result<Vec<LoadedRow>, Stri
 ///
 /// One page, refused when it may be truncated: see
 /// [`UnfilteredReadError::MayBeTruncated`].
+///
+/// Lists first, and only after a failed list asks whether the table exists:
+/// a definite "absent" is [`UnfilteredReadError::Absent`] — a fresh database
+/// before admin's migrations, which holds no stored config — and anything else
+/// is the list's own error, [`UnfilteredReadError::Read`]. On a healthy
+/// database the probe never runs. `wrap_grants::load` and
+/// `block_settings::load` answer their own tables' cold start the same way.
 pub async fn read_unfiltered(
     db: &Arc<dyn DatabaseService>,
 ) -> Result<UnfilteredRead, UnfilteredReadError> {
-    let opts = crate::cache_key::full_table_list_opts();
-    let listed = db
-        .list(TABLE, &opts)
-        .await
-        .map_err(UnfilteredReadError::Read)?;
-    let returned = listed.records.len();
-    if let Some(limit) = opts.limit.filter(|&limit| returned >= limit as usize) {
-        return Err(UnfilteredReadError::MayBeTruncated { returned, limit });
-    }
-    // A row the codec rejects (no `key`) is dropped rather than failing the
-    // read: one malformed row must not leave every block on its defaults.
-    let rows = listed
-        .records
+    let records = match list_whole_table(db).await {
+        Err(UnfilteredReadError::Read(error)) => {
+            return Err(match db.schema_table_exists(TABLE).await {
+                Ok(false) => UnfilteredReadError::Absent(error),
+                Ok(true) | Err(_) => UnfilteredReadError::Read(error),
+            })
+        }
+        listed => listed?,
+    };
+    let returned = records.len();
+    // Asked of the raw records, before decoding: `VariableRow::block` folds an
+    // absent column, a NULL and an empty string into one `None`, and the
+    // snapshot's pre-migration-002 rule needs the first told apart from the
+    // other two. Every backend hands a NULL column back as a present key
+    // holding `null` (D1's row objects, wafer-block-sqlite's `Value::Null`),
+    // so a record with no `block` key at all comes from a table without the
+    // column.
+    let any_record_has_block_key = records
         .iter()
-        .filter_map(|record| VariableRow::from_record(&record.id, &record.data).ok())
+        .any(|record| record.data.contains_key("block"));
+    // A row the codec rejects (no `key`) is dropped rather than failing the
+    // read: one malformed row must not leave every block on its defaults. It
+    // is warned about, as `load_rows` does — a keyless row is corruption.
+    let rows = records
+        .iter()
+        .filter_map(
+            |record| match VariableRow::from_record(&record.id, &record.data) {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    tracing::warn!(error = %e, "variables table contains an undecodable row");
+                    None
+                }
+            },
+        )
         .collect();
-    Ok(UnfilteredRead { rows, returned })
+    Ok(UnfilteredRead {
+        rows,
+        returned,
+        any_record_has_block_key,
+    })
 }
 
 /// What [`read_unfiltered`] returned.
@@ -1586,13 +1632,41 @@ pub struct UnfilteredRead {
     /// decode: a reader can tell "the table is empty" from "rows exist but
     /// none was usable".
     pub returned: usize,
+    /// Whether any record carried a `block` key at all, NULL included.
+    ///
+    /// `false` with `returned > 0` is the pre-migration-002 shape: rows, and no
+    /// `block` column for any of them to carry. A table of shared rows only
+    /// (`block` NULL on every one) is `true` — it has the column, and its
+    /// rows simply belong to no block.
+    pub any_record_has_block_key: bool,
 }
 
 /// Why [`read_unfiltered`] produced no rows to build config from.
+///
+/// `Clone`, because the runtime's variables snapshot remembers a failed read
+/// and hands every consumer that asks before its retry the same error, each
+/// building its own `ConfigError` or `WaferError` from it. The database error
+/// stays typed through that, so a classifier can match its variant.
 #[derive(Debug)]
 pub enum UnfilteredReadError {
     /// The database failed the read.
     Read(wafer_core::interfaces::database::service::DatabaseError),
+    /// The table does not exist yet: the list failed (with this error), and
+    /// the schema probe then answered "absent". A fresh database before
+    /// admin's migrations — not a failed read, since nothing can be stored
+    /// yet.
+    ///
+    /// How definite that "absent" is rests on the probe's decode. At the
+    /// pinned wafer-run rev, `schema_table_exists` decodes leniently: a probe
+    /// that succeeds with no row, a NULL or a non-number reads as `false`, so a
+    /// malformed answer after a failed list would be taken for this cold start
+    /// (and the config block would read on to the boot map). The strict decode
+    /// that refuses such an answer arrives with the wafer-run repin (#475,
+    /// IP-A0), which also retires the adapters' own probe overrides. Each reader decides what that means for it (the config source
+    /// retries the block, the config block reads on down its read order), and
+    /// the runtime's snapshot never remembers it: the migration that creates
+    /// the table runs as raw SQL and records no config write.
+    Absent(wafer_core::interfaces::database::service::DatabaseError),
     /// The page came back exactly full, so rows may have been dropped.
     ///
     /// One unfiltered read shares a single row budget across the whole table,
@@ -1612,12 +1686,58 @@ pub enum UnfilteredReadError {
     },
 }
 
+impl Clone for UnfilteredReadError {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Read(error) => Self::Read(clone_database_error(error)),
+            Self::Absent(error) => Self::Absent(clone_database_error(error)),
+            Self::MayBeTruncated { returned, limit } => Self::MayBeTruncated {
+                returned: *returned,
+                limit: *limit,
+            },
+        }
+    }
+}
+
+/// A [`DatabaseError`](wafer_core::interfaces::database::service::DatabaseError)
+/// copied variant for variant. A driver's own error (`Other`) cannot be cloned;
+/// its text can, and the variant — and so `code()`, `Internal` — is kept. What
+/// is lost is only that driver error's own `source()` chain.
+fn clone_database_error(
+    error: &wafer_core::interfaces::database::service::DatabaseError,
+) -> wafer_core::interfaces::database::service::DatabaseError {
+    use wafer_core::interfaces::database::service::DatabaseError as E;
+    match error {
+        E::NotFound => E::NotFound,
+        E::AlreadyExists(message) => E::AlreadyExists(message.clone()),
+        E::InvalidArgument(message) => E::InvalidArgument(message.clone()),
+        E::StatementLimitExceeded(message) => E::StatementLimitExceeded(message.clone()),
+        E::Unavailable(message) => E::Unavailable(message.clone()),
+        E::ResourceExhausted(message) => E::ResourceExhausted(message.clone()),
+        E::Internal(message) => E::Internal(message.clone()),
+        E::Other(source) => E::Other(source.to_string().into()),
+    }
+}
+
+impl UnfilteredReadError {
+    /// The database's error, when the list failed (the table absent or not);
+    /// `None` for a page refused as possibly truncated.
+    pub fn database_error(
+        &self,
+    ) -> Option<&wafer_core::interfaces::database::service::DatabaseError> {
+        match self {
+            Self::Read(error) | Self::Absent(error) => Some(error),
+            Self::MayBeTruncated { .. } => None,
+        }
+    }
+}
+
 impl std::fmt::Display for UnfilteredReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // The database's own text, unwrapped: this is what a config load
             // reported before the read moved here.
-            Self::Read(e) => std::fmt::Display::fmt(e, f),
+            Self::Read(e) | Self::Absent(e) => std::fmt::Display::fmt(e, f),
             Self::MayBeTruncated { returned, limit } => write!(
                 f,
                 "variables snapshot returned {returned} rows, at or above the {limit}-row query \
@@ -1629,7 +1749,23 @@ impl std::fmt::Display for UnfilteredReadError {
     }
 }
 
-impl std::error::Error for UnfilteredReadError {}
+/// `Read` and `Absent` are transparent, as `thiserror`'s
+/// `#[error(transparent)]` is: their `Display` IS the database error's, so
+/// their `source()` is that error's own source rather than the error itself,
+/// which a chain printer would otherwise show twice. The typed
+/// [`DatabaseError`](wafer_core::interfaces::database::service::DatabaseError)
+/// is reached by matching the variant (or through
+/// [`UnfilteredReadError::database_error`]), which is what
+/// `config_source::database::config_error` — the one place this becomes a
+/// `ConfigError` — receives.
+impl std::error::Error for UnfilteredReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) | Self::Absent(error) => error.source(),
+            Self::MayBeTruncated { .. } => None,
+        }
+    }
+}
 
 /// A decoded row plus how its `sensitive` column was actually spelled on disk.
 struct LoadedRow {

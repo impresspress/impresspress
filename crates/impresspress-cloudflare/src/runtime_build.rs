@@ -16,10 +16,13 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use impresspress_core::builder::{
-    add_request_config, request_config_source, structural_runtime_config, BootReport,
-    ImpresspressBuilder, RequestBuild, RuntimeConfig, StructuralConfigInputs,
-    PREPARE_RUNTIME_PLAN_KEY,
+use impresspress_core::{
+    builder::{
+        add_request_config, request_config_source, structural_runtime_config, BootReport,
+        ImpresspressBuilder, RequestBuild, RuntimeConfig, StructuralConfigInputs,
+        PREPARE_RUNTIME_PLAN_KEY,
+    },
+    config_source::{RetryMode, VariablesSnapshot},
 };
 use wafer_core::interfaces::{
     database::service::DatabaseService, storage::service::StorageService,
@@ -52,6 +55,11 @@ pub(crate) struct BuiltRuntime {
     /// runtime validates the exact state ordinary cold builds will read.
     pub(crate) block_settings_handle:
         Arc<std::sync::RwLock<impresspress_core::features::BlockSettings>>,
+    /// The runtime's read of the `variables` table, shared by its config block
+    /// and by every config source built for it — this build's, and each warm
+    /// request's ([`warm_request_services`]). Data and memo only, no handle,
+    /// so the cached runtime may keep it.
+    pub(crate) variables_snapshot: Arc<VariablesSnapshot>,
 }
 
 /// Run the deploy funnel (`impresspress_core::builder::boot_deploy_runtime`)
@@ -241,8 +249,17 @@ where
         (request_services::config_proxy(), concrete)
     });
 
-    // 5. ConfigSource: see `request_config_source`.
-    let cfg_source = request_config_source(db.clone(), overlay);
+    // 5. ConfigSource: see `request_config_source`. Over the runtime's
+    //    variables snapshot, created here because the source is consulted
+    //    while blocks initialize — before the config block, which the builder
+    //    hands the same snapshot, is guaranteed to be. The runtime keeps it
+    //    (`BuiltRuntime::variables_snapshot`), so a rebuild starts clean.
+    //
+    //    `Backoff`: nothing else retries a failed read on this target yet. The
+    //    outage plan's retry window (its IP-B) rebuilds the runtime instead and
+    //    switches this to `RetryMode::Rebuild`.
+    let variables_snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
+    let cfg_source = request_config_source(db.clone(), overlay, variables_snapshot.clone());
     let services = request_services::RequestServices::new(
         environment,
         db.clone(),
@@ -276,7 +293,8 @@ where
                 .network(network_proxy)
                 .logger(logger_proxy)
                 .block_settings(block_settings)
-                .config_source(config_source_proxy);
+                .config_source(config_source_proxy)
+                .variables_snapshot(variables_snapshot.clone());
 
             // 5. Consumer registers its blocks.
             let builder = register_blocks(builder)?;
@@ -318,6 +336,7 @@ where
         services,
         plan_exporter,
         block_settings_handle,
+        variables_snapshot,
     })
 }
 
@@ -378,11 +397,16 @@ fn request_config_surfaces(
 /// services and then a Wafer around them. Both take their Env-derived config
 /// from the same [`CfEnvironment`] method, so the two paths cannot disagree
 /// about what the environment currently says.
+///
+/// `variables_snapshot` is the cached runtime's: this request's config source
+/// is new, but reads the table through the runtime's memo, so resolving a
+/// block's config on a warm request sends nothing.
 pub(crate) fn warm_request_services(
     env: &worker::Env,
     environment: &CfEnvironment,
     queries: &crate::database::D1QueryCount,
     structural_snapshot: &HashMap<String, String>,
+    variables_snapshot: &Arc<VariablesSnapshot>,
     request_config: &HashMap<String, String>,
 ) -> Result<std::rc::Rc<request_services::RequestServices>, Box<dyn std::error::Error>> {
     let (db, _kv, _batch_db) = make_kv_cached_database_service_with_backend(
@@ -402,7 +426,7 @@ pub(crate) fn warm_request_services(
     let crypto = request_crypto_service(env, environment.jwt_secret().to_string(), environment)?;
     let network = make_fetch_network_service();
     let logger = console_logger(environment.cf_log_level());
-    let config_source = request_config_source(db.clone(), overlay);
+    let config_source = request_config_source(db.clone(), overlay, variables_snapshot.clone());
 
     Ok(request_services::RequestServices::new(
         environment,
@@ -855,9 +879,9 @@ mod tests {
     /// keys. Nothing reaches KV: the whole-table shape is deliberately not a
     /// cacheable one.
     ///
-    /// The statements are pinned verbatim, and they are the ones the
+    /// The statements are pinned verbatim; they are the ones the
     /// Cloudflare-only `D1ConfigSource` sent before the source moved into
-    /// core: the same golden passed against that type (see the PR).
+    /// core.
     #[wasm_bindgen_test]
     async fn a_cold_builds_config_resolution_sends_d1_one_unfiltered_variables_read() {
         let log = js_sys::Array::new();
@@ -865,6 +889,7 @@ mod tests {
         let source = request_config_source(
             request_database(variables_d1(&log, VARIABLES), kv.clone()),
             HashMap::new(),
+            Arc::default(),
         );
 
         let auth = source
@@ -912,6 +937,46 @@ mod tests {
         assert_eq!(kv.writes.get(), 0, "no KV write for the variables snapshot");
     }
 
+    /// A warm request's config source is new — its own database handle and
+    /// overlay — but reads through the runtime's variables snapshot, so a
+    /// block config it resolves sends D1 nothing: the build's read serves it.
+    /// That is why `warm_request_services` takes the cached runtime's snapshot
+    /// rather than letting each source keep its own memo.
+    #[wasm_bindgen_test]
+    async fn a_warm_requests_source_reads_through_the_runtimes_snapshot() {
+        let snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
+        let declared = [wafer_block::ConfigVar::new("WAFER_RUN__AUTH__A", "doc", "")];
+
+        let build_log = js_sys::Array::new();
+        let build_source = request_config_source(
+            request_database(variables_d1(&build_log, VARIABLES), Arc::default()),
+            HashMap::new(),
+            snapshot.clone(),
+        );
+        build_source
+            .load_for_block("wafer-run/auth", &declared)
+            .await
+            .expect("the build resolves");
+        assert_eq!(statements(&build_log).len(), 3, "the build reads the table");
+
+        let warm_log = js_sys::Array::new();
+        let warm_source = request_config_source(
+            request_database(variables_d1(&warm_log, VARIABLES), Arc::default()),
+            HashMap::new(),
+            snapshot,
+        );
+        let auth = warm_source
+            .load_for_block("wafer-run/auth", &declared)
+            .await
+            .expect("the warm request resolves");
+        assert_eq!(auth.get("WAFER_RUN__AUTH__A"), Some("from-d1"));
+        assert!(
+            statements(&warm_log).is_empty(),
+            "a warm request reads the runtime's snapshot, not D1: {:?}",
+            statements(&warm_log)
+        );
+    }
+
     /// The overlay wiring, end to end: what the warm fill assembles — the
     /// Worker's secret binding and a consumer's request config — wins over
     /// the D1 row for the same key, through the source the fill builds.
@@ -929,6 +994,7 @@ mod tests {
         let source = request_config_source(
             request_database(variables_d1(&log, VARIABLES), Arc::default()),
             overlay,
+            Arc::default(),
         );
         let auth = source
             .load_for_block(

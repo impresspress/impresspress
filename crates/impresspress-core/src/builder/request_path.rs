@@ -617,15 +617,21 @@ pub fn warm_config_surfaces(
 
 /// The config source every hosted build and warm request uses:
 /// [`DatabaseConfigSource`](crate::config_source::DatabaseConfigSource) over
-/// `db`, resolving each block against one lazily fetched unfiltered snapshot
-/// of the variables table, with `overlay` — the bound secrets and the
-/// consumer's request config — layered over the rows.
+/// `db`, resolving each block against `snapshot` — the runtime's one lazily
+/// fetched unfiltered read of the variables table, which its config block
+/// shares — with `overlay` (the bound secrets and the consumer's request
+/// config) layered over the rows.
+///
+/// The source is per request, the snapshot per runtime: a warm request passes
+/// the cached runtime's snapshot, so resolving a block's config on it reads
+/// nothing.
 pub fn request_config_source(
     db: Arc<dyn DatabaseService>,
     overlay: HashMap<String, String>,
+    snapshot: Arc<crate::config_source::VariablesSnapshot>,
 ) -> Arc<dyn wafer_run::ConfigSource> {
     Arc::new(crate::config_source::DatabaseConfigSource::with_overlay(
-        db, overlay,
+        db, overlay, snapshot,
     ))
 }
 

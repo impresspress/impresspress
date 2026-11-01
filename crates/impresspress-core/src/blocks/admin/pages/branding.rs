@@ -98,8 +98,12 @@ mod tests {
     }
 
     /// The form's Save posts every field. When the stored branding cannot
-    /// be read the page is the error page in the shell, never the form
-    /// filled from the boot map and the declared defaults.
+    /// be read the page is an error page, never the form filled from the boot
+    /// map and the declared defaults.
+    ///
+    /// On a cold runtime it is the bare status page, not one inside the shell:
+    /// the shell's own branding is stored config read from the same variables
+    /// snapshot, so it fails closed too rather than drawing default branding.
     #[tokio::test]
     async fn a_failed_branding_read_renders_no_form() {
         let ctx = TestContext::with_admin()
@@ -114,6 +118,8 @@ mod tests {
         let html = String::from_utf8(parts.body).expect("utf-8");
         assert_eq!(parts.status, 500, "{html}");
         assert!(!html.contains("settings-form"), "{html}");
+        assert!(html.contains(r#"class="status-page""#), "{html}");
+        assert!(!html.contains(r#"class="shell""#), "{html}");
     }
 
     /// Control: a healthy read renders the form with the stored value.
