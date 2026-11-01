@@ -140,7 +140,7 @@ conformance-check = ["wafer-core/conformance"]
 wafer-run = { workspace = true }
 wafer-block = { workspace = true }
 wafer-core = { workspace = true }
-# Shared SQL planning (DbExec primitives call introspect::build_table_exists).
+# The SQL dialect the D1 adapter reports (`DbExec::BACKEND`, `Backend::Sqlite`).
 wafer-sql-utils = { workspace = true }
 
 # Impresspress shared core. `default-features = false` strips the native

@@ -1529,9 +1529,9 @@ const HEADER: &str = "\
 # runs it with the Cloudflare block set). Regenerate with `BLESS=1 just d1-cost`
 # and review the diff: a PR that saves statements or rows shows it here.
 #
-# Section headers count D1 calls (the unit D1 limits per invocation and the
-# Worker's budget admits; a batch counts once) and statements (each statement
-# of a batch; rows are per statement).
+# Section headers count statements (each statement of a batch; rows are per
+# statement) and D1 calls (the unit D1 limits per invocation and the Worker's
+# budget admits; a batch counts once).
 #
 # Columns: table, class, statements, rows≈.
 #   COUNT       SELECT COUNT(...): reads every row it counts.

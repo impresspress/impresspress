@@ -1501,8 +1501,8 @@ mod tests {
         assert!(matches!(scalar_f64(None), Err(DatabaseError::Internal(_))));
     }
 
-    /// A D1 service over `db` with a fresh invocation count and the Workers
-    /// Paid query limit, for the tests that are not about the budget.
+    /// A D1 service over `db` with a fresh invocation count and the default
+    /// call limit (1000), for the tests that are not about the budget.
     fn service(db: D1Database, binding: &str) -> D1DatabaseService {
         D1DatabaseService::new(db, binding, D1CallCount::new(), 1000)
     }
@@ -2508,13 +2508,13 @@ mod tests {
     }
 
     /// **The audit row always fits.** A request's own services leave the
-    /// statements reserved for its audit row unused — every statement past
-    /// D1's limit less the reservation is refused before it reaches D1, not
-    /// only multi-statement writes — so however the request spends its
-    /// budget, the reserved-work handle still writes the row, from a cold
-    /// schema cache, in exactly [`AUDIT_ROW_CALLS`] statements, against
-    /// a fake D1 that lists the table's real columns. A probe added to the
-    /// path fails here, and so does a reservation larger than the path needs.
+    /// calls reserved for its audit row unused — every call past D1's limit
+    /// less the reservation is refused before it reaches D1 — so however the
+    /// request spends its budget, the reserved-work handle still writes the
+    /// row, from a cold schema cache, in exactly [`AUDIT_ROW_CALLS`] calls,
+    /// against a fake D1 that lists the table's real columns. A probe added
+    /// to the path fails here, and so does a reservation larger than the
+    /// path needs.
     ///
     /// [`AUDIT_ROW_CALLS`]: impresspress_core::after_response::AUDIT_ROW_CALLS
     #[wasm_bindgen_test]
@@ -2551,7 +2551,7 @@ mod tests {
         let request = D1DatabaseService::new(d1(), "DB", count.clone(), LIMIT);
         let ran = spend_everything(&request).await;
         assert_eq!(ran, LIMIT - AUDIT_ROW_CALLS);
-        assert_eq!(count.calls(), ran, "the refused statement was not sent");
+        assert_eq!(count.calls(), ran, "the refused call was not sent");
 
         let audit = D1DatabaseService::new(d1(), "DB", count.for_reserved_work(), LIMIT);
         // The row exactly as the pipeline queues it.
@@ -2575,7 +2575,7 @@ mod tests {
         assert_eq!(
             count.calls() - ran,
             AUDIT_ROW_CALLS,
-            "the row's statements: the id policy probe, the column list and the insert"
+            "the row's calls: the id policy probe, the column list and the insert's batch"
         );
         assert_eq!(batches.borrow().len(), 1, "the row reached D1");
     }
@@ -2645,7 +2645,7 @@ mod tests {
     /// **What the row leaves goes to the deferred tasks.** Once the audit row
     /// is written and the reservation released, the request's own services —
     /// which its deferred tasks run under — may use the invocation's whole
-    /// limit less everything sent, the row's statements included, and not a
+    /// limit less every call sent, the row's included, and not a
     /// limit still lowered by the reservation.
     #[wasm_bindgen_test]
     async fn a_released_reservation_goes_back_to_the_request() {
@@ -2909,8 +2909,8 @@ mod tests {
 
     /// **D1's own refusal of the limit is the call budget's.** The Workers
     /// runtime refuses a call past the invocation's limit with "Too many API
-    /// requests by single Worker invocation" — counted with KV and R2, so it
-    /// can come while this adapter's count has room. Both paths its text
+    /// requests by single Worker invocation" — which KV and R2 operations may
+    /// share, so it may come while this adapter's count has room. Both paths its text
     /// reaches classify it as `CallBudgetExhausted`, with the detail code a
     /// client keys on: `db_err` (here through a lone `run()`, in the form
     /// worker-rs hands it back, measured 2026-10-23) and `js_failure`. A

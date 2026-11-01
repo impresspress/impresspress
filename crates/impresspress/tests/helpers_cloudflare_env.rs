@@ -512,10 +512,9 @@ fn the_password_hasher_section_is_read_and_validated() {
 }
 
 /// The `[cloudflare]` table and each table inside it refuse a key they do
-/// not declare, by name: the `d1_queries_per_invocation` that
-/// `d1_calls_per_invocation` replaced would otherwise deploy under the
-/// default and say nothing. So does a stray key in `[cloudflare.d1]` or
-/// `[cloudflare.r2]`.
+/// not declare, by name: the key `d1_calls_per_invocation` replaced would
+/// otherwise deploy under the default and say nothing. So does a stray key
+/// in `[cloudflare.d1]` or `[cloudflare.r2]`.
 #[test]
 fn a_stale_or_unknown_cloudflare_key_is_refused_by_name() {
     for (anchor, key) in [
