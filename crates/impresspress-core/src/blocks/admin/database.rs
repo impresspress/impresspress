@@ -400,6 +400,20 @@ mod tests {
         assert_eq!(output_http_status(out).await, 500);
     }
 
+    /// `break_reads` fails every catalog read itself, never delegating one
+    /// past the break: the routes above would still answer 500 through an
+    /// earlier read (the backend lookup, a row count), which would hide a
+    /// catalog read that slipped through.
+    #[tokio::test]
+    async fn break_reads_fails_every_catalog_read() {
+        let ctx = TestContext::with_admin().await.break_reads();
+        let db = ctx.database_service();
+        let roles = crate::blocks::admin::ROLES_TABLE;
+        assert!(db.catalog_tables().await.is_err());
+        assert!(db.catalog_columns(roles).await.is_err());
+        assert!(db.catalog_row_count(roles).await.is_err());
+    }
+
     /// A failed column read is a 500, not a table with no columns.
     #[tokio::test]
     async fn a_failed_column_read_is_a_500_not_no_columns() {
