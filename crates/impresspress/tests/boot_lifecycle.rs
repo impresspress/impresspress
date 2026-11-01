@@ -259,6 +259,129 @@ async fn a_seed_failure_aborts_a_tolerant_or_strict_boot() {
     }
 }
 
+/// The real SQLite service, refusing one typed write: the `variables` row
+/// for [`REFUSED_SEED_KEY`]. Every other operation is the inner service's.
+struct RefusesOneSeedWrite {
+    inner: Arc<dyn DatabaseService>,
+}
+
+/// A shared variable with a non-empty default, so admin's settings seed
+/// inserts its row on a fresh database, and a native boot with no process
+/// environment stores nothing for it before `Init`.
+const REFUSED_SEED_KEY: &str = impresspress_core::config_vars::APP_NAME_KEY;
+
+impl RefusesOneSeedWrite {
+    fn inner_service(&self) -> &dyn DatabaseService {
+        self.inner.as_ref()
+    }
+}
+
+wafer_core::forward_database_service! {
+    impl DatabaseService for RefusesOneSeedWrite {
+        forward_to inner_service();
+
+        ops {
+            get: forward,
+            list: forward,
+            create: custom,
+            create_many: forward,
+            update: forward,
+            delete: forward,
+            count: forward,
+            sum: forward,
+            query_raw: forward,
+            exec_raw: forward,
+            exec_raw_transaction: forward,
+            delete_where: forward,
+            delete_where_count: forward,
+            take_where: forward,
+            update_where: forward,
+            update_where_count: forward,
+            increment_field_where: forward,
+            upsert: forward,
+            aggregate: forward,
+            batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
+            ensure_schema_table: forward,
+            ensure_schema_tables: forward,
+            schema_table_exists: forward,
+            schema_columns: forward,
+            schema_drop_table: forward,
+            schema_add_column: forward,
+            statement_budget: forward,
+        }
+
+        async fn create(
+            &self,
+            collection: &str,
+            data: HashMap<String, serde_json::Value>,
+        ) -> Result<
+            wafer_core::interfaces::database::service::Record,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            if collection == impresspress_core::platform_state::variables::TABLE
+                && data.get("key").and_then(serde_json::Value::as_str) == Some(REFUSED_SEED_KEY)
+            {
+                return Err(
+                    wafer_core::interfaces::database::service::DatabaseError::Internal(
+                        "injected seed write failure".to_string(),
+                    ),
+                );
+            }
+            self.inner.create(collection, data).await
+        }
+    }
+}
+
+/// A shared-variable seed write that fails fails admin's `Init`, so a
+/// `Reported` boot — the deploy funnel's report, and the native boot that
+/// refuses to start on a not-ok report — names it, so a deploy is never
+/// promoted with a shared-variable row missing.
+#[tokio::test]
+async fn a_failed_shared_variable_seed_fails_a_reported_boot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("boot_seed_write_failure.sqlite3");
+    let storage_root = tmp.path().join("storage");
+    std::fs::create_dir_all(&storage_root).expect("create storage root");
+
+    let infra = infra_for(&db_path, &storage_root);
+    let sqlite = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+        .await
+        .expect("construct sqlite database service");
+    let database: Arc<dyn DatabaseService> = Arc::new(RefusesOneSeedWrite { inner: sqlite });
+    let mut wafer = build_native_runtime(
+        &infra,
+        database,
+        &HashMap::new(),
+        Default::default(),
+        AppHooks::none(),
+    )
+    .await
+    .expect("build impresspress runtime");
+    let report = boot(
+        &mut wafer,
+        &NativeBootHooks,
+        NATIVE_GRANTS,
+        InitPolicy::Reported,
+    )
+    .await
+    .expect("a Reported boot returns its report");
+
+    assert!(!report.ok, "a failed seed write fails the boot: {report:?}");
+    let admin = report
+        .blocks
+        .iter()
+        .find(|b| b.block == impresspress_core::blocks::admin::ADMIN_BLOCK_ID)
+        .expect("admin is reported");
+    assert!(!admin.ok, "admin's Init carries the failure: {admin:?}");
+    let error = admin.error.as_deref().unwrap_or_default();
+    assert!(
+        error.contains(REFUSED_SEED_KEY),
+        "the failure names the key whose write failed: {error}"
+    );
+}
+
 /// The Cloudflare prepared-hydration path passes `GrantSource::PreInstalled`
 /// because `ImpresspressBuilder::apply_prepared_plan` has already installed the
 /// plan's grants — this pins that the claim is true through `build()` and

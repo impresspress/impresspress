@@ -894,15 +894,20 @@ crate::impresspress_feature_block! {
     lifecycle: |_this, ctx, event| {
         // Migration 010 seeds the two system roles once per database, so
         // Init reads nothing from the roles table.
-        crate::migration_helper::lifecycle_init(
+        let outcome = crate::migration_helper::lifecycle_init(
             ctx,
             &event,
             &migrations::MIGRATIONS)
         .await?;
-        // Seed shared/default variables after the schema is in place, only
-        // on Init.
-        if matches!(event.event_type, wafer_run::LifecycleType::Init) {
-            settings::seed_defaults(ctx).await;
+        // Seed the shared variables after the schema is in place, on a
+        // provisioning build or when admin's own migrations ran now — never
+        // on every Cloudflare cold isolate. A failed seed fails Init, so the
+        // funnel's policy decides: a Cloudflare deploy fails before
+        // promotion, a native server refuses to start, a browser logs.
+        if let Some(outcome) = outcome {
+            if crate::migration_helper::provisions(ctx, outcome) {
+                settings::seed_defaults(ctx).await?;
+            }
         }
         Ok(())
     },

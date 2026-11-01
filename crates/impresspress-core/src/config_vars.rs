@@ -958,8 +958,11 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 /// about who reads these values but about which branch inside
 /// `auth::bootstrap::run` populates `wafer_run__auth__users`, because that
 /// table is the early-return that makes a value spent. `run` is called from
-/// `AuthServiceImpl::init` on EVERY boot, and on an empty table it has four
-/// branches:
+/// `AuthServiceImpl::init` on every provisioning build, on an `Init` whose
+/// auth migrations ran (no recorded migration state, even on Cloudflare's
+/// request path), and on every build while an email and a password, or a
+/// token, is configured (`auth::bootstrap::should_run`); on an empty table it
+/// has four branches:
 ///
 /// 1. email + password → `bootstrap_with_email_password` inserts a `users` row
 ///    (with its address proof) and a `local_credentials` row. From the next
@@ -978,8 +981,9 @@ pub fn is_instance_owned_key(key: &str) -> bool {
 /// So `BOOTSTRAP_ADMIN_TOKEN` is deliberately NOT here. This predicate
 /// answers from the key alone, and only a token that has been redeemed into an
 /// admin user is spent; nothing in the key or its row says whether it has.
-/// `admin::ops::is_clearable_provisioning_credential` answers that by counting
-/// the users, on the one surface with a `Context` to count them through.
+/// `admin::ops::is_clearable_provisioning_credential` answers that by asking
+/// whether an account exists, on the one surface with a `Context` to ask
+/// through.
 ///
 /// `BOOTSTRAP_ADMIN_EMAIL` is not here either, though it is spent in the same
 /// way as the password: `run` reads it only on that first boot (and refuses

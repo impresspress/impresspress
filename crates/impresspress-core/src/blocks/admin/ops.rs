@@ -742,7 +742,7 @@ impl CreateRefusal {
 /// The token is handled HERE rather than widened into
 /// `is_provisioning_only_key` because that predicate is also consulted by
 /// `blocks::config`'s `CONFIG_SET`, which runs over the raw `DatabaseService`
-/// with no `Context` to count users through. Widening it there would have
+/// with no `Context` to read `users` through. Widening it there would have
 /// exempted an UNREDEEMED token on a surface that cannot check — the narrower
 /// static rule keeps that path refusing, which is the safe answer.
 async fn is_clearable_provisioning_credential(ctx: &dyn Context, key: &str) -> bool {
@@ -753,7 +753,10 @@ async fn is_clearable_provisioning_credential(ctx: &dyn Context, key: &str) -> b
         return false;
     }
     // Redeemed exactly when an admin user exists.
-    matches!(crate::blocks::auth::repo::users::count(ctx).await, Ok(n) if n > 0)
+    matches!(
+        crate::blocks::auth::repo::users::any_exists(ctx).await,
+        Ok(true)
+    )
 }
 
 /// Hand a config key back to the process environment: release its pin so the

@@ -386,6 +386,42 @@ async fn a_rebuild_with_a_bootstrap_token_configured_boots() {
     );
 }
 
+/// **A browser build whose shared-variable seed fails does not boot.** A
+/// browser build is a provisioning build, so admin's `Init` seeds the shared
+/// variables, and a failed seed fails that `Init`. Under `Tolerant` the boot
+/// aborts on it, as on a failed seed hook, instead of booting on with the
+/// admin block failed for the runtime's lifetime — the surface that would
+/// repair the row. The database here refuses one seed insert (a trigger,
+/// installed after the pre-build migrations created the table).
+#[wasm_bindgen_test]
+async fn a_failed_shared_variable_seed_stops_the_boot() {
+    let db: Arc<dyn DatabaseService> = Arc::new(crate::database::test_support::fresh_db().await);
+    let services = BrowserServices::new(Vec::new()).expect("the browser services construct");
+    let builder = services.builder().await.expect("a builder");
+    // Test-fixture setup: no typed API installs a trigger.
+    db.exec_raw(
+        &format!(
+            "CREATE TRIGGER refuse_the_app_name BEFORE INSERT ON {} \
+             WHEN NEW.key = '{}' BEGIN SELECT RAISE(ABORT, 'refused by the test'); END",
+            impresspress_core::platform_state::variables::TABLE,
+            impresspress_core::config_vars::APP_NAME_KEY,
+        ),
+        &[],
+    )
+    .await
+    .expect("install the refusing trigger");
+
+    let error = match services.boot(builder, None).await {
+        Ok(_) => panic!("a build whose seed failed must not boot"),
+        Err(e) => e.as_string().unwrap_or_default(),
+    };
+    assert!(
+        error.contains(impresspress_core::blocks::admin::ADMIN_BLOCK_ID)
+            && error.contains(impresspress_core::config_vars::APP_NAME_KEY),
+        "the boot error names admin and the key whose write failed: {error}"
+    );
+}
+
 /// What every block's pre-build migration pass ([`super::apply_block_migrations`])
 /// does with a database file from before the per-file ledger, on real sql.js.
 mod pre_ledger_migrations {
