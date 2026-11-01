@@ -294,11 +294,20 @@ mod boot_hook_tests {
             Ok(())
         }
 
-        fn statement_budget(
+        async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn catalog_columns(
             &self,
-        ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError>
+            _table: &str,
+        ) -> Result<Vec<wafer_core::interfaces::database::service::CatalogColumn>, DatabaseError>
         {
-            Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
+            unreachable!()
+        }
+
+        async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+            unreachable!()
         }
     }
 

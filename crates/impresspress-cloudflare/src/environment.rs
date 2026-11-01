@@ -73,12 +73,12 @@ pub(crate) const D1_ROWS_LOG_THRESHOLD_DEFAULT: u64 = 1000;
 /// The Worker's bound secrets and builder-time vars: the hosted target's lists,
 /// defined beside the funnels that use them (`impresspress_core::builder`).
 pub(crate) use impresspress_core::builder::{BUILDER_WORKER_VAR_KEYS, PROTECTED_ENV_KEYS};
-/// The Worker var naming this deploy's D1 query limit and its Workers Paid
-/// default, shared with the CLI that writes it into `wrangler.toml`. Every D1
-/// service built in an invocation reports its statement budget against it
-/// (see [`crate::database`]'s module docs).
+/// The Worker var naming this deploy's D1 call limit and its default, shared
+/// with the CLI that writes it into `wrangler.toml`. Every D1 service built
+/// in an invocation spends its calls against it (see [`crate::database`]'s
+/// module docs).
 pub(crate) use impresspress_core::config_vars::{
-    D1_QUERIES_PER_INVOCATION_DEFAULT, D1_QUERIES_PER_INVOCATION_KEY,
+    D1_CALLS_PER_INVOCATION_DEFAULT, D1_CALLS_PER_INVOCATION_KEY,
 };
 
 /// Every `worker::Env` var and secret this crate reads, as one value.
@@ -112,7 +112,7 @@ pub(crate) struct CfEnvironment {
     asset_base_url: Option<String>,
     allow_workers_dev: Option<String>,
     deploy_token: Option<String>,
-    d1_queries_per_invocation: Option<String>,
+    d1_calls_per_invocation: Option<String>,
     d1_rows_log_threshold: Option<String>,
     executor_trace: Option<String>,
 
@@ -174,7 +174,7 @@ impl CfEnvironment {
             asset_base_url: var(env, impresspress_core::ui::assets::ASSET_BASE_URL_VAR),
             allow_workers_dev: var(env, ALLOW_WORKERS_DEV_KEY),
             deploy_token: secret(env, impresspress_core::config_vars::DEPLOY_TOKEN_KEY),
-            d1_queries_per_invocation: var(env, D1_QUERIES_PER_INVOCATION_KEY),
+            d1_calls_per_invocation: var(env, D1_CALLS_PER_INVOCATION_KEY),
             d1_rows_log_threshold: var(env, D1_ROWS_LOG_THRESHOLD_KEY),
             executor_trace: var(env, EXECUTOR_TRACE_KEY),
 
@@ -342,29 +342,29 @@ impl CfEnvironment {
         self.executor_trace = Some(value.to_string());
     }
 
-    /// How many D1 queries one Worker invocation may run: the bound
-    /// `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION`, or
-    /// [`D1_QUERIES_PER_INVOCATION_DEFAULT`] when it is unbound.
+    /// How many D1 calls one Worker invocation may make: the bound
+    /// `IMPRESSPRESS_D1_CALLS_PER_INVOCATION`, or
+    /// [`D1_CALLS_PER_INVOCATION_DEFAULT`] when it is unbound.
     ///
     /// A bound value out of
-    /// [`parse_d1_queries_per_invocation`](impresspress_core::config_vars::parse_d1_queries_per_invocation)'s
+    /// [`parse_d1_calls_per_invocation`](impresspress_core::config_vars::parse_d1_calls_per_invocation)'s
     /// range is an error naming the var, not the default: a deploy that
     /// lowered it for a smaller `limits.subrequests` and mistyped the number
     /// would otherwise run with 1000 and meet the platform's own refusal
-    /// part-way through a write instead of the budget's up front.
-    pub(crate) fn d1_queries_per_invocation(&self) -> Result<u64, String> {
-        let Some(raw) = self.d1_queries_per_invocation.as_deref() else {
-            return Ok(D1_QUERIES_PER_INVOCATION_DEFAULT);
+    /// instead of the budget's.
+    pub(crate) fn d1_calls_per_invocation(&self) -> Result<u64, String> {
+        let Some(raw) = self.d1_calls_per_invocation.as_deref() else {
+            return Ok(D1_CALLS_PER_INVOCATION_DEFAULT);
         };
-        impresspress_core::config_vars::parse_d1_queries_per_invocation(raw)
+        impresspress_core::config_vars::parse_d1_calls_per_invocation(raw)
     }
 
-    /// Bind `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` to the raw string a
+    /// Bind `IMPRESSPRESS_D1_CALLS_PER_INVOCATION` to the raw string a
     /// Worker var would carry. Test-only: production code fills every field
     /// through [`capture`](Self::capture) and nowhere else.
     #[cfg(test)]
-    pub(crate) fn set_d1_queries_per_invocation_for_test(&mut self, value: &str) {
-        self.d1_queries_per_invocation = Some(value.to_string());
+    pub(crate) fn set_d1_calls_per_invocation_for_test(&mut self, value: &str) {
+        self.d1_calls_per_invocation = Some(value.to_string());
     }
 
     /// The rows read past which an invocation logs its `d1_cost` line even
@@ -616,7 +616,7 @@ pub(crate) mod test_support {
             asset_base_url: None,
             allow_workers_dev: None,
             deploy_token: None,
-            d1_queries_per_invocation: None,
+            d1_calls_per_invocation: None,
             d1_rows_log_threshold: None,
             executor_trace: None,
             password_hasher_shards: None,
@@ -667,8 +667,8 @@ pub(crate) mod test_support {
                 e.allow_workers_dev = Some("v".to_string())
             }),
             ("deploy_token", |e| e.deploy_token = Some("v".to_string())),
-            ("d1_queries_per_invocation", |e| {
-                e.d1_queries_per_invocation = Some("v".to_string())
+            ("d1_calls_per_invocation", |e| {
+                e.d1_calls_per_invocation = Some("v".to_string())
             }),
             ("d1_rows_log_threshold", |e| {
                 e.d1_rows_log_threshold = Some("v".to_string())
@@ -812,7 +812,7 @@ mod tests {
             ),
             (ALLOW_WORKERS_DEV_KEY, "1"),
             (impresspress_core::config_vars::DEPLOY_TOKEN_KEY, "token"),
-            (D1_QUERIES_PER_INVOCATION_KEY, "50"),
+            (D1_CALLS_PER_INVOCATION_KEY, "50"),
             (D1_ROWS_LOG_THRESHOLD_KEY, "250"),
             (EXECUTOR_TRACE_KEY, "1"),
             (impresspress_password::protocol::SHARDS_VAR, "5"),
@@ -883,7 +883,7 @@ mod tests {
         );
         assert!(captured.allows_workers_dev());
         assert_eq!(captured.deploy_token(), Some("token"));
-        assert_eq!(captured.d1_queries_per_invocation(), Ok(50));
+        assert_eq!(captured.d1_calls_per_invocation(), Ok(50));
         assert_eq!(captured.d1_rows_log_threshold(), Ok(250));
         assert!(captured.executor_trace_enabled());
         assert_eq!(captured.password_hasher_shards(), Ok(5));
@@ -925,22 +925,22 @@ mod tests {
         }
     }
 
-    /// The D1 query limit: unset is the default 1000, a bound number in range
+    /// The D1 call limit: unset is the default 1000, a bound number in range
     /// is taken as it is (a deploy that lowered it, here to 50), and anything
     /// else — not a whole number, at or below the audit-row reservation,
     /// above D1's maximum — is an error naming the var rather than a silent
     /// fallback to the default.
     #[wasm_bindgen_test]
-    fn the_d1_query_limit_defaults_to_1000_and_refuses_a_malformed_value() {
+    fn the_d1_call_limit_defaults_to_1000_and_refuses_a_malformed_value() {
         let unbound = RecordingEnv::new(&[]);
         assert_eq!(
-            CfEnvironment::capture(&unbound.env).d1_queries_per_invocation(),
-            Ok(D1_QUERIES_PER_INVOCATION_DEFAULT)
+            CfEnvironment::capture(&unbound.env).d1_calls_per_invocation(),
+            Ok(D1_CALLS_PER_INVOCATION_DEFAULT)
         );
         for (raw, limit) in [("50", 50), (" 50 ", 50), ("1000", 1000)] {
-            let env = RecordingEnv::new(&[(D1_QUERIES_PER_INVOCATION_KEY, raw)]);
+            let env = RecordingEnv::new(&[(D1_CALLS_PER_INVOCATION_KEY, raw)]);
             assert_eq!(
-                CfEnvironment::capture(&env.env).d1_queries_per_invocation(),
+                CfEnvironment::capture(&env.env).d1_calls_per_invocation(),
                 Ok(limit),
                 "{raw:?}"
             );
@@ -948,16 +948,13 @@ mod tests {
         // Refused from the var itself, not only by the CLI: a
         // `wrangler_overrides_path` file sets it past the CLI's check. At or
         // below the audit-row reservation, or above D1's maximum of 1000.
-        let reservation = impresspress_core::after_response::AUDIT_ROW_STATEMENTS.to_string();
+        let reservation = impresspress_core::after_response::AUDIT_ROW_CALLS.to_string();
         for raw in ["", "0", "-5", "5O", "fifty", "50.5", "1001", &reservation] {
-            let env = RecordingEnv::new(&[(D1_QUERIES_PER_INVOCATION_KEY, raw)]);
+            let env = RecordingEnv::new(&[(D1_CALLS_PER_INVOCATION_KEY, raw)]);
             let err = CfEnvironment::capture(&env.env)
-                .d1_queries_per_invocation()
+                .d1_calls_per_invocation()
                 .expect_err(raw);
-            assert!(
-                err.contains(D1_QUERIES_PER_INVOCATION_KEY),
-                "{raw:?}: {err}"
-            );
+            assert!(err.contains(D1_CALLS_PER_INVOCATION_KEY), "{raw:?}: {err}");
         }
     }
 

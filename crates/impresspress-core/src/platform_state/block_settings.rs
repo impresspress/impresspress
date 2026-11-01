@@ -196,7 +196,7 @@ fn settings_from_rows(rows: &[BlockSettingsRow]) -> BlockSettings {
 /// a `list` of a missing table runs, and the backend answers "no such
 /// table". So the tolerance is this function's, through an explicit probe:
 /// [`DatabaseService::schema_table_exists`], which asks the backend
-/// (`dbx_table_exists`) whether the table is there.
+/// (`exec::table_exists`) whether the table is there.
 /// [`crate::platform_state::wrap_grants::load`] — the other read on this
 /// same pre-migration path — probes the same way.
 ///
@@ -906,12 +906,22 @@ mod operational_error_tests {
 
     #[async_trait::async_trait]
     impl DatabaseService for AlwaysErrorsOnList {
-        fn statement_budget(
-            &self,
-        ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError>
-        {
-            Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
+        async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+            unreachable!()
         }
+
+        async fn catalog_columns(
+            &self,
+            _table: &str,
+        ) -> Result<Vec<wafer_core::interfaces::database::service::CatalogColumn>, DatabaseError>
+        {
+            unreachable!()
+        }
+
+        async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
         async fn get(&self, _collection: &str, _id: &str) -> Result<Record, DatabaseError> {
             unreachable!("must not read a record after a list failure")
         }

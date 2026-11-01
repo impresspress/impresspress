@@ -1940,7 +1940,9 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            statement_budget: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
         }
 
         async fn create(
@@ -2032,7 +2034,9 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            statement_budget: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
         }
 
         async fn create(
@@ -2116,14 +2120,6 @@ struct FailingReadsDb {
 
 #[async_trait::async_trait]
 impl wafer_core::interfaces::database::service::DatabaseService for FailingReadsDb {
-    fn statement_budget(
-        &self,
-    ) -> Result<
-        wafer_core::interfaces::database::service::StatementBudget,
-        wafer_core::interfaces::database::service::DatabaseError,
-    > {
-        self.inner.statement_budget()
-    }
     async fn get(
         &self,
         collection: &str,
@@ -2403,6 +2399,31 @@ impl wafer_core::interfaces::database::service::DatabaseService for FailingReads
     ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
         self.inner.schema_add_column(table, column).await
     }
+
+    // The catalog reads are reads: a Database page under `break_reads` fails
+    // like every other page, never by delegating past the break.
+    async fn catalog_tables(
+        &self,
+    ) -> Result<Vec<String>, wafer_core::interfaces::database::service::DatabaseError> {
+        Err(simulated_read_failure())
+    }
+
+    async fn catalog_columns(
+        &self,
+        _table: &str,
+    ) -> Result<
+        Vec<wafer_core::interfaces::database::service::CatalogColumn>,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        Err(simulated_read_failure())
+    }
+
+    async fn catalog_row_count(
+        &self,
+        _table: &str,
+    ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+        Err(simulated_read_failure())
+    }
 }
 
 fn simulated_read_failure() -> wafer_core::interfaces::database::service::DatabaseError {
@@ -2445,14 +2466,6 @@ struct FailingWritesDb {
 
 #[async_trait::async_trait]
 impl wafer_core::interfaces::database::service::DatabaseService for FailingWritesDb {
-    fn statement_budget(
-        &self,
-    ) -> Result<
-        wafer_core::interfaces::database::service::StatementBudget,
-        wafer_core::interfaces::database::service::DatabaseError,
-    > {
-        self.inner.statement_budget()
-    }
     async fn get(
         &self,
         collection: &str,
@@ -2714,6 +2727,29 @@ impl wafer_core::interfaces::database::service::DatabaseService for FailingWrite
         column: &wafer_core::interfaces::database::service::Column,
     ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
         self.inner.schema_add_column(table, column).await
+    }
+
+    async fn catalog_tables(
+        &self,
+    ) -> Result<Vec<String>, wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.catalog_tables().await
+    }
+
+    async fn catalog_columns(
+        &self,
+        table: &str,
+    ) -> Result<
+        Vec<wafer_core::interfaces::database::service::CatalogColumn>,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        self.inner.catalog_columns(table).await
+    }
+
+    async fn catalog_row_count(
+        &self,
+        table: &str,
+    ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.catalog_row_count(table).await
     }
 }
 

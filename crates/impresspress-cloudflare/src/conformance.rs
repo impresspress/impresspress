@@ -45,7 +45,7 @@
 //!   miniflare (workerd) test harness with a `[[d1_databases]]` binding — or
 //!   the `@cloudflare/vitest-pool-workers` runner — invoking
 //!   `run_conformance(&D1DatabaseService::new(env.d1("DB")?, "DB",
-//!   D1QueryCount::new(), D1_QUERIES_PER_INVOCATION_DEFAULT)).await` — a
+//!   D1CallCount::new(), D1_CALLS_PER_INVOCATION_DEFAULT)).await` — a
 //!   fresh count and the Workers Paid limit, since the suite is one
 //!   invocation's work. The suite already drops-then-creates its own `conf_*`
 //!   tables, so it is safe against a persistent D1 instance.
@@ -69,15 +69,22 @@
 //!   and a `HashMap`-backed `KvBackend` mock (a larger, production-structure
 //!   change, out of scope for a test-only wiring).
 
-use wafer_core::interfaces::database::{conformance::run_conformance, service::DatabaseService};
+use wafer_core::interfaces::database::{
+    conformance::{run_conformance, run_existence_probe_conformance},
+    service::DatabaseService,
+};
 
 use crate::{database::D1DatabaseService, kv_cached_db::KvCachedD1DatabaseService};
 
 /// Compile-time proof (never executed) that the D1 adapter is a valid argument
 /// to the shared conformance suite. See the module doc for what this enforces
 /// and why a live run is infeasible without a workerd D1 binding.
+///
+/// It also typechecks the strict existence-probe suite, which needs the
+/// adapter's `DbExec` as well; like the rest, it is compile-time only here.
 async fn _d1_adapter_is_conformable(svc: &D1DatabaseService) {
     run_conformance(svc as &dyn DatabaseService).await;
+    run_existence_probe_conformance(svc).await;
 }
 
 /// Compile-time proof (never executed) that the KV-cached wrapper is a valid

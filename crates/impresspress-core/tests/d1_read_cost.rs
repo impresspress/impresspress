@@ -1303,9 +1303,9 @@ const HEADER: &str = "\
 # runs it with the Cloudflare block set). Regenerate with `BLESS=1 just d1-cost`
 # and review the diff: a PR that saves statements or rows shows it here.
 #
-# Section headers count statements (the unit the Worker's D1 budget admits today,
-# a batch counting each of its statements) and D1 calls (the unit D1 itself
-# limits per invocation, a batch counting once).
+# Section headers count D1 calls (the unit D1 limits per invocation and the
+# Worker's budget admits; a batch counts once) and statements (each statement
+# of a batch; rows are per statement).
 #
 # Columns: table, class, statements, rows≈.
 #   COUNT       SELECT COUNT(...): reads every row it counts.
@@ -1393,13 +1393,16 @@ async fn a_cold_isolate_sends_d1_the_golden_statements() {
     }
     // `/_deploy/prepare` is one Worker invocation: the whole provisioning —
     // migrations, seeds, config reads and the closing reads — must fit the
-    // default per-invocation limit.
-    let limit = impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
-    let provisioning = runs[0].provision.statements.len();
+    // default per-invocation limit, in D1 calls. A growth ceiling: the
+    // migrations' own line (`tests/migration_history.rs`, half the limit) is
+    // the one that pins the unit; this one fails only if prepare grows past
+    // the whole limit, and a statement count would pass it today too.
+    let limit = impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_DEFAULT as usize;
+    let provisioning = runs[0].provision.calls;
     if provisioning > limit {
         problems.push(format!(
-            "provisioning sends {provisioning} statements, more than the {limit} D1 queries \
-             `/_deploy/prepare` may run in its one invocation"
+            "provisioning makes {provisioning} D1 calls, more than the {limit} \
+             `/_deploy/prepare` may make in its one invocation"
         ));
     }
 

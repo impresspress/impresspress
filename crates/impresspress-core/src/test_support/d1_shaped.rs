@@ -1,8 +1,9 @@
 //! The platform SQLite service, shaped like the Cloudflare D1 adapter and
 //! recording every statement it is sent.
 //!
-//! On Cloudflare every D1 statement is a network round trip and one query
-//! against the per-invocation budget, so the statements a path sends — and
+//! On Cloudflare every D1 call — a lone statement, or a whole `db.batch()` —
+//! is a network round trip and one call against the per-invocation budget,
+//! so the round trips a path makes — and
 //! which of them it waits on in sequence — are what it costs there. A fake D1
 //! binding in the wasm test harness can count them too, but it cannot execute
 //! a sign-in or a boot: it has no SQL engine behind it. [`D1Shaped`] has one.
@@ -17,8 +18,12 @@
 //!
 //! Every `get`/`list`/`create`/... is the shared `DbExec` default D1 runs too,
 //! so the statements recorded are the ones D1 would be sent — the table-exists
-//! probe included, which records the same `sqlite_master` statement D1's
+//! probe included, which the shared `exec::table_exists` sends through
+//! `run_fetch` on both, so it records the same `sqlite_master` statement D1's
 //! adapter sends.
+//!
+//! A round trip here is one D1 call: `trips().len()` is what the adapter's
+//! `spend_call` counts. A new D1 primitive must keep the two agreeing.
 //!
 //! Users: `impresspress`'s `login_d1_round_trips.rs` (round trips a sign-in
 //! waits on), `tests/migration_history.rs` (statements a fresh install sends)
@@ -29,7 +34,10 @@
 //! names a table fail as D1 would — [`Fault::Unavailable`] for a transient
 //! fault, [`Fault::Internal`] for anything else (`no such table`) — without
 //! the statement reaching SQLite. The statement is still recorded: D1 counts
-//! a query it was sent whether or not it answered.
+//! a call it was sent whether or not it answered. [`D1Shaped::answer_no_rows`]
+//! makes one statement "succeed" with an empty `results` instead, as a
+//! malformed D1 answer would, so a test can drive the strict decode of what
+//! the statement asks.
 
 use std::{
     future::Future,
@@ -46,7 +54,7 @@ use wafer_core::interfaces::database::{
     codec::JsonColumns,
     exec::{BatchOp, BatchResult, DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
-    service::{Column, DatabaseError, Record, StatementBudget, Table, TransactionError},
+    service::{Column, DatabaseError, Record, Table, TransactionError},
 };
 use wafer_sql_utils::Backend;
 
@@ -159,6 +167,7 @@ pub struct D1Shaped {
     cache: SchemaCache,
     ledger: Arc<Ledger>,
     fault: Mutex<Option<(String, Fault)>>,
+    no_rows: Mutex<Option<String>>,
 }
 
 impl D1Shaped {
@@ -170,6 +179,7 @@ impl D1Shaped {
             cache: SchemaCache::new(),
             ledger,
             fault: Mutex::new(None),
+            no_rows: Mutex::new(None),
         }
     }
 
@@ -196,9 +206,26 @@ impl D1Shaped {
         *self.fault.lock().unwrap_or_else(|p| p.into_inner()) = Some((table.to_string(), fault));
     }
 
+    /// From now on, a `run_fetch` of exactly `sql` is recorded and answered
+    /// with no rows, without reaching SQLite and exempt from the fault
+    /// switch: D1 answering a statement with an empty `results`. A read that
+    /// expects a row (the existence probe, a `COUNT`) must refuse it.
+    pub fn answer_no_rows(&self, sql: &str) {
+        *self.no_rows.lock().unwrap_or_else(|p| p.into_inner()) = Some(sql.to_string());
+    }
+
     /// Statements reach SQLite again.
     pub fn clear_fault(&self) {
         *self.fault.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.no_rows.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    fn answers_no_rows(&self, sql: &str) -> bool {
+        self.no_rows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_deref()
+            == Some(sql)
     }
 
     /// The fault `sent` meets, if the switch names a table it touches: in its
@@ -208,8 +235,9 @@ impl D1Shaped {
         let guard = self.fault.lock().unwrap_or_else(|p| p.into_inner());
         let (table, fault) = guard.as_ref()?;
         let names = |s: &Sent| {
-            s.sql.contains(table.as_str())
-                || s.params.iter().any(|p| p.as_str() == Some(table.as_str()))
+            !self.answers_no_rows(&s.sql)
+                && (s.sql.contains(table.as_str())
+                    || s.params.iter().any(|p| p.as_str() == Some(table.as_str())))
         };
         sent.iter().any(names).then(|| match fault {
             Fault::Unavailable => {
@@ -281,10 +309,6 @@ impl DbExec for D1Shaped {
         Some(&self.cache)
     }
 
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Unbounded)
-    }
-
     async fn run_fetch(
         &self,
         sql: &str,
@@ -292,6 +316,9 @@ impl DbExec for D1Shaped {
         json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
         let _trip = self.begin_one(sql, params).await?;
+        if self.answers_no_rows(sql) {
+            return Ok(Vec::new());
+        }
         self.inner.run_fetch(sql, params, json).await
     }
 
@@ -340,14 +367,6 @@ impl DbExec for D1Shaped {
     ) -> Result<f64, DatabaseError> {
         let _trip = self.begin_one(sql, params).await?;
         self.inner.run_scalar_f64(sql, params).await
-    }
-
-    /// The statement D1's adapter sends for the same question, recorded and
-    /// run as one round trip.
-    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        let (sql, params) = wafer_sql_utils::introspect::build_table_exists(table, Backend::Sqlite);
-        let _trip = self.begin_one(&sql, &params).await?;
-        Ok(self.inner.run_scalar_i64(&sql, &params).await? > 0)
     }
 
     /// One round trip for every statement, all-or-nothing as D1's
@@ -432,7 +451,9 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: custom,
             schema_add_column: custom,
-            statement_budget: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
         }
 
         async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {

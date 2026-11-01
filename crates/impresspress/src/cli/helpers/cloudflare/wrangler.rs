@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 pub use impresspress_core::{
-    config_vars::{D1_QUERIES_PER_INVOCATION_DEFAULT, D1_QUERIES_PER_INVOCATION_KEY},
+    config_vars::{D1_CALLS_PER_INVOCATION_DEFAULT, D1_CALLS_PER_INVOCATION_KEY},
     ui::assets::ASSET_BASE_URL_VAR,
     PREPARED_APPLICATION_BUILD_SHA256_VAR, PREPARED_APPLICATION_ID_VAR, PREPARED_PLAN_HASH_VAR,
     PREPARED_PLAN_MODULE_SHA256_VAR, RELEASE_ASSET_KEYS_SHA256_VAR,
@@ -85,12 +85,12 @@ pub struct CloudflareConfig {
     /// deployment that outgrows 100%-capture traffic doesn't have to reach
     /// for a `wrangler_overrides_path` file to dial it down.
     pub head_sampling_rate: f64,
-    /// D1 queries one Worker invocation may run, written into `[vars]` as
-    /// [`D1_QUERIES_PER_INVOCATION_KEY`], resolved by
+    /// D1 calls one Worker invocation may make, written into `[vars]` as
+    /// [`D1_CALLS_PER_INVOCATION_KEY`], resolved by
     /// [`super::env::RawCloudflareConfig::resolve`] from `impresspress.toml`'s
-    /// `[cloudflare].d1_queries_per_invocation`, defaulting to
-    /// [`D1_QUERIES_PER_INVOCATION_DEFAULT`] (1000, which every plan allows).
-    pub d1_queries_per_invocation: u64,
+    /// `[cloudflare].d1_calls_per_invocation`, defaulting to
+    /// [`D1_CALLS_PER_INVOCATION_DEFAULT`] (1000, which every plan allows).
+    pub d1_calls_per_invocation: u64,
     /// Cloudflare cron expressions the Worker's `scheduled` handler runs on,
     /// resolved by [`super::env::RawCloudflareConfig::resolve`] from
     /// `impresspress.toml`'s `[cloudflare].crons`, defaulting to
@@ -507,7 +507,7 @@ fn generate_named(
     std::fs::write(
         &path,
         format!(
-            "{header}{D1_QUERIES_NOTE}{}{body}",
+            "{header}{D1_CALLS_NOTE}{}{body}",
             password_pepper_note(&cfg.password_hasher.worker_name)
         ),
     )
@@ -644,13 +644,13 @@ fn install_password_hasher_binding(
     Ok(())
 }
 
-/// What the generated `[vars]` value of [`D1_QUERIES_PER_INVOCATION_KEY`]
+/// What the generated `[vars]` value of [`D1_CALLS_PER_INVOCATION_KEY`]
 /// means and where it is set, for someone reading the file: the value alone
 /// does not say when to change it.
-const D1_QUERIES_NOTE: &str =
-    "# IMPRESSPRESS_D1_QUERIES_PER_INVOCATION is how many D1 queries one \
-invocation may run: 1000 on Workers Free and Paid alike. Lower it only for a Worker whose \
-limits.subrequests is lower, with [cloudflare].d1_queries_per_invocation in impresspress.toml.\n\n";
+const D1_CALLS_NOTE: &str = "# IMPRESSPRESS_D1_CALLS_PER_INVOCATION is how many D1 calls one \
+invocation may make, a db.batch() counting once: 1000 on Workers Free and Paid alike. Lower it \
+only for a Worker whose limits.subrequests is lower, with [cloudflare].d1_calls_per_invocation \
+in impresspress.toml.\n\n";
 
 /// Where the password pepper goes, for someone reading either Worker's file:
 /// it is in neither, and it belongs to the password-hasher Worker.
@@ -869,13 +869,13 @@ fn base_toml(cfg: &CloudflareConfig, role: ConfigRole) -> toml::Value {
         ASSET_BASE_URL_VAR.into(),
         Value::String(resolve_asset_base_url(!cfg.r2.bucket_name.is_empty())),
     );
-    // D1's per-invocation query limit, which the runtime's statement budget
-    // admits every multi-statement write against. Always written, the
+    // D1's per-invocation call limit, which the runtime's D1 adapter spends
+    // every call against (a `db.batch()` counting once). Always written, the
     // default included, so the generated config states the limit the Worker
     // will run under instead of leaving it to a runtime default.
     vars.insert(
-        D1_QUERIES_PER_INVOCATION_KEY.into(),
-        Value::String(cfg.d1_queries_per_invocation.to_string()),
+        D1_CALLS_PER_INVOCATION_KEY.into(),
+        Value::String(cfg.d1_calls_per_invocation.to_string()),
     );
     // How many password-hasher Durable Object instances hashing is spread
     // across. Always written, the default included, like the D1 limit above.

@@ -40,7 +40,7 @@ use impresspress_core::{
 use serde_json::json;
 use wafer_core::{
     clients::database as db,
-    interfaces::database::service::{DatabaseError, DatabaseService, StatementBudget},
+    interfaces::database::service::{DatabaseError, DatabaseService},
 };
 use wafer_run::Block;
 use wafer_sql_utils::Backend;
@@ -1841,9 +1841,10 @@ async fn an_import_is_one_batch_not_one_call_per_row() {
     );
 }
 
-/// Native SQLite has no per-invocation statement limit, so an import larger
-/// than any fixed per-call cap (the handler once refused a call over 1000
-/// rows or ops) is still one call, not split into several transactions.
+/// Native SQLite has no per-invocation call limit, and no layer caps a
+/// write's size (the handler once refused a call over 1000 rows or ops), so
+/// an import larger than that is still one call, not split into several
+/// transactions.
 #[tokio::test]
 async fn an_import_past_a_thousand_rows_is_still_one_batch() {
     let (ctx, log) = counting_ctx().await;
@@ -1957,22 +1958,26 @@ async fn a_failed_import_leaves_the_existing_users_and_credentials_in_place() {
     assert_eq!(ids_in(&ctx, user_roles::TABLE).await, ["role_existing"]);
 }
 
-/// Reports a fixed per-invocation statement budget in front of the real
-/// SQLite service, the way a Cloudflare D1 service reports its query limit.
-/// Every operation is the inner service's.
-struct BudgetedDb {
+/// The real SQLite service behind a call budget on `batch`, the call an
+/// import writes with: it counts every `batch` it is sent, and once
+/// `calls_left` is spent it refuses the next before it reaches the database,
+/// with the `CallBudgetExhausted` a Cloudflare D1 service answers when the
+/// invocation has no call left. Every other operation is the inner
+/// service's.
+struct CallBudgetedDb {
     inner: std::sync::Arc<dyn DatabaseService>,
-    budget: StatementBudget,
+    calls_left: std::sync::atomic::AtomicUsize,
+    batches: std::sync::atomic::AtomicUsize,
 }
 
-impl BudgetedDb {
+impl CallBudgetedDb {
     fn inner_service(&self) -> &dyn DatabaseService {
         self.inner.as_ref()
     }
 }
 
 wafer_core::forward_database_service! {
-    impl DatabaseService for BudgetedDb {
+    impl DatabaseService for CallBudgetedDb {
         forward_to inner_service();
 
         ops {
@@ -1995,7 +2000,7 @@ wafer_core::forward_database_service! {
             increment_field_where: forward,
             upsert: forward,
             aggregate: forward,
-            batch: forward,
+            batch: custom,
             insert_guarded: forward,
             update_guarded: forward,
             ensure_schema_table: forward,
@@ -2004,41 +2009,87 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            statement_budget: custom,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
         }
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(self.budget)
+        async fn batch(
+            &self,
+            ops: Vec<wafer_core::interfaces::database::service::WriteOp>,
+        ) -> Result<Vec<wafer_core::interfaces::database::service::WriteOutcome>, DatabaseError> {
+            use std::sync::atomic::Ordering;
+            self.batches.fetch_add(1, Ordering::SeqCst);
+            let left = self.calls_left.load(Ordering::SeqCst);
+            if left == 0 {
+                return Err(DatabaseError::CallBudgetExhausted(
+                    "this invocation has no D1 call left".into(),
+                ));
+            }
+            self.calls_left.store(left - 1, Ordering::SeqCst);
+            self.inner.batch(ops).await
         }
     }
 }
 
-/// An import is admitted against the backend's statement budget as a whole:
-/// one that does not fit what the invocation has left is refused before
-/// anything runs. Split into one call per table, its first calls would each
-/// fit and commit, and the refusal would land partway through.
-#[tokio::test]
-async fn an_import_over_the_statement_budget_writes_nothing() {
-    let ctx = ctx_with_an_existing_owner()
-        .await
-        .wrap_database_service(|inner| {
-            std::sync::Arc::new(BudgetedDb {
-                inner,
-                // 61 statements fit the limit; 40 are left.
-                budget: StatementBudget::Limited {
-                    limit: 100,
-                    used: 60,
-                },
-            })
+fn call_budgeted(
+    ctx: TestContext,
+    calls_left: usize,
+) -> (TestContext, std::sync::Arc<CallBudgetedDb>) {
+    let budgeted = std::sync::Mutex::new(None);
+    let ctx = ctx.wrap_database_service(|inner| {
+        let db = std::sync::Arc::new(CallBudgetedDb {
+            inner,
+            calls_left: std::sync::atomic::AtomicUsize::new(calls_left),
+            batches: std::sync::atomic::AtomicUsize::new(0),
         });
+        *budgeted.lock().unwrap() = Some(db.clone());
+        db
+    });
+    let db = budgeted
+        .into_inner()
+        .unwrap()
+        .expect("the service was wrapped");
+    (ctx, db)
+}
+
+/// An import is ONE `batch`, so one database call: refused at that call, it
+/// writes nothing, with the call budget's code for the client. Split into one
+/// call per table, its first calls would commit before the refusal.
+#[tokio::test]
+async fn an_import_refused_at_its_one_batch_writes_nothing() {
+    let (ctx, db) = call_budgeted(ctx_with_an_existing_owner().await, 0);
 
     let err = data_snapshot::import(&as_dev(&ctx), &wide_snapshot(30, 30))
         .await
-        .expect_err("61 statements do not fit the 40 left");
+        .expect_err("no call is left for the import's batch");
     assert_eq!(err.code, wafer_run::ErrorCode::ResourceExhausted, "{err:?}");
+    assert_eq!(
+        err.detail_code(),
+        Some(wafer_block::wire::database::CALL_BUDGET_EXHAUSTED),
+        "{err:?}"
+    );
+    assert_eq!(db.batches.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     assert_eq!(ids_in(&ctx, users::TABLE).await, ["user_existing"]);
     assert!(ids_in(&ctx, PRODUCTS_TABLE).await.is_empty());
+}
+
+/// An import of any size is that one call: with exactly one call left, an
+/// import of more than 1,000 rows — more than D1's per-invocation limit, had
+/// each row counted — runs whole. Split into a second call, it would be
+/// refused there and leave the import half-written.
+#[tokio::test]
+async fn an_import_of_any_size_is_one_batch() {
+    let (ctx, db) = call_budgeted(ctx_with_an_existing_owner().await, 1);
+
+    data_snapshot::import(&as_dev(&ctx), &wide_snapshot(600, 600))
+        .await
+        .expect("one call runs the whole import");
+    assert_eq!(db.batches.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    assert_eq!(ids_in(&ctx, users::TABLE).await.len(), 600);
+    assert_eq!(ids_in(&ctx, PRODUCTS_TABLE).await.len(), 600);
 }
 
 // ---------------------------------------------------------------------------

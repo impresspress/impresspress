@@ -383,12 +383,22 @@ impl DatabaseService for KvCachedD1DatabaseService {
         self.inner.schema_add_column(table, column).await
     }
 
-    /// The wrapped D1 service's budget: the cache answers some reads without
-    /// a statement, but every statement it does send is D1's, counted there.
-    fn statement_budget(
+    /// The admin Database page's catalog reads pass through uncached: they
+    /// read the schema and every table's row count, which no cache key
+    /// covers, and each is one D1 call, counted by the wrapped service.
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        self.inner.catalog_tables().await
+    }
+
+    async fn catalog_columns(
         &self,
-    ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError> {
-        self.inner.statement_budget()
+        table: &str,
+    ) -> Result<Vec<wafer_core::interfaces::database::service::CatalogColumn>, DatabaseError> {
+        self.inner.catalog_columns(table).await
+    }
+
+    async fn catalog_row_count(&self, table: &str) -> Result<i64, DatabaseError> {
+        self.inner.catalog_row_count(table).await
     }
 
     // Bulk-write ops on cached tables hard-error to avoid silent stale-cache footguns.
@@ -1130,11 +1140,20 @@ mod tests {
             unreachable!()
         }
 
-        fn statement_budget(
+        async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn catalog_columns(
             &self,
-        ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError>
+            _table: &str,
+        ) -> Result<Vec<wafer_core::interfaces::database::service::CatalogColumn>, DatabaseError>
         {
-            Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
+            unreachable!()
+        }
+
+        async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+            unreachable!()
         }
     }
 

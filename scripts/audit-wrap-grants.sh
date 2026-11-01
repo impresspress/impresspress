@@ -25,7 +25,10 @@
 # code review.
 #
 # Out of scope:
-#   - Raw SQL paths (`db::query_raw`, `db::exec_raw`) — admin-only by design.
+#   - Raw SQL paths (`db::query_raw`, `db::exec_raw`) and the catalog reads
+#     (`db::catalog_tables`, `db::catalog_columns`, `db::catalog_row_count`),
+#     which WRAP gates on the same `__raw_sql__` resource — admin-only by
+#     design.
 #   - HTTP-style cross-block calls (`ctx.call_block_buffered(...)`) — they
 #     don't set `wrap.resource` meta, so WRAP doesn't gate them today.
 #     That's a separate design question; see PR #81 description.

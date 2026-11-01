@@ -190,37 +190,34 @@ fn every_registered_block_names_its_feature() {
 }
 
 /// The budget: `/_deploy/prepare` applies a fresh install in ONE Worker
-/// invocation, and until a D1 batch is admitted as one call the adapter
-/// admits each statement, so the statements sent — every file's statements
-/// and its ledger row, plus the runner's own (the ledger table, the ledger
-/// read, the record's read and write, the fast-path read, and the
-/// executor's introspection of each table it touches) — must fit the
-/// default per-invocation limit ([`D1_QUERIES_PER_INVOCATION_DEFAULT`]).
-/// Counted through the D1-shaped decorator, statement by statement as D1
-/// receives them, not computed, so the runner's next change is measured.
+/// invocation, and D1 limits the calls one invocation makes, a `db.batch()`
+/// counting once. So the calls sent — one per migration file with its ledger
+/// row (one transaction, one batch), plus the runner's own (the ledger table,
+/// the ledger read, the record's read and write, the fast-path read, and the
+/// executor's introspection of each table it touches) — must fit half the
+/// default per-invocation limit ([`D1_CALLS_PER_INVOCATION_DEFAULT`]), which
+/// leaves the other half for the funnel's seeds and reads. Counted through
+/// the D1-shaped decorator, one round trip per call as D1 receives them, not
+/// computed, so the runner's next change is measured. The statements are
+/// printed too: they are what rows are counted by, never what is limited.
 ///
 /// This is the migrations' share alone. The whole invocation — these plus
 /// the funnel's seeds, config reads and closing reads — is
-/// `tests/d1_read_cost.rs`'s provision phase, which asserts the same limit
-/// over all of it.
+/// `tests/d1_read_cost.rs`'s provision phase, which holds all of it to the
+/// whole limit.
 ///
-/// **The line is interim.** It used to be half the limit, under an older
-/// count (each migration statement, plus one per other database call, without
-/// the introspection those calls send), and the ledger plan's decision U-IP5-2
-/// was that crossing it schedules batch accounting rather than a higher line.
-/// Counted in adapter statements, the install had already crossed it
-/// (534 > 500), so batch accounting is the next producer-first change
-/// (PR267-review M1): wafer-run counts a `db.batch()` as the one call D1
-/// counts, then the adapter's guard — and this test, `config_vars.rs`'s budget
-/// doc and the harness's — re-derive in D1 calls (172 for the migrations and
-/// 214 for the whole prepare, as measured today).
-/// Until then the line is the adapter's own refusal point, the limit itself.
+/// History: the line was half the limit under an older per-statement count;
+/// counted in adapter statements the install crossed it (534 > 500), which
+/// under the ledger plan's decision U-IP5-2 scheduled batch accounting
+/// rather than a higher line (PR267-review M1). wafer-run now counts a
+/// `db.batch()` as the one call D1 counts (WR-4), and this line is half the
+/// limit again, in calls.
 ///
 /// It counts what a Cloudflare build migrates ([`cloudflare_blocks`]): a
 /// block the Worker cannot compile never runs in its prepare. Every one of
 /// those blocks must be compiled into this test, or the count is short.
 ///
-/// [`D1_QUERIES_PER_INVOCATION_DEFAULT`]: impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT
+/// [`D1_CALLS_PER_INVOCATION_DEFAULT`]: impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_DEFAULT
 #[tokio::test]
 async fn a_cloudflare_fresh_install_fits_the_d1_budget() {
     let on_cloudflare = cloudflare_blocks();
@@ -254,12 +251,13 @@ async fn a_cloudflare_fresh_install_fits_the_d1_budget() {
         sent - statements - files,
         trips.len()
     );
-    let limit = impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
+    let calls = trips.len();
+    let limit = impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_DEFAULT as usize / 2;
     assert!(
-        sent <= limit,
-        "a Cloudflare fresh install sends {sent} statements ({statements} in files, {files} \
-         ledger rows, the rest the runner's own), more than the {limit} D1 queries \
-         `/_deploy/prepare` may run in its one invocation"
+        calls <= limit,
+        "a Cloudflare fresh install makes {calls} D1 calls ({sent} statements: {statements} in \
+         files, {files} ledger rows, the rest the runner's own), more than the {limit} calls — \
+         half of what `/_deploy/prepare` may make in its one invocation — its migrations may use"
     );
 }
 

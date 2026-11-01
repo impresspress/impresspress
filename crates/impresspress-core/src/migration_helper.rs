@@ -642,7 +642,7 @@ impl MigrationError {
     /// The code a failed `Init` answers with: `FailedPrecondition` for a
     /// [`Refusal`]; the database's own classification for a file or a step
     /// that failed (`Unavailable` stays `Unavailable`, so the runtime retries
-    /// the `Init`; a statement-budget refusal keeps its code and detail
+    /// the `Init`; a call-budget refusal keeps its code and detail
     /// code); for an undecided file, the ledger read's classification.
     pub fn code(&self) -> ErrorCode {
         match self.kind.as_ref() {
@@ -662,7 +662,7 @@ impl MigrationError {
     }
 
     /// This error as the [`WaferError`] a failed `Init` returns: [`Self::code`]
-    /// and this error's text, with the statement-budget detail code when the
+    /// and this error's text, with the call-budget detail code when the
     /// failure was one.
     pub fn to_wafer_error(&self) -> WaferError {
         let error = WaferError::new(self.code(), self.to_string());
@@ -698,19 +698,12 @@ impl std::fmt::Display for MigrationError {
             } => {
                 let sent = statements.len();
                 match failure.detail_code.as_deref() {
-                    Some(wafer_block::wire::database::STATEMENT_BUDGET_EXHAUSTED) => write!(
-                        f,
-                        "{block}: migration `{file}` was not sent: its {sent} statements \
-                         (its ledger row included, admitted whole) do not fit what this \
-                         invocation has left of its statement budget; earlier files stay \
-                         recorded, and a fresh invocation resumes at this one: {}",
-                        failure.message
-                    ),
-                    Some(wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT) => write!(
+                    Some(wafer_block::wire::database::CALL_BUDGET_EXHAUSTED) => write!(
                         f,
                         "{block}: migration `{file}` was not sent: its {sent} statements (its \
-                         ledger row included) are more than one invocation may run; deploy it \
-                         once with a statement budget of at least {sent}: {}",
+                         ledger row included) are one call, and this invocation had no call \
+                         left; earlier files stay recorded, and a fresh invocation resumes at \
+                         this one: {}",
                         failure.message
                     ),
                     _ => match failure.statement.and_then(|index| statements.get(index)) {
@@ -805,7 +798,7 @@ impl std::fmt::Display for Refusal {
 }
 
 /// A database operation of the runner's own that failed: the code it was
-/// classified as, the statement-budget detail code if it was one, and the
+/// classified as, the call-budget detail code if it was one, and the
 /// message.
 #[derive(Debug, Clone)]
 struct StepError {
@@ -835,7 +828,7 @@ impl From<DatabaseError> for StepError {
 }
 
 /// A file's transaction that did not commit, as either path reports it: the
-/// classification, the statement-budget detail code if it was a budget
+/// classification, the call-budget detail code if it was a budget
 /// refusal, the failing statement's index when the backend says which, and
 /// the message. Diagnostic only: what happens next is decided by the ledger.
 #[derive(Debug, Clone)]
@@ -2266,7 +2259,9 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
                 schema_columns: forward,
                 schema_drop_table: forward,
                 schema_add_column: forward,
-                statement_budget: forward,
+                catalog_tables: forward,
+                catalog_columns: forward,
+                catalog_row_count: forward,
             }
 
             async fn exec_raw_transaction(

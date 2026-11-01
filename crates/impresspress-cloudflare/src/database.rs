@@ -15,75 +15,85 @@
 //! D1's native `db.batch()`: the statements run in order inside one implicit
 //! transaction and a failing statement rolls every earlier one back.
 //!
-//! ## The per-invocation statement budget
+//! ## The per-invocation call budget
 //!
-//! D1 runs at most a fixed number of queries per Worker invocation, 1,000 on
-//! Workers Free and Paid alike (see "Which limit" below). The
-//! `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` Worker var states it (default
-//! 1000; lower only for a Worker whose `limits.subrequests` is lower), read
-//! once per invocation by
+//! D1 runs at most a fixed number of calls per Worker invocation, 1,000 on
+//! Workers Free and Paid alike (see "Which limit" below), and a `db.batch()`
+//! is ONE call whatever its length. D1's limits page says so ("a `db.batch()`
+//! call counts as a single query against it, not one query per statement"),
+//! and it was measured on a Free account on 2026-10-23: 2,998 statements ran
+//! in one invocation as two batches of 1,000 and 998 lone statements, and a
+//! batch of 1,100 statements was one call. The
+//! `IMPRESSPRESS_D1_CALLS_PER_INVOCATION` Worker var states the limit
+//! (default 1000; lower only for a Worker whose `limits.subrequests` is
+//! lower), read once per invocation by
 //! [`CfEnvironment::capture`](crate::environment::CfEnvironment::capture).
 //!
-//! Every D1 service built in one invocation shares one [`D1QueryCount`],
+//! Every D1 service built in one invocation shares one [`D1CallCount`],
 //! created at the Worker entry (`run_with_config`, `run_scheduled_with_config`)
-//! and counted ONLY in the statement-sending primitives below: one per
+//! and spent ONLY in the call-sending primitives below, through
+//! [`D1DatabaseService::spend_call`]: one call per
 //! `run_fetch`/`run_fetch_one`/`run_execute`/`run_scalar_*`/`query_raw`, and
-//! one per
-//! statement of a `run_batch`/`run_transaction` (D1's limits page does not say
-//! whether a `db.batch()` counts as one query or N; N is the conservative
-//! reading). A statement is counted when it is sent, not when it succeeds,
-//! because D1 counts it either way. [`DbExec::statement_budget`] reports that
-//! count against the limit, and `wafer-core` admits every `create_many` and
-//! `batch` against it — in the database handler before the service runs, and
-//! again before the transaction's first statement — so a write the invocation
-//! cannot finish is refused whole instead of failing part-way inside D1. Every
-//! primitive also refuses, before sending, a statement past the reported
-//! limit.
+//! one per `run_batch`/`run_transaction` — the one `db.batch()` each sends —
+//! as `DbExec`'s "Per-invocation call limits" contract counts. A call is
+//! counted when it is sent, not when it succeeds, because D1 counts it either
+//! way, and a call past the limit is refused before it is sent with
+//! [`DatabaseError::CallBudgetExhausted`]. Nothing is admitted ahead of a
+//! call: a write is one call, so the refusal at that call refuses it whole,
+//! and nothing of it ran. The count also keeps the statements each call
+//! carried, for the `d1_cost` line only (see [`D1Cost`]).
 //!
 //! The counter is the invocation's, not the isolate's: one isolate interleaves
 //! concurrent requests, and each has its own D1 limit. So it is never a
 //! thread-local.
 //!
-//! A request's own services report D1's limit less the statements its
-//! [`D1QueryCount`] reserves for the request's audit row
-//! (`impresspress_core::after_response::AUDIT_ROW_STATEMENTS`, none when the
+//! A request's own services see D1's limit less the calls its
+//! [`D1CallCount`] reserves for the request's audit row
+//! (`impresspress_core::after_response::AUDIT_ROW_CALLS`, none when the
 //! request-log policy is `off`); the row is written afterwards through a
-//! [`D1QueryCount::for_reserved_work`] handle that may use them, so it fits
+//! [`D1CallCount::for_reserved_work`] handle that may use them, so it fits
 //! however the request spent its budget. Then the reservation is released,
 //! and the request's deferred tasks run on everything the row left.
 //!
 //! ### Which limit
 //!
-//! A D1 query is a subrequest to a Cloudflare internal service. The Workers
-//! limits page gives two subrequest rows: "Subrequests per invocation" (50 on
-//! Free, 10,000 by default on Paid), which is `fetch()` to the outside, and
-//! "Subrequests to internal services" (1,000 on Free, the configured limit on
-//! Paid), which is D1, KV and R2. D1's own limits page still says 50 queries
-//! per invocation on Free and 1,000 on Paid, but a Free-plan Worker runs a
-//! fresh database's `/_deploy/prepare` — over 250 D1 queries — in one
-//! invocation, so the internal-services row is the one D1 is held to. The
-//! default of 1,000 is within it on both plans, and within D1's page for Paid.
+//! A D1 call is a subrequest to a Cloudflare service. The Workers limits page
+//! gives two subrequest rows: "Subrequests per invocation" (50 on Free,
+//! 10,000 by default on Paid), and "Subrequests to internal services" (1,000
+//! on Free, the configured limit on Paid); its subrequest definition names
+//! D1, KV and R2 as Cloudflare services. D1's own limits page lists "Queries
+//! per Worker invocation" as 50 on Free and 1,000 on Paid, deferring to the
+//! Workers subrequest limits, but the measurement above ran 2,998 statements
+//! in 1,000 calls on a Free account, and a fresh database's
+//! `/_deploy/prepare` makes over 200 calls in one invocation there, so 1,000
+//! calls is what D1 enforces. The default of 1,000 is within it on both
+//! plans.
 //!
-//! The budget counts D1 queries and nothing else. The Workers page puts KV
-//! and R2 operations in that same internal-services row, and neither page
-//! says whether they share one count with D1's queries; none of them is
-//! counted here.
+//! The budget counts D1 calls and nothing else. The Workers page puts KV and
+//! R2 operations among the same subrequests, and neither page says whether
+//! they share one count with D1's calls; none of them is counted here (the KV
+//! row cache's reads included). So D1 can refuse a call this count admitted,
+//! with its own "Too many API requests by single Worker invocation"; [`db_err`]
+//! and [`js_failure`] map that text to the same
+//! [`DatabaseError::CallBudgetExhausted`], so it is answered exactly as this
+//! count's own refusal is.
 //!
 //! Sources: <https://developers.cloudflare.com/d1/platform/limits/>,
 //! <https://developers.cloudflare.com/workers/platform/limits/#subrequests>.
 //!
 //! A refusal because the invocation has run out is
-//! [`DatabaseError::ResourceExhausted`], which a client sees as HTTP 429. It
-//! does NOT mean "retry later": the same request retried does the same work
-//! and is refused again, so a client that auto-retries 429s would loop. It
-//! means this request asked for more statements than one invocation may run;
-//! the fix is a smaller request (or, where the deploy stated a lowered
-//! `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION`, a higher one). A write larger than the whole
-//! limit is `InvalidArgument`.
+//! [`DatabaseError::CallBudgetExhausted`], which a client sees as HTTP 429
+//! with the detail code `database.call_budget_exhausted`. It does NOT mean
+//! "retry later": the same request retried does the same work and is refused
+//! again, so a client that auto-retries 429s would loop. It means this
+//! request made more calls than one invocation may; the fix is a request that
+//! does less (or, where the deploy stated a lowered
+//! `IMPRESSPRESS_D1_CALLS_PER_INVOCATION`, a higher one).
 //!
 //! ## A taken key
 //!
-//! D1 reports a failed statement only as text, so every error is classified by
+//! D1 reports a failed statement only as text, so every error but the
+//! platform's call-limit refusal (above) is classified by
 //! [`impresspress_core::sqlite_text_error::statement_error`]: a primary- or
 //! unique-key violation is [`DatabaseError::AlreadyExists`], as the native
 //! backends report it from the driver's code; one of D1's transient texts (a
@@ -142,12 +152,12 @@ use wafer_core::interfaces::database::{
     exec::{BatchOp, BatchResult, DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
     service::{
-        AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
-        GuardedUpdate, Record, RecordData, RecordList, StatementBudget, Table, TransactionError,
+        AggregateSpec, CapGuard, CatalogColumn, Column, DatabaseError, DatabaseService,
+        GuardedInsert, GuardedUpdate, Record, RecordData, RecordList, Table, TransactionError,
         UpsertSpec, WriteOp, WriteOutcome,
     },
 };
-use wafer_sql_utils::{introspect, Backend};
+use wafer_sql_utils::Backend;
 use wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
@@ -211,10 +221,10 @@ pub(crate) fn forget_isolate_schema() {
     ISOLATE_SCHEMA_CACHE.with(IdentityCache::clear);
 }
 
-/// The D1 statements one Worker invocation has sent, shared by every
+/// The D1 calls one Worker invocation has sent, shared by every
 /// [`D1DatabaseService`] built in that invocation (see the module docs), the
-/// statements of the invocation's limit reserved for its audit row, and what
-/// D1 reported those statements cost.
+/// calls of the invocation's limit reserved for its audit row, the statements
+/// those calls carried, and what D1 reported those statements cost.
 ///
 /// Create one at the Worker entry, once per `fetch` or `scheduled`
 /// invocation, and hand a clone to each service built while serving it: the
@@ -224,7 +234,7 @@ pub(crate) fn forget_isolate_schema() {
 /// between two: an isolate interleaves concurrent requests, and each has its
 /// own limit.
 ///
-/// [`reserve`](Self::reserve) holds statements back from every service built
+/// [`reserve`](Self::reserve) holds calls back from every service built
 /// from this count, so the request cannot spend them however it spends its
 /// budget; [`for_reserved_work`](Self::for_reserved_work) is the handle the
 /// audit row is written with, which may use them; and
@@ -233,18 +243,17 @@ pub(crate) fn forget_isolate_schema() {
 ///
 /// ## Rows read and written
 ///
-/// Every statement whose D1 result carries a `meta` adds that meta's
-/// `rows_read` and `rows_written` — the figures D1 bills, and the ones its
-/// analytics sum per database — to the invocation's [`D1Cost`]. A batch
-/// answers one result per statement, and each is added. A statement whose
-/// result reports no meta is still counted as sent, and the gap between the
-/// two is [`D1Cost::unmetered`]: a failed statement, and every `query_raw`,
-/// which reads through `raw()` (see [`DbExec::query_raw`] on
-/// [`D1DatabaseService`]), whose answer has no meta. `query_raw` is how the
-/// admin block's database pages read: the SQL explorer's typed query, and
-/// also the table list, each table's row count (a full `COUNT(*)`) and a
-/// table's column info, built by `wafer_sql_utils::introspect`. Those three
-/// stay unmetered until wafer-core has a typed operation for each.
+/// Rows are per statement, not per call. Every statement whose D1 result
+/// carries a `meta` adds that meta's `rows_read` and `rows_written` — the
+/// figures D1 bills, and the ones its analytics sum per database — to the
+/// invocation's [`D1Cost`]. A batch answers one result per statement, and
+/// each is added. A statement whose result reports no meta is still counted
+/// as sent, and the gap between the two is [`D1Cost::unmetered`]: a failed
+/// statement, and every `query_raw`, which reads through `raw()` (see
+/// [`DbExec::query_raw`] on [`D1DatabaseService`]), whose answer has no meta.
+/// `query_raw` is the admin SQL explorer's read, the SQL a person typed; the
+/// admin Database page's table list, row counts and column info are the
+/// typed `catalog_*` reads, which go through `all()` and are metered.
 ///
 /// A count made by [`reporting_at_end`](Self::reporting_at_end) hands its
 /// [`D1Cost`] to a report once, when its last handle is dropped. That is the
@@ -252,7 +261,7 @@ pub(crate) fn forget_isolate_schema() {
 /// audit row, the deferred tasks and a streamed body's final writes run in
 /// `ctx.wait_until` on clones of the same count.
 #[derive(Clone, Default)]
-pub struct D1QueryCount {
+pub struct D1CallCount {
     tally: Rc<InvocationTally>,
     spends_reservation: bool,
 }
@@ -278,11 +287,15 @@ impl BuildKind {
     }
 }
 
-/// What one invocation's D1 statements cost, as D1 reported it (see
-/// [`D1QueryCount`]).
+/// What one invocation's D1 calls cost, as D1 reported it (see
+/// [`D1CallCount`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct D1Cost {
-    /// Statements sent, through every handle.
+    /// Calls sent, through every handle: the unit D1 limits per invocation,
+    /// a `db.batch()` counting once.
+    pub calls: u64,
+    /// Statements those calls carried: each statement of a batch, and one
+    /// per lone call. Rows are per statement.
     pub statements: u64,
     /// Of those, the statements whose result reported its meta.
     pub metered: u64,
@@ -301,13 +314,14 @@ impl D1Cost {
     }
 }
 
-/// The report a [`D1QueryCount::reporting_at_end`] count hands its cost to.
+/// The report a [`D1CallCount::reporting_at_end`] count hands its cost to.
 type CostReport = Box<dyn FnOnce(D1Cost)>;
 
-/// The state every handle of one invocation's [`D1QueryCount`] shares.
+/// The state every handle of one invocation's [`D1CallCount`] shares.
 #[derive(Default)]
 struct InvocationTally {
-    sent: Cell<u64>,
+    calls: Cell<u64>,
+    statements: Cell<u64>,
     reserved: Cell<u64>,
     metered: Cell<u64>,
     rows_read: Cell<u64>,
@@ -319,7 +333,8 @@ struct InvocationTally {
 impl InvocationTally {
     fn cost(&self) -> D1Cost {
         D1Cost {
-            statements: self.sent.get(),
+            calls: self.calls.get(),
+            statements: self.statements.get(),
             metered: self.metered.get(),
             rows_read: self.rows_read.get(),
             rows_written: self.rows_written.get(),
@@ -328,7 +343,7 @@ impl InvocationTally {
     }
 }
 
-/// The last handle is gone, so no statement can be sent or metered on this
+/// The last handle is gone, so no call can be sent or metered on this
 /// count again: the invocation's D1 work is over.
 impl Drop for InvocationTally {
     fn drop(&mut self) {
@@ -338,7 +353,7 @@ impl Drop for InvocationTally {
     }
 }
 
-impl D1QueryCount {
+impl D1CallCount {
     /// A fresh count for a new invocation, reserving nothing and reporting
     /// nothing.
     pub fn new() -> Self {
@@ -353,13 +368,13 @@ impl D1QueryCount {
         count
     }
 
-    /// Hold `statements` of the invocation's limit back from every service
-    /// built from this count, other than [`for_reserved_work`] handles: they
-    /// report a limit that much lower and refuse any statement past it.
+    /// Hold `calls` of the invocation's limit back from every service built
+    /// from this count, other than [`for_reserved_work`] handles: they see a
+    /// limit that much lower and refuse any call past it.
     ///
     /// [`for_reserved_work`]: Self::for_reserved_work
-    pub fn reserve(&self, statements: u64) {
-        self.tally.reserved.set(statements);
+    pub fn reserve(&self, calls: u64) {
+        self.tally.reserved.set(calls);
     }
 
     /// Give the reservation back: every service built from this count may
@@ -377,12 +392,12 @@ impl D1QueryCount {
         }
     }
 
-    /// Statements sent in this invocation so far, through every handle.
-    pub fn sent(&self) -> u64 {
-        self.tally.sent.get()
+    /// Calls sent in this invocation so far, through every handle.
+    pub fn calls(&self) -> u64 {
+        self.tally.calls.get()
     }
 
-    /// What this invocation's statements have cost so far, through every
+    /// What this invocation's calls have cost so far, through every
     /// handle.
     pub fn cost(&self) -> D1Cost {
         self.tally.cost()
@@ -395,14 +410,14 @@ impl D1QueryCount {
         self.tally.built.set(Some(kind));
     }
 
-    /// The statements currently reserved, for a test that checks when the
+    /// The calls currently reserved, for a test that checks when the
     /// reservation is released.
     #[cfg(test)]
     pub(crate) fn reserved_for_test(&self) -> u64 {
         self.tally.reserved.get()
     }
 
-    /// The statements a service built from this handle must leave unused.
+    /// The calls a service built from this handle must leave unused.
     fn held_back(&self) -> u64 {
         if self.spends_reservation {
             0
@@ -411,10 +426,14 @@ impl D1QueryCount {
         }
     }
 
-    fn add(&self, statements: usize) {
+    /// Count one call carrying `statements` statements.
+    fn add_call(&self, statements: usize) {
         let statements = u64::try_from(statements).unwrap_or(u64::MAX);
         let tally = &self.tally;
-        tally.sent.set(tally.sent.get().saturating_add(statements));
+        tally.calls.set(tally.calls.get().saturating_add(1));
+        tally
+            .statements
+            .set(tally.statements.get().saturating_add(statements));
     }
 
     /// Add one statement's result to the invocation's cost: its rows read and
@@ -455,11 +474,11 @@ pub struct D1DatabaseService {
     /// service in the isolate addresses the same D1 database, and each of
     /// them is built per request.
     schema_cache: Rc<SchemaCache>,
-    /// This invocation's statement count (see [`D1QueryCount`]).
-    queries: D1QueryCount,
-    /// Statements one invocation may send: this deploy's
-    /// `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION`.
-    query_limit: u64,
+    /// This invocation's call count (see [`D1CallCount`]).
+    calls: D1CallCount,
+    /// Calls one invocation may send: this deploy's
+    /// `IMPRESSPRESS_D1_CALLS_PER_INVOCATION`.
+    call_limit: u64,
 }
 
 impl D1DatabaseService {
@@ -469,27 +488,37 @@ impl D1DatabaseService {
     /// isolate's schema cache ([`isolate_schema_cache`]): two bindings are two
     /// databases, and one table name can name a different schema in each.
     ///
-    /// `queries` is the invocation's statement count, shared with every other
-    /// D1 service built in it, and `query_limit` the statements one invocation
-    /// may send (see the module docs on the per-invocation budget).
-    pub fn new(db: D1Database, binding: &str, queries: D1QueryCount, query_limit: u64) -> Self {
+    /// `calls` is the invocation's call count, shared with every other D1
+    /// service built in it, and `call_limit` the calls one invocation may
+    /// send (see the module docs on the per-invocation budget).
+    pub fn new(db: D1Database, binding: &str, calls: D1CallCount, call_limit: u64) -> Self {
         Self {
             db,
             schema_cache: isolate_schema_cache(binding),
-            queries,
-            query_limit,
+            calls,
+            call_limit,
         }
     }
 
-    /// Count `statements` about to be sent, or refuse them — before they
-    /// reach D1 — when they would take the invocation past the limit this
-    /// service reports: D1's own limit less what its [`D1QueryCount`] holds
-    /// back. Refusing single statements too, not only the multi-statement
-    /// writes `wafer-core` admits, is what keeps held-back statements free
-    /// for the work they are reserved for.
-    fn send(&self, statements: usize) -> Result<(), DatabaseError> {
-        DbExec::statement_budget(self)?.admit(statements, "this statement")?;
-        self.queries.add(statements);
+    /// Count one call about to be sent, carrying `statements` statements, or
+    /// refuse it — before it reaches D1 — with
+    /// [`DatabaseError::CallBudgetExhausted`] when the invocation has no call
+    /// left of the limit this service sees: D1's own limit less what its
+    /// [`D1CallCount`] holds back. Every call-sending primitive spends here,
+    /// whatever it carries, which is what keeps held-back calls free for the
+    /// work they are reserved for.
+    pub(crate) fn spend_call(&self, statements: usize) -> Result<(), DatabaseError> {
+        let held_back = self.calls.held_back();
+        let limit = self.call_limit.saturating_sub(held_back);
+        let sent = self.calls.calls();
+        if sent >= limit {
+            return Err(DatabaseError::CallBudgetExhausted(format!(
+                "this invocation has sent {sent} D1 calls and may send {limit} (D1's limit of \
+                 {} less {held_back} held back for its audit row), so this call was not sent",
+                self.call_limit
+            )));
+        }
+        self.calls.add_call(statements);
         Ok(())
     }
 
@@ -509,7 +538,7 @@ impl D1DatabaseService {
     /// first row alone and drops the meta, and it is `all()`'s first row.
     async fn all_metered(&self, stmt: &D1PreparedStatement) -> Result<D1Result, DatabaseError> {
         let result = stmt.all().await.map_err(db_err)?;
-        self.queries.meter(&result);
+        self.calls.meter(&result);
         Ok(result)
     }
 
@@ -538,7 +567,7 @@ impl D1DatabaseService {
     /// one meta per statement.
     fn meter_batch(&self, results: &[D1Result]) {
         for result in results {
-            self.queries.meter(result);
+            self.calls.meter(result);
         }
     }
 }
@@ -606,17 +635,8 @@ impl DbExec for D1DatabaseService {
         Some(&self.schema_cache)
     }
 
-    /// D1's per-invocation query limit and the statements this invocation has
-    /// sent through every D1 service sharing its [`D1QueryCount`].
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Limited {
-            limit: self.query_limit.saturating_sub(self.queries.held_back()),
-            used: self.queries.sent(),
-        })
-    }
-
     /// Read through `all()`, whose answer carries the statement's meta — the
-    /// rows it read and wrote (see [`D1QueryCount`]). `raw()` answers the
+    /// rows it read and wrote (see [`D1CallCount`]). `raw()` answers the
     /// rows alone, so a read through it costs rows nobody can see.
     ///
     /// `all()` answers each row as a JS object, built from D1's column list in
@@ -637,7 +657,7 @@ impl DbExec for D1DatabaseService {
         json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
-        self.send(1)?;
+        self.spend_call(1)?;
         Ok(self
             .fetch_rows_metered(&stmt)
             .await?
@@ -653,7 +673,7 @@ impl DbExec for D1DatabaseService {
         json: &JsonColumns,
     ) -> Result<Record, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
-        self.send(1)?;
+        self.spend_call(1)?;
         // A missing table is a fault, not an absent row: it is a rejection,
         // classified like every other failure and coming back `Internal`, as
         // it does on native SQLite and PostgreSQL. `NotFound` is only a query
@@ -672,14 +692,14 @@ impl DbExec for D1DatabaseService {
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
-        self.send(1)?;
+        self.spend_call(1)?;
         let result = stmt.run().await.map_err(db_err)?;
-        self.queries.meter(&result);
+        self.calls.meter(&result);
         changes(&result)
     }
 
     /// Delegates to [`run_fetch`](Self::run_fetch), which counts the
-    /// statement: a D1 binding is one
+    /// call: a D1 binding is one
     /// handle, and every statement this adapter issues goes through
     /// `db.prepare()` on it — there is no reader/writer split for a
     /// `DELETE … RETURNING` to land on the wrong side of, and
@@ -711,8 +731,8 @@ impl DbExec for D1DatabaseService {
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
-        self.send(1)?;
-        Ok(scalar_i64(self.first_row_metered(&stmt).await?))
+        self.spend_call(1)?;
+        scalar_i64(self.first_row_metered(&stmt).await?)
     }
 
     async fn run_scalar_f64(
@@ -721,40 +741,33 @@ impl DbExec for D1DatabaseService {
         params: &[serde_json::Value],
     ) -> Result<f64, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
-        self.send(1)?;
-        Ok(scalar_f64(self.first_row_metered(&stmt).await?))
+        self.spend_call(1)?;
+        scalar_f64(self.first_row_metered(&stmt).await?)
     }
 
-    /// Raw SQL text from a block: the admin SQL explorer's (the SQL a person
-    /// typed) and the admin database pages' introspection (the table list,
-    /// row counts and column info, built by `wafer_sql_utils::introspect`,
-    /// which reach the backend only as text through this op). Read through
+    /// Raw SQL text from a block: the admin SQL explorer's, the SQL a person
+    /// typed (and the migration runners' own introspection). Read through
     /// `raw({ columnNames: true })` and paired by position, so
     /// `SELECT name, 1, id` keeps its columns in the order it asked for them,
     /// where `all()`'s row objects would enumerate `1` first.
     ///
     /// `raw()` answers no meta, so these are the reads whose rows are not
-    /// metered: each is counted as sent, and is a [`D1Cost::unmetered`]
-    /// statement in its invocation's `d1_cost` line. Every other read goes
-    /// through [`run_fetch`](DbExec::run_fetch).
+    /// metered: each is counted as a call sent, and is a
+    /// [`D1Cost::unmetered`] statement in its invocation's `d1_cost` line.
+    /// Every other read goes through [`run_fetch`](DbExec::run_fetch) — the
+    /// admin Database page's `catalog_*` reads included.
     async fn query_raw(
         &self,
         query: &str,
         args: &[serde_json::Value],
     ) -> Result<Vec<Record>, DatabaseError> {
         let stmt = self.prepare_bind(query, args)?;
-        self.send(1)?;
+        self.spend_call(1)?;
         Ok(fetch_rows(&stmt)
             .await?
             .into_iter()
             .map(|row| record_from_columns(row, JsonColumns::NONE))
             .collect())
-    }
-
-    /// Counted by the `run_scalar_i64` it sends through, not here.
-    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        let (sql, params) = introspect::build_table_exists(table, Backend::Sqlite);
-        Ok(self.run_scalar_i64(&sql, &params).await? > 0)
     }
 
     /// Collapse `ops` into ONE native D1 `db.batch()` round-trip.
@@ -814,7 +827,7 @@ impl DbExec for D1DatabaseService {
             let (sql, params) = op.sql_params();
             statements.push(self.prepare_bind(sql, params)?);
         }
-        self.send(statements.len())?;
+        self.spend_call(statements.len())?;
         let results = self.db.batch(statements).await.map_err(db_err)?;
         self.meter_batch(&results);
 
@@ -854,11 +867,11 @@ impl DbExec for D1DatabaseService {
                 BatchOp::Execute { .. } => BatchResult::Execute(changes(result)?),
                 BatchOp::ScalarI64 { .. } => {
                     let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
-                    BatchResult::ScalarI64(scalar_i64(rows.into_iter().next()))
+                    BatchResult::ScalarI64(scalar_i64(rows.into_iter().next())?)
                 }
                 BatchOp::ScalarF64 { .. } => {
                     let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
-                    BatchResult::ScalarF64(scalar_f64(rows.into_iter().next()))
+                    BatchResult::ScalarF64(scalar_f64(rows.into_iter().next())?)
                 }
             };
             out.push(decoded);
@@ -914,7 +927,7 @@ impl D1DatabaseService {
             let (sql, params) = op.sql_params();
             statements.push(self.prepare_bind(sql, params)?);
         }
-        self.send(statements.len())?;
+        self.spend_call(statements.len())?;
         let results = self.db.batch(statements).await.map_err(db_err)?;
         self.meter_batch(&results);
         if results.len() != ops.len() {
@@ -1165,8 +1178,20 @@ impl DatabaseService for D1DatabaseService {
         Err(schema_mutation_unsupported("schema_add_column", table))
     }
 
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        DbExec::statement_budget(self)
+    /// The typed catalog reads (the admin Database page's table list, column
+    /// info and row counts): the shared `DbExec` defaults, which send
+    /// builder-generated statements through `run_fetch` and `run_scalar_i64`,
+    /// so each is one call read through `all()` and metered.
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        DbExec::catalog_tables(self).await
+    }
+
+    async fn catalog_columns(&self, table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+        DbExec::catalog_columns(self, table).await
+    }
+
+    async fn catalog_row_count(&self, table: &str) -> Result<i64, DatabaseError> {
+        DbExec::catalog_row_count(self, table).await
     }
 }
 
@@ -1196,11 +1221,35 @@ fn json_value_to_js(val: &serde_json::Value) -> JsValue {
 }
 
 /// A D1 failure as a [`DatabaseError`]. D1 hands back text only, so a taken
-/// key is recognised by it — see
-/// [`impresspress_core::sqlite_text_error::statement_error`] — and that text
-/// is [`d1_error_text`].
+/// key is recognised by it — see [`failure_from_text`] — and that text is
+/// [`d1_error_text`].
 fn db_err(e: worker::Error) -> DatabaseError {
-    impresspress_core::sqlite_text_error::statement_error(d1_error_text(&e))
+    failure_from_text(d1_error_text(&e))
+}
+
+/// The text of the Workers runtime's own refusal of a call past the
+/// invocation's limit. Measured 2026-10-23 (D1-BATCH-MEASUREMENT), as
+/// worker-rs hands it back: `Error: Error: Too many API requests by single
+/// Worker invocation. … - Cause: Error: Too many API requests …`.
+const PLATFORM_CALL_LIMIT: &str = "Too many API requests by single Worker invocation";
+
+/// Classify the whole text of a failed D1 call.
+///
+/// The platform's refusal of the per-invocation limit is
+/// [`DatabaseError::CallBudgetExhausted`], as `DbExec`'s "Per-invocation call
+/// limits" contract requires, so it answers exactly as this adapter's own
+/// refusal does (429, `database.call_budget_exhausted`, transient for a block
+/// `Init`). The platform's count can refuse a call this adapter's admitted,
+/// because KV and R2 operations may share it (see the module docs). It is
+/// matched here, not in [`impresspress_core::sqlite_text_error`]: it is the
+/// Workers runtime's limit, never a SQLite statement's failure, and no other
+/// backend sees it. Everything else is classified by
+/// [`impresspress_core::sqlite_text_error::statement_error`].
+fn failure_from_text(text: String) -> DatabaseError {
+    if text.contains(PLATFORM_CALL_LIMIT) {
+        return DatabaseError::CallBudgetExhausted(format!("D1 refused the call: {text}"));
+    }
+    impresspress_core::sqlite_text_error::statement_error(text)
 }
 
 #[wasm_bindgen::prelude::wasm_bindgen]
@@ -1224,7 +1273,7 @@ extern "C" {
 /// [`rows_from_positional`]. Not `all()`: that answers each row as a JS
 /// object, and a JS object enumerates integer-like names (`SELECT name, 1`)
 /// before the others, so the result's column order would be lost. `raw()`
-/// answers no meta, so these rows are not metered (see [`D1QueryCount`]).
+/// answers no meta, so these rows are not metered (see [`D1CallCount`]).
 ///
 /// Every other read answers row objects and keeps their key order: the lone
 /// reads ([`DbExec::run_fetch`], [`DbExec::run_fetch_one`], the scalars),
@@ -1267,8 +1316,8 @@ async fn fetch_rows(stmt: &D1PreparedStatement) -> Result<Vec<RecordData>, Datab
 }
 
 /// A rejection (or a failed JS call) from a D1 statement, classified as
-/// [`db_err`] classifies one worker-rs hands back: by its whole text, a `D1_…`
-/// message followed by its `cause`.
+/// [`db_err`] classifies one worker-rs hands back: by its whole text
+/// ([`failure_from_text`]), a `D1_…` message followed by its `cause`.
 fn js_failure(error: JsValue) -> DatabaseError {
     let text = match error.dyn_ref::<js_sys::Error>() {
         Some(error) => {
@@ -1282,7 +1331,7 @@ fn js_failure(error: JsValue) -> DatabaseError {
         }
         None => js_text(&error),
     };
-    impresspress_core::sqlite_text_error::statement_error(text)
+    failure_from_text(text)
 }
 
 /// A JS value's text: an `Error`'s message, a string as itself, anything else
@@ -1436,19 +1485,26 @@ mod tests {
 
     /// The scalar decoders the aggregate paths use: `run_scalar_i64` /
     /// `run_scalar_f64` read a one-column row whose column the shared builders
-    /// alias themselves, so the value has to be taken positionally.
+    /// alias themselves, so the value has to be taken positionally. No row is
+    /// an error, never a 0: an aggregate always answers one.
     #[wasm_bindgen_test]
     fn an_aggregate_row_yields_its_single_column_whatever_it_is_aliased_as() {
-        assert_eq!(scalar_i64(Some(serde_json::json!({"cnt": 7}))), 7);
-        assert_eq!(scalar_i64(None), 0);
-        assert_eq!(scalar_f64(Some(serde_json::json!({"total": 2.5}))), 2.5);
-        assert_eq!(scalar_f64(None), 0.0);
+        assert_eq!(
+            scalar_i64(Some(serde_json::json!({"cnt": 7}))).ok(),
+            Some(7)
+        );
+        assert!(matches!(scalar_i64(None), Err(DatabaseError::Internal(_))));
+        assert_eq!(
+            scalar_f64(Some(serde_json::json!({"total": 2.5}))).ok(),
+            Some(2.5)
+        );
+        assert!(matches!(scalar_f64(None), Err(DatabaseError::Internal(_))));
     }
 
     /// A D1 service over `db` with a fresh invocation count and the Workers
     /// Paid query limit, for the tests that are not about the budget.
     fn service(db: D1Database, binding: &str) -> D1DatabaseService {
-        D1DatabaseService::new(db, binding, D1QueryCount::new(), 1000)
+        D1DatabaseService::new(db, binding, D1CallCount::new(), 1000)
     }
 
     /// A `D1Database` that is never queried.
@@ -1723,9 +1779,11 @@ mod tests {
             meta
         }
 
-        /// The cost these answers add up to, for the statements sent.
-        fn cost(&self, built: Option<BuildKind>, statements: u64) -> D1Cost {
+        /// The cost these answers add up to, for the calls and statements
+        /// sent.
+        fn cost(&self, built: Option<BuildKind>, calls: u64, statements: u64) -> D1Cost {
             D1Cost {
+                calls,
                 statements,
                 metered: self.statements.get(),
                 rows_read: self.rows_read.get(),
@@ -1799,10 +1857,11 @@ mod tests {
     /// A lone `all()` is the executor's one read of a table's columns and
     /// their declared types (which hold JSON): it answers `columns`, each
     /// declared `TEXT`, as a migrated table would, so every value is written
-    /// and read as it is. The one exception is the executor's probe of where
-    /// a created row's id comes from (`introspect::build_id_policy`, aliased
-    /// `id_policy`), which answers `0` — the executor mints the id — as for
-    /// every `TEXT` primary key impresspress declares.
+    /// and read as it is. A statement that asks for one value answers it as
+    /// D1 would ([`scalar_answer`]): the existence probes a present table,
+    /// the id policy `0` (the executor mints the id, as for every `TEXT`
+    /// primary key impresspress declares), a `COUNT`, `SUM` or `SELECT 1` the
+    /// number 1. Each statement of a `batch()` answers the same way.
     ///
     /// A lone `raw({ columnNames: true })`, which only `query_raw` sends, answers the same columns positionally,
     /// and no meta, as D1's `raw()` does.
@@ -1863,15 +1922,19 @@ mod tests {
                 let set = |row: &js_sys::Object, key: &str, value: &JsValue| {
                     js_sys::Reflect::set(row, &JsValue::from_str(key), value).expect("set row");
                 };
-                if all_sql.contains("id_policy") {
-                    let row = js_sys::Object::new();
-                    set(&row, "id_policy", &JsValue::from(0));
+                if let Some(row) = scalar_answer(&all_sql) {
                     rows.push(&row);
                 } else {
                     for column in columns {
                         let row = js_sys::Object::new();
                         set(&row, "name", &JsValue::from_str(column));
                         set(&row, "decl_type", &JsValue::from_str("TEXT"));
+                        // The catalog's column description reads these too.
+                        if all_sql.contains("not_null") {
+                            set(&row, "not_null", &JsValue::from(0));
+                            set(&row, "default_value", &JsValue::NULL);
+                            set(&row, "pk", &JsValue::from(0));
+                        }
                         rows.push(&row);
                     }
                 }
@@ -1924,7 +1987,9 @@ mod tests {
                         let results = js_sys::Array::new();
                         for (n, sql) in sqls.iter().enumerate() {
                             let rows = js_sys::Array::new();
-                            if sql.contains("RETURNING") {
+                            if let Some(row) = scalar_answer(sql) {
+                                rows.push(&row);
+                            } else if sql.contains("RETURNING") {
                                 let row = js_sys::Object::new();
                                 js_sys::Reflect::set(
                                     &row,
@@ -1951,6 +2016,27 @@ mod tests {
         batch.forget();
 
         JsValue::from(db).unchecked_into::<D1Database>()
+    }
+
+    /// The one-row answer D1 gives a statement that asks for one value, or
+    /// `None` for any other statement: `{present: 1}` for an existence probe
+    /// (`AS present`), `{id_policy: 0}` for the id policy probe, and
+    /// `{value: 1}` for a `COUNT`, a `SUM` or a `SELECT 1`. A strict decoder
+    /// refuses anything else, as it should refuse a malformed D1 answer.
+    fn scalar_answer(sql: &str) -> Option<js_sys::Object> {
+        let (key, value) = if sql.contains("AS present") {
+            ("present", 1)
+        } else if sql.contains("id_policy") {
+            ("id_policy", 0)
+        } else if sql.contains("COUNT(") || sql.contains("SUM(") || sql.trim() == "SELECT 1" {
+            ("value", 1)
+        } else {
+            return None;
+        };
+        let row = js_sys::Object::new();
+        js_sys::Reflect::set(&row, &JsValue::from_str(key), &JsValue::from(value))
+            .expect("set row");
+        Some(row)
     }
 
     fn rows(n: usize) -> Vec<std::collections::HashMap<String, serde_json::Value>> {
@@ -2147,7 +2233,8 @@ mod tests {
     /// **A raw transaction is ONE `db.batch()`** carrying every statement in
     /// order — the call D1 runs as one transaction, DDL included — not a
     /// `run()` per statement, which would leave the statements before a
-    /// failing one applied. Counted one per statement, as every batch is.
+    /// failing one applied. Counted as one call carrying its three
+    /// statements, as every batch is.
     #[wasm_bindgen_test]
     async fn a_raw_transaction_is_one_batch_of_its_statements() {
         forget_isolate_schema();
@@ -2163,7 +2250,8 @@ mod tests {
             *batches.borrow(),
             [FILE.iter().map(|sql| sql.to_string()).collect::<Vec<_>>()]
         );
-        assert_eq!(used(&svc), 3);
+        assert_eq!(calls(&svc), 1);
+        assert_eq!(svc.calls.cost().statements, 3);
     }
 
     /// **A refused batch names no statement.** D1 rejects the whole
@@ -2206,54 +2294,64 @@ mod tests {
         }
     }
 
-    /// **Admitted whole.** A raw transaction that fits D1's limit but not
-    /// what this invocation has left is `ResourceExhausted` before anything
-    /// is sent: no batch, nothing counted, no statement named.
+    /// **A migration file is one call.** With 3 of 4 calls spent, a
+    /// 3-statement raw transaction — a migration file and its ledger row —
+    /// still runs: it is one call. With all 4 spent it is
+    /// `CallBudgetExhausted` before anything is sent: no batch, nothing more
+    /// counted, no statement named.
     #[wasm_bindgen_test]
-    async fn a_raw_transaction_past_what_the_invocation_has_left_sends_nothing() {
+    async fn a_migration_file_with_one_call_left_runs() {
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let queries = D1QueryCount::new();
+        let count = D1CallCount::new();
         forget_isolate_schema();
         let svc = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
             "DB",
-            queries.clone(),
+            count.clone(),
             4,
         );
-        DatabaseService::query_raw(&svc, "SELECT 1", &[])
+        for _ in 0..3 {
+            DatabaseService::query_raw(&svc, "SELECT 1", &[])
+                .await
+                .expect("an earlier call in this invocation");
+        }
+
+        DatabaseService::exec_raw_transaction(&svc, &raw_statements(FILE))
             .await
-            .expect("an earlier query in this invocation");
-        DatabaseService::query_raw(&svc, "SELECT 1", &[])
-            .await
-            .expect("an earlier query in this invocation");
+            .expect("three statements are one call, and one call is left");
+        assert_eq!(batches.borrow().len(), 1, "sent as one batch");
+        assert_eq!(count.calls(), 4);
 
         let err = DatabaseService::exec_raw_transaction(&svc, &raw_statements(FILE))
             .await
-            .expect_err("three statements do not fit the two left of four");
+            .expect_err("no call is left");
         assert!(
-            matches!(err.error, DatabaseError::ResourceExhausted(_)),
+            matches!(err.error, DatabaseError::CallBudgetExhausted(_)),
             "{err}"
         );
+        assert_eq!(
+            err.error.detail_code(),
+            Some(wafer_block::wire::database::CALL_BUDGET_EXHAUSTED)
+        );
         assert_eq!(err.statement, None, "a refusal names no statement");
-        assert!(batches.borrow().is_empty(), "D1 was never sent the batch");
-        assert_eq!(queries.sent(), 2, "nothing more was counted");
+        assert_eq!(batches.borrow().len(), 1, "D1 was never sent the batch");
+        assert_eq!(count.calls(), 4, "nothing more was counted");
     }
 
-    // ── The per-invocation statement budget ─────────────────────────────────
+    // ── The per-invocation call budget ──────────────────────────────────────
 
-    fn used(svc: &D1DatabaseService) -> u64 {
-        match DbExec::statement_budget(svc) {
-            Ok(StatementBudget::Limited { used, .. }) => used,
-            other => panic!("a D1 service reports a limited budget: {other:?}"),
-        }
+    /// The calls `svc`'s invocation has sent.
+    fn calls(svc: &D1DatabaseService) -> u64 {
+        svc.calls.calls()
     }
 
-    /// **Every statement-sending primitive counts what it sends, once.** A
-    /// lone statement is one; a `db.batch()` is one per statement; the
-    /// table-exists probe and `run_execute_returning` are counted by the
-    /// primitive they send through, not a second time on top.
+    /// **Every call-sending primitive counts one call, once.** A lone
+    /// statement is one call carrying one statement; a `db.batch()` is ONE
+    /// call carrying each of its statements — D1's own unit, the "one batch,
+    /// one call" rule. The table-exists probe and `run_execute_returning` are
+    /// counted by the `run_fetch` they send through, not a second time on top.
     #[wasm_bindgen_test]
-    async fn each_primitive_counts_the_statements_it_sends() {
+    async fn each_primitive_counts_one_call() {
         forget_isolate_schema();
         // One column, so a lone `all()` answers a row and `run_fetch_one`
         // finds it.
@@ -2266,38 +2364,46 @@ mod tests {
             "DB",
         );
         let json = JsonColumns::NONE;
-        let mut expected = 0;
-        let mut step = |what: &str, delta: u64, svc: &D1DatabaseService| {
-            expected += delta;
-            assert_eq!(used(svc), expected, "after {what}");
+        let (mut expected_calls, mut expected_statements) = (0, 0);
+        let mut step = |what: &str, calls_sent: u64, statements: u64, svc: &D1DatabaseService| {
+            expected_calls += calls_sent;
+            expected_statements += statements;
+            assert_eq!(calls(svc), expected_calls, "calls after {what}");
+            assert_eq!(
+                svc.calls.cost().statements,
+                expected_statements,
+                "statements after {what}"
+            );
         };
 
         DbExec::run_fetch(&svc, "SELECT 1", &[], json)
             .await
             .expect("fetch");
-        step("run_fetch", 1, &svc);
-        DbExec::run_fetch_one(&svc, "SELECT 1", &[], json)
+        step("run_fetch", 1, 1, &svc);
+        DbExec::run_fetch_one(&svc, "SELECT a FROM t", &[], json)
             .await
             .expect("fetch one");
-        step("run_fetch_one", 1, &svc);
+        step("run_fetch_one", 1, 1, &svc);
         DbExec::run_execute(&svc, "UPDATE t SET a = 1", &[])
             .await
             .expect("execute");
-        step("run_execute", 1, &svc);
+        step("run_execute", 1, 1, &svc);
         DbExec::run_execute_returning(&svc, "DELETE FROM t RETURNING *", &[], json)
             .await
             .expect("execute returning");
-        step("run_execute_returning", 1, &svc);
+        step("run_execute_returning", 1, 1, &svc);
         DbExec::run_scalar_i64(&svc, "SELECT 1", &[])
             .await
             .expect("scalar i64");
-        step("run_scalar_i64", 1, &svc);
+        step("run_scalar_i64", 1, 1, &svc);
         DbExec::run_scalar_f64(&svc, "SELECT 1", &[])
             .await
             .expect("scalar f64");
-        step("run_scalar_f64", 1, &svc);
-        DbExec::dbx_table_exists(&svc, "t").await.expect("probe");
-        step("dbx_table_exists", 1, &svc);
+        step("run_scalar_f64", 1, 1, &svc);
+        wafer_core::interfaces::database::exec::table_exists(&svc, "t")
+            .await
+            .expect("probe");
+        step("exec::table_exists", 1, 1, &svc);
         DbExec::run_batch(
             &svc,
             &[
@@ -2313,7 +2419,7 @@ mod tests {
         )
         .await
         .expect("batch");
-        step("run_batch of 2", 2, &svc);
+        step("run_batch of 2", 1, 2, &svc);
         DbExec::run_transaction(
             &svc,
             &[
@@ -2333,11 +2439,11 @@ mod tests {
         )
         .await
         .expect("transaction");
-        step("run_transaction of 3", 3, &svc);
+        step("run_transaction of 3", 1, 3, &svc);
     }
 
-    /// A statement D1 refuses was still sent, and D1 counts it: the budget
-    /// counts it too.
+    /// A call D1 refuses was still sent, and D1 counts it: the budget counts
+    /// it too.
     #[wasm_bindgen_test]
     async fn a_refused_statement_still_counts() {
         forget_isolate_schema();
@@ -2354,55 +2460,51 @@ mod tests {
         DbExec::run_execute(&svc, "UPDATE t SET a = 1", &[])
             .await
             .expect_err("refused");
-        assert_eq!(used(&svc), 1);
+        assert_eq!(calls(&svc), 1);
     }
 
-    /// **A write the invocation cannot finish never reaches D1.** After the
-    /// request has already run queries, a `create_many` that fits D1's limit
-    /// but not what this invocation has left is `ResourceExhausted` and sends
-    /// no `batch()`: D1 would otherwise run out part-way through the request.
-    /// The same write in an invocation that has run nothing goes through as
-    /// one batch.
+    /// **A `create_many` larger than the whole limit is one call.** With a
+    /// limit of 10 calls and a fresh count, 25 rows go to D1 as ONE
+    /// `db.batch()`: three calls in all on a cold schema cache (the id policy
+    /// probe, the column list, the batch). Counted per statement, the 25
+    /// inserts alone would be refused. Once the invocation has no call left,
+    /// the same write is refused before any batch is sent.
     #[wasm_bindgen_test]
-    async fn a_create_many_past_what_the_invocation_has_left_sends_no_batch() {
+    async fn a_create_many_larger_than_the_limit_is_one_call() {
         const LIMIT: u64 = 10;
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let queries = D1QueryCount::new();
+        let count = D1CallCount::new();
         forget_isolate_schema();
         let svc = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
             "DB",
-            queries.clone(),
+            count.clone(),
             LIMIT,
         );
-        for _ in 0..4 {
-            DatabaseService::query_raw(&svc, "SELECT 1", &[])
-                .await
-                .expect("an earlier query in this request");
-        }
-        assert_eq!(queries.sent(), 4);
 
-        let err = DatabaseService::create_many(&svc, "request_logs", rows(6))
+        DatabaseService::create_many(&svc, "request_logs", rows(25))
             .await
-            .expect_err("6 inserts do not fit what is left of 10 after 4");
+            .expect("25 rows are one call");
+        assert_eq!(batches.borrow().len(), 1, "one batch");
+        assert_eq!(batches.borrow()[0].len(), 25, "carrying every row");
+        assert_eq!(
+            count.calls(),
+            3,
+            "the id policy, the column list, the batch"
+        );
+        assert_eq!(count.cost().statements, 27);
+
+        let spent = spend_everything(&svc).await;
+        assert_eq!(count.calls(), LIMIT, "{spent} more calls ran");
+        let err = DatabaseService::create_many(&svc, "request_logs", rows(25))
+            .await
+            .expect_err("no call is left");
         assert!(
-            matches!(err, DatabaseError::ResourceExhausted(_)),
+            matches!(err, DatabaseError::CallBudgetExhausted(_)),
             "{err:?}"
         );
-        assert!(batches.borrow().is_empty(), "D1 was never sent the batch");
-
-        // A new invocation, the same write: it fits, and runs as one batch.
-        forget_isolate_schema();
-        let fresh = D1DatabaseService::new(
-            batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
-            "DB",
-            D1QueryCount::new(),
-            LIMIT,
-        );
-        DatabaseService::create_many(&fresh, "request_logs", rows(6))
-            .await
-            .expect("a fresh invocation has room");
-        assert_eq!(batches.borrow().len(), 1);
+        assert_eq!(batches.borrow().len(), 1, "D1 was never sent the batch");
+        assert_eq!(count.calls(), LIMIT, "the refused call was not counted");
     }
 
     /// **The audit row always fits.** A request's own services leave the
@@ -2410,14 +2512,14 @@ mod tests {
     /// D1's limit less the reservation is refused before it reaches D1, not
     /// only multi-statement writes — so however the request spends its
     /// budget, the reserved-work handle still writes the row, from a cold
-    /// schema cache, in exactly [`AUDIT_ROW_STATEMENTS`] statements, against
+    /// schema cache, in exactly [`AUDIT_ROW_CALLS`] statements, against
     /// a fake D1 that lists the table's real columns. A probe added to the
     /// path fails here, and so does a reservation larger than the path needs.
     ///
-    /// [`AUDIT_ROW_STATEMENTS`]: impresspress_core::after_response::AUDIT_ROW_STATEMENTS
+    /// [`AUDIT_ROW_CALLS`]: impresspress_core::after_response::AUDIT_ROW_CALLS
     #[wasm_bindgen_test]
     async fn a_request_that_spends_its_budget_still_has_room_for_its_audit_row() {
-        use impresspress_core::after_response::AUDIT_ROW_STATEMENTS;
+        use impresspress_core::after_response::AUDIT_ROW_CALLS;
         const LIMIT: u64 = 10;
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
         let d1 = || {
@@ -2443,15 +2545,15 @@ mod tests {
                 ],
             )
         };
-        let queries = D1QueryCount::new();
-        queries.reserve(AUDIT_ROW_STATEMENTS);
+        let count = D1CallCount::new();
+        count.reserve(AUDIT_ROW_CALLS);
         forget_isolate_schema();
-        let request = D1DatabaseService::new(d1(), "DB", queries.clone(), LIMIT);
+        let request = D1DatabaseService::new(d1(), "DB", count.clone(), LIMIT);
         let ran = spend_everything(&request).await;
-        assert_eq!(ran, LIMIT - AUDIT_ROW_STATEMENTS);
-        assert_eq!(queries.sent(), ran, "the refused statement was not sent");
+        assert_eq!(ran, LIMIT - AUDIT_ROW_CALLS);
+        assert_eq!(count.calls(), ran, "the refused statement was not sent");
 
-        let audit = D1DatabaseService::new(d1(), "DB", queries.for_reserved_work(), LIMIT);
+        let audit = D1DatabaseService::new(d1(), "DB", count.for_reserved_work(), LIMIT);
         // The row exactly as the pipeline queues it.
         let row = impresspress_core::platform_state::request_logs::NewRequestLog {
             method: "GET",
@@ -2471,8 +2573,8 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("the row fits: {e:?}"));
         assert_eq!(
-            queries.sent() - ran,
-            AUDIT_ROW_STATEMENTS,
+            count.calls() - ran,
+            AUDIT_ROW_CALLS,
             "the row's statements: the id policy probe, the column list and the insert"
         );
         assert_eq!(batches.borrow().len(), 1, "the row reached D1");
@@ -2487,7 +2589,7 @@ mod tests {
     async fn a_write_naming_an_undeclared_column_sends_no_ddl() {
         forget_isolate_schema();
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let queries = D1QueryCount::new();
+        let count = D1CallCount::new();
         let svc = D1DatabaseService::new(
             batching_d1_with_columns(
                 BatchAnswer::Succeed,
@@ -2495,7 +2597,7 @@ mod tests {
                 &["id", "created_at", "updated_at"],
             ),
             "DB",
-            queries.clone(),
+            count.clone(),
             1000,
         );
         let row = std::collections::HashMap::from([(
@@ -2506,7 +2608,7 @@ mod tests {
             .await
             .expect("the fake accepts the insert");
         assert_eq!(
-            queries.sent(),
+            count.calls(),
             3,
             "the id policy probe, the column list and the insert; no ALTER"
         );
@@ -2521,8 +2623,8 @@ mod tests {
         );
     }
 
-    /// Run `SELECT 1` through `svc` until it is refused; the statements that
-    /// ran. The refusal must be the budget's.
+    /// Run `SELECT 1` through `svc` until it is refused; the calls that ran.
+    /// The refusal must be the budget's.
     async fn spend_everything(svc: &D1DatabaseService) -> u64 {
         let mut ran = 0;
         loop {
@@ -2530,7 +2632,7 @@ mod tests {
                 Ok(_) => ran += 1,
                 Err(err) => {
                     assert!(
-                        matches!(err, DatabaseError::ResourceExhausted(_)),
+                        matches!(err, DatabaseError::CallBudgetExhausted(_)),
                         "{err:?}"
                     );
                     return ran;
@@ -2547,23 +2649,23 @@ mod tests {
     /// limit still lowered by the reservation.
     #[wasm_bindgen_test]
     async fn a_released_reservation_goes_back_to_the_request() {
-        use impresspress_core::after_response::AUDIT_ROW_STATEMENTS;
+        use impresspress_core::after_response::AUDIT_ROW_CALLS;
         const LIMIT: u64 = 10;
         let batches = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let queries = D1QueryCount::new();
-        queries.reserve(AUDIT_ROW_STATEMENTS);
+        let count = D1CallCount::new();
+        count.reserve(AUDIT_ROW_CALLS);
         forget_isolate_schema();
         let request = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
             "DB",
-            queries.clone(),
+            count.clone(),
             LIMIT,
         );
         let spent = spend_everything(&request).await;
         let audit = D1DatabaseService::new(
             batching_d1(BatchAnswer::Succeed, Rc::clone(&batches)),
             "DB",
-            queries.for_reserved_work(),
+            count.for_reserved_work(),
             LIMIT,
         );
         // A row carrying its own id skips the id policy probe, so it leaves
@@ -2573,10 +2675,10 @@ mod tests {
         DatabaseService::create_many(&audit, "request_logs", row)
             .await
             .expect("the row fits");
-        let row = queries.sent() - spent;
-        assert!(row < AUDIT_ROW_STATEMENTS, "a room left over for this test");
+        let row = count.calls() - spent;
+        assert!(row < AUDIT_ROW_CALLS, "a room left over for this test");
 
-        queries.release_reservation();
+        count.release_reservation();
         let task = spend_everything(&request).await;
         assert_eq!(
             task,
@@ -2586,7 +2688,7 @@ mod tests {
     }
 
     /// **Two requests interleaved in one isolate count separately.** Each
-    /// invocation's D1 services share that invocation's [`D1QueryCount`] and
+    /// invocation's D1 services share that invocation's [`D1CallCount`] and
     /// no other: a request is not refused for statements a concurrent request
     /// in the same isolate sent. Their awaits interleave, as an isolate
     /// serving two requests runs them.
@@ -2627,15 +2729,15 @@ mod tests {
             "the two requests' statements interleaved: {:?}",
             order.borrow()
         );
-        assert_eq!(used(&request_a), 3, "request A counts only its own");
-        assert_eq!(used(&request_b), 5, "request B counts only its own");
+        assert_eq!(calls(&request_a), 3, "request A counts only its own");
+        assert_eq!(calls(&request_b), 5, "request B counts only its own");
     }
 
     // ── Rows read and written ───────────────────────────────────────────────
 
-    /// A D1 service over `db` that counts into `queries`.
-    fn service_counting(db: D1Database, queries: &D1QueryCount) -> D1DatabaseService {
-        D1DatabaseService::new(db, "DB", queries.clone(), 1000)
+    /// A D1 service over `db` that counts into `count`.
+    fn service_counting(db: D1Database, count: &D1CallCount) -> D1DatabaseService {
+        D1DatabaseService::new(db, "DB", count.clone(), 1000)
     }
 
     /// **The rows come from D1's own meta, on every path that sends a
@@ -2649,7 +2751,7 @@ mod tests {
     async fn every_statement_adds_the_rows_d1_reported_for_it() {
         forget_isolate_schema();
         let handed = Rc::new(HandedMeta::default());
-        let queries = D1QueryCount::new();
+        let count = D1CallCount::new();
         let svc = service_counting(
             metered_d1(
                 BatchAnswer::Succeed,
@@ -2657,7 +2759,7 @@ mod tests {
                 &["path"],
                 Rc::clone(&handed),
             ),
-            &queries,
+            &count,
         );
         let json = JsonColumns::NONE;
 
@@ -2679,7 +2781,9 @@ mod tests {
         DbExec::run_scalar_f64(&svc, "SELECT SUM(x) AS total FROM t", &[])
             .await
             .expect("scalar f64");
-        DbExec::dbx_table_exists(&svc, "t").await.expect("probe");
+        wafer_core::interfaces::database::exec::table_exists(&svc, "t")
+            .await
+            .expect("probe");
         DbExec::run_batch(
             &svc,
             &[
@@ -2720,26 +2824,29 @@ mod tests {
             .await
             .expect("list");
 
-        let cost = queries.cost();
+        let cost = count.cost();
         assert_eq!(
             cost,
-            handed.cost(None, queries.sent()),
+            handed.cost(None, count.calls(), handed.statements.get()),
             "the cost is the sum of the meta D1 answered"
         );
         assert_eq!(cost.unmetered(), 0, "every result carried its meta");
         assert!(cost.statements > 15, "every path ran: {cost:?}");
+        assert!(
+            cost.calls < cost.statements,
+            "a batch is one call carrying several statements: {cost:?}"
+        );
         assert!(cost.rows_read > 0 && cost.rows_written > 0, "{cost:?}");
     }
 
-    /// `query_raw` (the admin database pages: the SQL explorer, the table
-    /// list, row counts, column info) reads through `raw()`, which answers no
-    /// meta: its statement is counted as sent and stays unmetered, so its
-    /// invocation's line says its rows are a floor.
+    /// `query_raw` (the admin SQL explorer) reads through `raw()`, which
+    /// answers no meta: its statement is counted as sent and stays unmetered,
+    /// so its invocation's line says its rows are a floor.
     #[wasm_bindgen_test]
     async fn a_raw_query_is_counted_but_unmetered() {
         forget_isolate_schema();
         let handed = Rc::new(HandedMeta::default());
-        let queries = D1QueryCount::new();
+        let count = D1CallCount::new();
         let svc = service_counting(
             metered_d1(
                 BatchAnswer::Succeed,
@@ -2747,7 +2854,7 @@ mod tests {
                 &["path"],
                 Rc::clone(&handed),
             ),
-            &queries,
+            &count,
         );
 
         let rows = DatabaseService::query_raw(&svc, "SELECT name, decl_type FROM x", &[])
@@ -2755,19 +2862,112 @@ mod tests {
             .expect("query");
         assert_eq!(rows.len(), 1, "the raw answer's one row");
 
-        let cost = queries.cost();
-        assert_eq!(cost.statements, 1);
+        let cost = count.cost();
+        assert_eq!((cost.calls, cost.statements), (1, 1));
         assert_eq!(cost.metered, 0);
         assert_eq!(cost.unmetered(), 1);
         assert_eq!((cost.rows_read, cost.rows_written), (0, 0));
         assert_eq!(handed.statements.get(), 0, "no meta was answered");
     }
 
+    /// **The admin Database page's reads are metered.** `catalog_tables`,
+    /// `catalog_columns` and `catalog_row_count` run the shared `DbExec`
+    /// defaults, which read through `all()` — never `query_raw`'s `raw()` —
+    /// so each is one call whose rows D1 reported, and nothing is unmetered.
+    #[wasm_bindgen_test]
+    async fn the_catalog_reads_are_metered() {
+        forget_isolate_schema();
+        let handed = Rc::new(HandedMeta::default());
+        let count = D1CallCount::new();
+        let svc = service_counting(
+            metered_d1(
+                BatchAnswer::Succeed,
+                Rc::new(std::cell::RefCell::new(Vec::new())),
+                &["path"],
+                Rc::clone(&handed),
+            ),
+            &count,
+        );
+
+        let tables = DatabaseService::catalog_tables(&svc).await.expect("tables");
+        assert_eq!(tables, ["path"]);
+        let columns = DatabaseService::catalog_columns(&svc, "t")
+            .await
+            .expect("columns");
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].decl_type, "TEXT");
+        let rows = DatabaseService::catalog_row_count(&svc, "t")
+            .await
+            .expect("row count");
+        assert_eq!(rows, 1);
+
+        let cost = count.cost();
+        assert_eq!((cost.calls, cost.statements), (3, 3));
+        assert_eq!(cost.unmetered(), 0, "no catalog read went through raw()");
+        assert_eq!(cost, handed.cost(None, 3, 3));
+    }
+
+    /// **D1's own refusal of the limit is the call budget's.** The Workers
+    /// runtime refuses a call past the invocation's limit with "Too many API
+    /// requests by single Worker invocation" — counted with KV and R2, so it
+    /// can come while this adapter's count has room. Both paths its text
+    /// reaches classify it as `CallBudgetExhausted`, with the detail code a
+    /// client keys on: `db_err` (here through a lone `run()`, in the form
+    /// worker-rs hands it back, measured 2026-10-23) and `js_failure`. A
+    /// transient D1 text stays `Unavailable`.
+    #[wasm_bindgen_test]
+    async fn the_platforms_call_limit_refusal_is_call_budget_exhausted() {
+        forget_isolate_schema();
+        let svc = service(
+            batching_d1(
+                BatchAnswer::Reject {
+                    message: "Error: Too many API requests by single Worker invocation. To \
+                              configure this limit, refer to https://developers.cloudflare.com/\
+                              workers/wrangler/configuration/#limits",
+                    cause: Some("Error: Too many API requests by single Worker invocation."),
+                },
+                Rc::new(std::cell::RefCell::new(Vec::new())),
+            ),
+            "DB",
+        );
+        let err = DbExec::run_execute(&svc, "UPDATE t SET a = 1", &[])
+            .await
+            .expect_err("refused");
+        assert!(
+            matches!(&err, DatabaseError::CallBudgetExhausted(text) if text.contains("Too many API requests")),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.detail_code(),
+            Some(wafer_block::wire::database::CALL_BUDGET_EXHAUSTED)
+        );
+
+        let error = js_sys::Error::new("Error: Too many API requests by single Worker invocation.");
+        error.set_cause(&js_sys::Error::new(
+            "Error: Too many API requests by single Worker invocation.",
+        ));
+        assert!(
+            matches!(
+                js_failure(JsValue::from(error)),
+                DatabaseError::CallBudgetExhausted(_)
+            ),
+            "js_failure"
+        );
+
+        let queued = js_failure(JsValue::from(js_sys::Error::new(
+            "D1_ERROR: Too many requests queued",
+        )));
+        assert!(
+            matches!(queued, DatabaseError::Unavailable(_)),
+            "{queued:?}"
+        );
+    }
+
     /// A statement D1 refuses answers no meta: it is sent, and unmetered.
     #[wasm_bindgen_test]
     async fn a_refused_statement_is_sent_but_unmetered() {
         forget_isolate_schema();
-        let queries = D1QueryCount::new();
+        let count = D1CallCount::new();
         let svc = service_counting(
             batching_d1(
                 BatchAnswer::Reject {
@@ -2776,13 +2976,13 @@ mod tests {
                 },
                 Rc::new(std::cell::RefCell::new(Vec::new())),
             ),
-            &queries,
+            &count,
         );
         DbExec::run_execute(&svc, "UPDATE t SET a = 1", &[])
             .await
             .expect_err("refused");
-        let cost = queries.cost();
-        assert_eq!((cost.statements, cost.metered), (1, 0));
+        let cost = count.cost();
+        assert_eq!((cost.calls, cost.statements, cost.metered), (1, 1, 0));
         assert_eq!(cost.unmetered(), 1);
     }
 
@@ -2796,7 +2996,7 @@ mod tests {
         let handed = Rc::new(HandedMeta::default());
         let reports: Rc<std::cell::RefCell<Vec<D1Cost>>> = Rc::default();
         let sink = Rc::clone(&reports);
-        let queries = D1QueryCount::reporting_at_end(move |cost| sink.borrow_mut().push(cost));
+        let count = D1CallCount::reporting_at_end(move |cost| sink.borrow_mut().push(cost));
         let d1 = || {
             metered_d1(
                 BatchAnswer::Succeed,
@@ -2805,14 +3005,14 @@ mod tests {
                 Rc::clone(&handed),
             )
         };
-        let request = service_counting(d1(), &queries);
-        let audit_row = service_counting(d1(), &queries.for_reserved_work());
-        queries.note_build(BuildKind::Prepared);
+        let request = service_counting(d1(), &count);
+        let audit_row = service_counting(d1(), &count.for_reserved_work());
+        count.note_build(BuildKind::Prepared);
 
         DbExec::run_fetch(&request, "SELECT path FROM t", &[], JsonColumns::NONE)
             .await
             .expect("fetch");
-        drop(queries);
+        drop(count);
         assert!(reports.borrow().is_empty(), "the request still holds it");
 
         drop(request);
@@ -2828,7 +3028,7 @@ mod tests {
         drop(audit_row);
         let reports = reports.borrow();
         assert_eq!(reports.len(), 1, "one report per invocation");
-        assert_eq!(reports[0], handed.cost(Some(BuildKind::Prepared), 2));
+        assert_eq!(reports[0], handed.cost(Some(BuildKind::Prepared), 2, 2));
         assert!(
             reports[0].rows_written > 0,
             "the audit row's write is in it"
@@ -2839,10 +3039,10 @@ mod tests {
     /// caller's but the Worker entries'.
     #[wasm_bindgen_test]
     fn a_plain_count_reports_nothing_and_starts_at_zero() {
-        let queries = D1QueryCount::new();
-        assert_eq!(queries.cost(), D1Cost::default());
-        assert_eq!(queries.cost().unmetered(), 0);
-        queries.note_build(BuildKind::Dynamic);
-        assert_eq!(queries.cost().built, Some(BuildKind::Dynamic));
+        let count = D1CallCount::new();
+        assert_eq!(count.cost(), D1Cost::default());
+        assert_eq!(count.cost().unmetered(), 0);
+        count.note_build(BuildKind::Dynamic);
+        assert_eq!(count.cost().built, Some(BuildKind::Dynamic));
     }
 }

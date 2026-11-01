@@ -147,7 +147,7 @@ pub(crate) async fn boot_request_runtime(
 pub(crate) async fn build_runtime<F, G>(
     env: &worker::Env,
     environment: &CfEnvironment,
-    queries: &crate::database::D1QueryCount,
+    calls: &crate::database::D1CallCount,
     request_config: &HashMap<String, String>,
     prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
     register_blocks: F,
@@ -169,7 +169,7 @@ where
         runner::D1_BINDING,
         runner::KV_BINDING,
         cache_mode,
-        queries,
+        calls,
     )
     .map_err(|e| {
         format!(
@@ -404,7 +404,7 @@ fn request_config_surfaces(
 pub(crate) fn warm_request_services(
     env: &worker::Env,
     environment: &CfEnvironment,
-    queries: &crate::database::D1QueryCount,
+    calls: &crate::database::D1CallCount,
     structural_snapshot: &HashMap<String, String>,
     variables_snapshot: &Arc<VariablesSnapshot>,
     request_config: &HashMap<String, String>,
@@ -415,7 +415,7 @@ pub(crate) fn warm_request_services(
         runner::D1_BINDING,
         runner::KV_BINDING,
         kv_cached_db::CacheMode::default(),
-        queries,
+        calls,
     )?;
     let storage = make_r2_storage_service(env, runner::R2_BINDING)?;
 
@@ -857,7 +857,7 @@ mod tests {
         let d1 = crate::database::D1DatabaseService::new(
             d1,
             "DB",
-            crate::database::D1QueryCount::new(),
+            crate::database::D1CallCount::new(),
             1000,
         );
         Arc::new(crate::kv_cached_db::KvCachedD1DatabaseService::new(

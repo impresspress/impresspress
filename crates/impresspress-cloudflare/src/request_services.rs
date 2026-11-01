@@ -913,14 +913,19 @@ impl DatabaseService for ScopedDatabaseService {
         self.current()?.schema_add_column(table, column).await
     }
 
-    /// The current request's D1 budget. Outside a request this is the same
-    /// "used outside request poll scope" error every other operation returns:
-    /// there is no invocation to report a budget for, and `Unbounded` would
-    /// be a lie.
-    fn statement_budget(
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        self.current()?.catalog_tables().await
+    }
+
+    async fn catalog_columns(
         &self,
-    ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError> {
-        self.current()?.statement_budget()
+        table: &str,
+    ) -> Result<Vec<wafer_core::interfaces::database::service::CatalogColumn>, DatabaseError> {
+        self.current()?.catalog_columns(table).await
+    }
+
+    async fn catalog_row_count(&self, table: &str) -> Result<i64, DatabaseError> {
+        self.current()?.catalog_row_count(table).await
     }
 }
 

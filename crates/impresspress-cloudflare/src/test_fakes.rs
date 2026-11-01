@@ -18,9 +18,8 @@ use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::{
     crypto::service::{CryptoError, CryptoService},
     database::service::{
-        AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
-        GuardedUpdate, Record, RecordList, StatementBudget, Table, UpsertSpec, WriteOp,
-        WriteOutcome,
+        AggregateSpec, CapGuard, CatalogColumn, Column, DatabaseError, DatabaseService,
+        GuardedInsert, GuardedUpdate, Record, RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
     },
     storage::service::{
         FolderInfo, ListOptions as StorageListOptions, ObjectInfo, ObjectList, StorageError,
@@ -251,8 +250,16 @@ impl DatabaseService for CreateRecordingDb {
         unused()
     }
 
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Unbounded)
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        unused()
+    }
+
+    async fn catalog_columns(&self, _table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+        unused()
+    }
+
+    async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+        unused()
     }
 }
 
@@ -621,8 +628,16 @@ impl DatabaseService for BlockSettingsD1 {
         unused()
     }
 
-    fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-        Ok(StatementBudget::Unbounded)
+    async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+        unused()
+    }
+
+    async fn catalog_columns(&self, _table: &str) -> Result<Vec<CatalogColumn>, DatabaseError> {
+        unused()
+    }
+
+    async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+        unused()
     }
 }
 

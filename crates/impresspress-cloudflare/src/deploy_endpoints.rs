@@ -31,14 +31,14 @@ use crate::{
 /// wrangler secret (hash-then-compare sidesteps timing on raw bytes).
 #[expect(
     clippy::too_many_arguments,
-    reason = "the invocation's captured environment and D1 statement count travel as \
+    reason = "the invocation's captured environment and D1 call count travel as \
               parameters from the Worker entry that owns them"
 )]
 pub(crate) async fn deploy_init_endpoint<F, G>(
     req: worker::Request,
     env: worker::Env,
     environment: CfEnvironment,
-    queries: &crate::database::D1QueryCount,
+    calls: &crate::database::D1CallCount,
     mut request_config: HashMap<String, String>,
     prepare_plan: bool,
     register_blocks: F,
@@ -99,7 +99,7 @@ where
         let mut built = build_runtime(
             &env,
             &environment,
-            queries,
+            calls,
             &request_config,
             None,
             register_blocks,

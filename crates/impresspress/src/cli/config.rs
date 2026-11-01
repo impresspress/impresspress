@@ -2,8 +2,9 @@ use serde::Deserialize;
 
 /// `impresspress.toml`, as the web and native flows read it.
 ///
-/// `deny_unknown_fields`, like every table inside it: a table this does not
-/// know is refused by name rather than ignored. An ignored table is a setting
+/// `deny_unknown_fields`, like every table it parses (and `[cloudflare]`,
+/// which `helpers::cloudflare::env::parse` parses as strictly): a table this
+/// does not know is refused by name rather than ignored. An ignored table is a setting
 /// that silently does nothing — a misspelt `[sandbx]`, or the `[dev]` that
 /// `[sandbox]` replaced, would build a bundle with no sandbox at all and say
 /// nothing.
@@ -24,7 +25,8 @@ pub struct Config {
     /// struct, for the `embed × cloudflare` flow (`flows::embed_cloudflare`,
     /// through `env::load`). Declared here only so that
     /// `deny_unknown_fields` above accepts it; its contents are skipped
-    /// unread (`IgnoredAny`), and validated by that parser instead.
+    /// unread (`IgnoredAny`), and validated by that parser instead, which
+    /// refuses an unknown key in it by name as this one refuses a table.
     #[serde(default, rename = "cloudflare")]
     _cloudflare: Option<serde::de::IgnoredAny>,
 }

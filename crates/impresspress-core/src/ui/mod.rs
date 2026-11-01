@@ -781,7 +781,7 @@ pub fn server_error_response(msg: &wafer_run::Message) -> wafer_run::OutputStrea
 
 /// A refusal a page's read met, as [`crate::blocks::crud::db_error_page`]
 /// classified it: the 403 a WRAP denial becomes, the 429 a quota keeps, the
-/// database statement budget's refusal (which says reloading will not help)
+/// database call budget's refusal (which says reloading will not help)
 /// and the 409 a duplicate key is, as a styled page for a browser and as the
 /// refusal itself for an API caller.
 ///
@@ -830,23 +830,13 @@ const SERVER_ERROR_COPY: StatusCopy = StatusCopy {
 /// alone, [`shell_error_page`] inside the shell — or `None` for a refusal no
 /// page is drawn for (it is answered as the error it is).
 fn refusal_copy(error: &wafer_run::WaferError) -> Option<StatusCopy> {
-    let is_statement_budget = matches!(
-        error.detail_code(),
-        Some(
-            wafer_block::wire::database::STATEMENT_BUDGET_EXHAUSTED
-                | wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT
-        )
-    );
-    if is_statement_budget {
-        // Not "try again later": the same page asks for the same statements.
-        let (status, code) = if error.code == wafer_run::ErrorCode::ResourceExhausted {
-            (429, "429")
-        } else {
-            (400, "400")
-        };
+    if error.code == wafer_run::ErrorCode::ResourceExhausted
+        && error.detail_code() == Some(wafer_block::wire::database::CALL_BUDGET_EXHAUSTED)
+    {
+        // Not "try again later": the same page makes the same calls.
         return Some(StatusCopy {
-            status,
-            code,
+            status: 429,
+            code: "429",
             title: "Too much at once",
             body: "This page needs more database work than one request may do, so reloading \
                    it will not help. Please let the site administrator know.",

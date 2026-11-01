@@ -7,8 +7,9 @@
 //!
 //! Backend status badge in the page header.
 //!
-//! Reuses `wafer_sql_utils::introspect` for table listing/columns and
-//! the shared `validate_readonly_query` helper for the SQL editor.
+//! Reads the table list and columns through the typed catalog reads
+//! (`db::catalog_*`, shared with the JSON API) and the SQL editor through
+//! the shared `validate_readonly_query` helper.
 
 use maud::{html, Markup};
 use wafer_core::clients::database as db;
@@ -270,8 +271,8 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
         return Ok(empty_note("Select a table to view its columns.", None));
     };
 
-    // The selected name is user input: a name the backend cannot quote, or
-    // one it has no table for, is said so in the panel. Columns + row count
+    // The selected name is user input: a name no catalog can hold, or one
+    // it holds no table by, is said so in the panel. Columns + row count
     // come from the shared introspection routine used by the JSON API too.
     let (columns, row_count) = match introspect_columns(ctx, name).await {
         Ok(schema) => schema,
@@ -652,9 +653,11 @@ mod tests {
         assert!(!html.contains("0 rows"), "{html}");
     }
 
-    /// With no table selected, and for a name the backend cannot quote, the
-    /// schema panel says so in one line: the panel already sits in a pane,
-    /// so it is an `empty_note`, not a second framed surface.
+    /// With no table selected, for a name the catalog holds no table by,
+    /// and for a name no catalog can hold, the schema panel says so in one
+    /// line: the panel already sits in a pane, so it is an `empty_note`, not
+    /// a second framed surface. A name outside the plain-identifier rule is
+    /// asked of the catalog like any other.
     #[tokio::test]
     async fn the_schema_panel_says_what_to_do_in_one_line() {
         let ctx = TestContext::with_admin()
@@ -677,10 +680,17 @@ mod tests {
         let html = String::from_utf8(parts.body).expect("UTF-8 body");
         assert!(
             html.contains(
-                r#"<p class="empty-note">&quot;bad name;&quot; is not a valid table name.</p>"#
+                r#"<p class="empty-note">There is no table named &quot;bad name;&quot;.</p>"#
             ),
             "{html}"
         );
+
+        let mut msg = admin_msg("retrieve", "/b/admin/database");
+        msg.set_meta("req.query.table", "bad\0name");
+        let parts = browser_request(&ctx, msg).await;
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(html.contains("is not a valid table name."), "{html}");
     }
 
     /// Control: a real table still shows its columns and count.

@@ -50,19 +50,14 @@ export type SdkErrorCode =
   | "popup_closed";
 
 /**
- * Detail codes the database attaches when a request needs more database
- * statements than one request may run (on Cloudflare D1, its per-invocation
- * query limit). Sent again unchanged, such a request fails the same way, so
- * it must not be retried automatically — a 429 carrying
- * `database.statement_budget_exhausted` is NOT a rate limit. Send less per
- * request instead (fewer rows in one call). See {@link isStatementBudgetError}.
+ * The detail code the database attaches when a request's invocation has no
+ * database call left (on Cloudflare D1, its per-invocation call limit, a
+ * `db.batch()` counting once). Sent again unchanged, such a request fails the
+ * same way, so it must not be retried automatically — a 429 carrying
+ * `database.call_budget_exhausted` is NOT a rate limit. Do less per request
+ * instead. See {@link isCallBudgetError}.
  */
-export const STATEMENT_BUDGET_DETAIL_CODES = [
-  /** 429: the request asked for more statements than it had left. */
-  "database.statement_budget_exhausted",
-  /** 400: one write is larger than the whole per-request limit. */
-  "database.statement_budget_exceeds_limit",
-] as const;
+export const CALL_BUDGET_DETAIL_CODE = "database.call_budget_exhausted";
 
 export class ImpresspressError extends Error {
   /** Coarse wafer error code from the `error` field (e.g. "NotFound"). */
@@ -72,7 +67,7 @@ export class ImpresspressError extends Error {
   /**
    * Fine-grained error code, when the server attached one: an impresspress
    * code (`"invalid_credentials"`, `"rate_limit_exceeded"`) or a namespaced
-   * runtime code (`"database.statement_budget_exhausted"`). Branch on this
+   * runtime code (`"database.call_budget_exhausted"`). Branch on this
    * rather than on `status`: two errors can share a status and differ in
    * whether a retry can succeed.
    */
@@ -117,15 +112,11 @@ export function isUnauthorizedError(error: unknown): error is ImpresspressError 
 }
 
 /**
- * True for the database's statement-budget refusal (see
- * {@link STATEMENT_BUDGET_DETAIL_CODES}): the request did more database work
- * than one request may. Do not retry it as it stands — unlike a
+ * True for the database's call-budget refusal (see
+ * {@link CALL_BUDGET_DETAIL_CODE}): the request did more database work than
+ * one request may. Do not retry it as it stands — unlike a
  * `rate_limit_exceeded` 429, waiting does not help.
  */
-export function isStatementBudgetError(error: unknown): error is ImpresspressError {
-  return (
-    error instanceof ImpresspressError &&
-    error.detailCode !== undefined &&
-    (STATEMENT_BUDGET_DETAIL_CODES as readonly string[]).includes(error.detailCode)
-  );
+export function isCallBudgetError(error: unknown): error is ImpresspressError {
+  return error instanceof ImpresspressError && error.detailCode === CALL_BUDGET_DETAIL_CODE;
 }

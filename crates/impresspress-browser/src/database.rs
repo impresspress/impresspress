@@ -99,7 +99,7 @@ use wafer_core::interfaces::database::{
         WriteOutcome,
     },
 };
-use wafer_sql_utils::{introspect, Backend};
+use wafer_sql_utils::Backend;
 
 use crate::{bridge, db_codec};
 
@@ -381,14 +381,6 @@ impl DbExec for BrowserDatabaseService {
         Some(&SCHEMA_CACHE)
     }
 
-    /// sql.js runs in the page's own worker and has no per-invocation
-    /// statement limit, so a write of any size is admitted.
-    fn statement_budget(
-        &self,
-    ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError> {
-        Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
-    }
-
     /// Decoding is [`record_from_columns`], the one policy every SQL-family
     /// backend shares. The bridge answers sql.js's positional
     /// `{ columns, values }` ([`db_codec::ordered_rows_from_js`]), so each
@@ -456,7 +448,7 @@ impl DbExec for BrowserDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<i64, DatabaseError> {
-        Ok(scalar_i64(self.query_first_json_row(sql, params)?))
+        scalar_i64(self.query_first_json_row(sql, params)?)
     }
 
     async fn run_scalar_f64(
@@ -464,12 +456,7 @@ impl DbExec for BrowserDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<f64, DatabaseError> {
-        Ok(scalar_f64(self.query_first_json_row(sql, params)?))
-    }
-
-    async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
-        let (sql, params) = introspect::build_table_exists(table, Backend::Sqlite);
-        Ok(self.run_scalar_i64(&sql, &params).await? > 0)
+        scalar_f64(self.query_first_json_row(sql, params)?)
     }
 
     /// `ops` between `BEGIN` and `COMMIT` on the one sql.js database, rolled
@@ -731,7 +718,9 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: custom,
             schema_add_column: custom,
-            statement_budget: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
         }
 
         async fn create(
@@ -980,12 +969,17 @@ pub fn make_database_service() -> std::sync::Arc<dyn DatabaseService> {
 // in-memory stand-in for the OPFS directory `dbInit` reads and `dbFlush`
 // writes. It pins the unique-key classification (`AlreadyExists`) that
 // `impresspress_core::blocks::crud`'s 409 rests on. The full
-// `run_conformance(&BrowserDatabaseService).await` is not run live; this module
-// only typechecks it, and the same two pieces are what a live run would use.
+// `run_conformance(&BrowserDatabaseService).await` and
+// `run_existence_probe_conformance` are not run live; this module only
+// typechecks them, and the same two pieces are what a live run would use. So
+// the existence probe's strict decode on sql.js is covered at runtime only by
+// wafer-core's own codec and executor tests: the decode is wafer-core's
+// `exec::table_exists`, which no adapter can override.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod conformance {
     use wafer_core::interfaces::database::{
-        conformance::run_conformance, service::DatabaseService,
+        conformance::{run_conformance, run_existence_probe_conformance},
+        service::DatabaseService,
     };
 
     use super::BrowserDatabaseService;
@@ -998,6 +992,7 @@ mod conformance {
     /// note above says this crate does not do.
     async fn _browser_adapter_is_conformable(svc: &BrowserDatabaseService) {
         run_conformance(svc as &dyn DatabaseService).await;
+        run_existence_probe_conformance(svc).await;
     }
 }
 
@@ -1309,16 +1304,27 @@ mod codec_policy {
     /// column themselves, so the scalar accessors must not look it up by name.
     #[wasm_bindgen_test]
     fn scalars_read_the_aliased_aggregate_column() {
-        assert_eq!(scalar_i64(Some(serde_json::json!({"cnt": 5}))), 5);
-        assert!((scalar_f64(Some(serde_json::json!({"total": 12.5}))) - 12.5).abs() < f64::EPSILON);
+        assert_eq!(
+            scalar_i64(Some(serde_json::json!({"cnt": 5}))).ok(),
+            Some(5)
+        );
+        let total = scalar_f64(Some(serde_json::json!({"total": 12.5}))).expect("a number");
+        assert!((total - 12.5).abs() < f64::EPSILON);
     }
 
-    /// An absent row counts as zero — the same answer the SQL aggregate gives
-    /// for an empty table, so "no row" can never be mistaken for a count.
+    /// An absent row is an error, never a zero: an aggregate always answers
+    /// one row (an empty table counts 0 in that row), so no row is a
+    /// malformed answer and cannot be mistaken for a count.
     #[wasm_bindgen_test]
-    fn an_absent_scalar_row_is_zero() {
-        assert_eq!(scalar_i64(None), 0);
-        assert!(scalar_f64(None).abs() < f64::EPSILON);
+    fn an_absent_scalar_row_is_an_error() {
+        assert!(matches!(
+            scalar_i64(None),
+            Err(wafer_core::interfaces::database::service::DatabaseError::Internal(_))
+        ));
+        assert!(matches!(
+            scalar_f64(None),
+            Err(wafer_core::interfaces::database::service::DatabaseError::Internal(_))
+        ));
     }
 }
 

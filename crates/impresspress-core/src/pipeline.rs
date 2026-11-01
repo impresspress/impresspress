@@ -1849,7 +1849,7 @@ mod discovery_tests {
     }
 
     /// The document tells a client which errors it must not retry as they
-    /// stand — the statement budget's two codes — keyed on the `code` field
+    /// stand — the call budget's code — keyed on the `code` field
     /// the SDK surfaces as `detailCode`.
     #[tokio::test]
     async fn openapi_documents_the_error_body_and_the_codes_not_to_retry() {
@@ -1875,12 +1875,8 @@ mod discovery_tests {
         let description = doc["info"]["description"]
             .as_str()
             .expect("info.description is a string");
-        for code in [
-            wafer_block::wire::database::STATEMENT_BUDGET_EXHAUSTED,
-            wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT,
-        ] {
-            assert!(description.contains(code), "{code} missing: {description}");
-        }
+        let code = wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
+        assert!(description.contains(code), "{code} missing: {description}");
         assert!(
             description.contains("do not retry it automatically"),
             "{description}"

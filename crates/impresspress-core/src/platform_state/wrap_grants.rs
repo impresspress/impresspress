@@ -1012,12 +1012,22 @@ mod boot_tests {
 
     #[async_trait::async_trait]
     impl DatabaseService for ErroringDb {
-        fn statement_budget(
-            &self,
-        ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError>
-        {
-            Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
+        async fn catalog_tables(&self) -> Result<Vec<String>, DatabaseError> {
+            unreachable!()
         }
+
+        async fn catalog_columns(
+            &self,
+            _table: &str,
+        ) -> Result<Vec<wafer_core::interfaces::database::service::CatalogColumn>, DatabaseError>
+        {
+            unreachable!()
+        }
+
+        async fn catalog_row_count(&self, _table: &str) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
         async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
             self.probes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
