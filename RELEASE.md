@@ -110,9 +110,9 @@ above.
   a transient D1 error; deploy again), or repair the row.
 - Clear bootstrap credentials once the first admin exists.
 
-### Cloudflare: the D1 budget counts calls; wafer-run 2cf5a593
+### Cloudflare: the D1 budget counts calls; wafer-run f9edcf43
 
-**What changes.** The wafer-run pin moves from `96860baa` to `2cf5a593`, and
+**What changes.** The wafer-run pin moves from `96860baa` to `f9edcf43`, and
 the Worker's D1 budget is counted the way D1 limits it: in **calls**, a
 `db.batch()` counting once (D1's limits page; measured on a Free account,
 2,998 statements in 1,000 calls).
@@ -214,7 +214,7 @@ and the default applies.
 
 ### Cloudflare budget: counted statement by statement
 
-Superseded by "Cloudflare: the D1 budget counts calls; wafer-run 2cf5a593"
+Superseded by "Cloudflare: the D1 budget counts calls; wafer-run f9edcf43"
 above, which counts the budget in calls; the figures below are history.
 
 **What changes.** The fresh-install budget is now counted as the Worker's D1

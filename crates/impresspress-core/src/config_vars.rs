@@ -33,7 +33,7 @@ pub const DEPLOY_TOKEN_KEY: &str = "IMPRESSPRESS_DEPLOY_TOKEN";
 /// A fresh database's `/_deploy/prepare` runs in one invocation. Its
 /// migrations make 172 calls (534 statements; every migration file and its
 /// ledger row are one call), and the whole prepare 220 (591 statements),
-/// measured 2026-11-02 at wafer-run 2cf5a593.
+/// measured 2026-11-02 at wafer-run f9edcf43.
 /// `a_cloudflare_fresh_install_fits_the_d1_budget`
 /// (`tests/migration_history.rs`) holds the migrations to half of the
 /// default, and `tests/d1_read_cost.rs` the whole prepare to the default.

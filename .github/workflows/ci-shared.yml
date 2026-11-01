@@ -118,7 +118,7 @@ jobs:
       - name: Lint — nothing names the removed strict-schema switch
         run: bash scripts/grep-guard-strict-schema.sh
 
-      # The D1 budget counts calls since wafer-run 2cf5a593 (WR-4). The
+      # The D1 budget counts calls since wafer-run f9edcf43 (WR-4). The
       # compiler catches the removed items; this catches a comment, a detail
       # code string, a var or a TOML key that still names the per-statement
       # budget.

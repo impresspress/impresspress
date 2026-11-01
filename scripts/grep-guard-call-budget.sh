@@ -3,7 +3,7 @@
 # grep-guard-call-budget.sh — nothing in the code names the per-statement D1
 # budget that wafer-run replaced with a per-call one.
 #
-# Since wafer-run 2cf5a593 (WR-4) a backend with a per-invocation limit counts
+# Since wafer-run f9edcf43 (WR-4) a backend with a per-invocation limit counts
 # calls, a `db.batch()` counting once: `StatementBudget`,
 # `DbExec::statement_budget`, `STATEMENT_BUDGET_EXHAUSTED` and
 # `STATEMENT_BUDGET_EXCEEDS_LIMIT` are gone, and impresspress renamed its side
