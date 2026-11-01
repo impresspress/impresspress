@@ -345,7 +345,7 @@ where
     // handle is dropped when the invocation's D1 work ends — after the match
     // below, or after the `wait_until` work that holds a clone — and that is
     // when it logs its `d1_cost` line.
-    let queries = invocation_query_count(&environment);
+    let calls = invocation_call_count(&environment);
 
     // Isolate-scoped init — no-op after the first call. First, before any
     // path is routed: the `/_deploy/*` endpoints below boot a runtime and run
@@ -376,7 +376,7 @@ where
             req,
             env,
             environment,
-            &queries,
+            &calls,
             request_config,
             prepare_plan,
             register_blocks,
@@ -420,18 +420,18 @@ where
         return serve_static_asset_from_r2(&env, key, content_type).await;
     }
 
-    let (env_ref, environment_ref, queries_ref) = (&env, &environment, &queries);
+    let (env_ref, environment_ref, calls_ref) = (&env, &environment, &calls);
     let request_config = &request_config;
     let result = serve_and_register(
         env_ref,
         environment_ref,
-        queries_ref,
+        calls_ref,
         |after, defer| async move {
             run_inner(
                 req,
                 env_ref,
                 environment_ref,
-                queries_ref,
+                calls_ref,
                 request_config,
                 register_blocks,
                 register_post_build,
@@ -470,7 +470,7 @@ where
     }
 }
 
-/// A fresh [`database::D1QueryCount`] for one invocation, which logs the
+/// A fresh [`database::D1CallCount`] for one invocation, which logs the
 /// invocation's [`d1_cost_line`] when its D1 work ends.
 ///
 /// Both Worker entries create theirs here, and only here: `entry_wiring_tests`
@@ -481,7 +481,7 @@ where
 /// parse is logged as a warning on every invocation, and the default applies:
 /// the operator's setting was not applied, which they must see, and the lines
 /// it governs keep coming.
-fn invocation_query_count(environment: &CfEnvironment) -> database::D1QueryCount {
+fn invocation_call_count(environment: &CfEnvironment) -> database::D1CallCount {
     let threshold = environment.d1_rows_log_threshold().unwrap_or_else(|error| {
         invocation_log::warn(&impresspress_core::metrics::metric_line(
             "d1_rows_log_threshold_invalid",
@@ -489,7 +489,7 @@ fn invocation_query_count(environment: &CfEnvironment) -> database::D1QueryCount
         ));
         environment::D1_ROWS_LOG_THRESHOLD_DEFAULT
     });
-    database::D1QueryCount::reporting_at_end(move |cost| {
+    database::D1CallCount::reporting_at_end(move |cost| {
         invocation_log::cost(&cost);
         if let Some(line) = d1_cost_line(&cost, threshold) {
             invocation_log::info(&line);
@@ -497,7 +497,7 @@ fn invocation_query_count(environment: &CfEnvironment) -> database::D1QueryCount
     })
 }
 
-/// Where [`invocation_query_count`]'s lines and reports go: the Worker's
+/// Where [`invocation_call_count`]'s lines and reports go: the Worker's
 /// console. A test captures them instead ([`invocation_log::capture`]), which
 /// is how the entries' wiring is tested through `run_with_config` and
 /// `run_scheduled_with_config` themselves.
@@ -570,14 +570,15 @@ mod invocation_log {
 /// when it is not logged: it is logged when the invocation ran a runtime
 /// build, or read more than `threshold` rows.
 ///
-/// `metric=d1_cost build=prepared|dynamic|none statements=N rows_read=N
-/// rows_written=N unmetered=N`. The rows are the sums of D1's own
-/// `meta.rows_read` / `meta.rows_written` over the invocation's statements,
-/// the figures D1 bills by; `unmetered` counts the statements whose rows D1
-/// did not report (a failed statement; every `query_raw`, which is the
-/// admin database pages' explorer, table list, row counts and column info),
-/// so a line whose `unmetered` is not 0 is a floor, not a total. See
-/// [`database::D1QueryCount`].
+/// `metric=d1_cost build=prepared|dynamic|none calls=N statements=N
+/// rows_read=N rows_written=N unmetered=N`. `calls` is the unit D1 limits per
+/// invocation, a `db.batch()` counting once; `statements` counts each
+/// statement of a batch, and one per lone call. The rows are the sums of D1's
+/// own `meta.rows_read` / `meta.rows_written` over the invocation's
+/// statements, the figures D1 bills by; `unmetered` counts the statements
+/// whose rows D1 did not report (a failed statement; every `query_raw`, which
+/// is the admin SQL explorer's), so a line whose `unmetered` is not 0 is a
+/// floor, not a total. See [`database::D1CallCount`].
 ///
 /// What the line cannot say: it does not split introspection rows
 /// (`pragma_table_info`) from the rest, and an invocation that built nothing
@@ -594,6 +595,7 @@ pub(crate) fn d1_cost_line(cost: &database::D1Cost, threshold: u64) -> Option<St
         "d1_cost",
         &[
             ("build", build),
+            ("calls", &cost.calls.to_string()),
             ("statements", &cost.statements.to_string()),
             ("rows_read", &cost.rows_read.to_string()),
             ("rows_written", &cost.rows_written.to_string()),
@@ -622,7 +624,7 @@ pub(crate) fn d1_cost_line(cost: &database::D1Cost, threshold: u64) -> Option<St
 async fn serve_and_register<S, Fut>(
     env: &worker::Env,
     environment: &CfEnvironment,
-    queries: &database::D1QueryCount,
+    calls: &database::D1CallCount,
     serve: S,
     wait_until: &dyn Fn(BoxedTask),
 ) -> Result<worker::Response, Box<dyn std::error::Error>>
@@ -634,7 +636,7 @@ where
     // unused (none when the policy writes no rows); the row is written below
     // with a handle that may use them, and then they go to the request's
     // deferred tasks (see `impresspress_core::after_response`).
-    queries.reserve(after_response::audit_row_reservation(
+    calls.reserve(after_response::audit_row_reservation(
         environment.config_value(impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY),
     ));
     let after = AfterResponse::new();
@@ -656,7 +658,7 @@ where
                 env,
                 environment,
                 runner::D1_BINDING,
-                &queries.for_reserved_work(),
+                &calls.for_reserved_work(),
             ) {
                 Ok(db) => Some(Box::pin(async move {
                     if let Err(failure) = after_response::persist_audit_row(db.as_ref(), row).await
@@ -674,7 +676,7 @@ where
     if audit_write.is_some() || !tasks.is_empty() {
         wait_until(Box::pin(after_response_work(
             audit_write,
-            queries.clone(),
+            calls.clone(),
             tasks,
         )));
     }
@@ -690,13 +692,13 @@ where
 /// reservation, and be refused while the invocation had room.
 async fn after_response_work(
     audit_write: Option<BoxedTask>,
-    queries: database::D1QueryCount,
+    calls: database::D1CallCount,
     tasks: Vec<BoxedTask>,
 ) {
     if let Some(write) = audit_write {
         write.await;
     }
-    queries.release_reservation();
+    calls.release_reservation();
     futures::future::join_all(tasks).await;
 }
 
@@ -802,9 +804,9 @@ pub async fn run_scheduled_with_config<F, G>(
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
     let environment = CfEnvironment::capture(&env);
-    // This invocation's D1 statement count and `d1_cost` line, for the
+    // This invocation's D1 call count and `d1_cost` line, for the
     // reasons `route_request` gives.
-    let queries = invocation_query_count(&environment);
+    let calls = invocation_call_count(&environment);
     // Same reason as `run_with_config`: `std::env` is stubbed empty on wasm32,
     // so the Worker var is the only channel carrying an asset base URL. The
     // sweep renders no page, but the runtime this builds is published into the
@@ -826,7 +828,7 @@ pub async fn run_scheduled_with_config<F, G>(
     match run_scheduled_inner(
         &env,
         &environment,
-        &queries,
+        &calls,
         &request_config,
         register_blocks,
         register_post_build,
@@ -867,7 +869,7 @@ pub async fn run_scheduled_with_config<F, G>(
 async fn run_scheduled_inner<F, G>(
     env: &worker::Env,
     environment: &CfEnvironment,
-    queries: &crate::database::D1QueryCount,
+    calls: &crate::database::D1CallCount,
     request_config: &HashMap<String, String>,
     register_blocks: F,
     register_post_build: G,
@@ -910,7 +912,7 @@ where
     let (rt, _cache_outcome) = runtime_cache::get_or_build(
         env,
         environment,
-        queries,
+        calls,
         request_config,
         register_blocks,
         register_post_build,
@@ -919,7 +921,7 @@ where
     let services = warm_request_services(
         env,
         environment,
-        queries,
+        calls,
         rt.wafer.config_snapshot(),
         &rt.variables_snapshot,
         request_config,
@@ -1058,14 +1060,14 @@ async fn dispatch(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the invocation's captured environment and D1 statement count travel as \
+    reason = "the invocation's captured environment and D1 call count travel as \
               parameters from the Worker entry that owns them"
 )]
 async fn run_inner<F, G>(
     req: worker::Request,
     env: &worker::Env,
     environment: &CfEnvironment,
-    queries: &crate::database::D1QueryCount,
+    calls: &crate::database::D1CallCount,
     request_config: &HashMap<String, String>,
     register_blocks: F,
     register_post_build: G,
@@ -1085,7 +1087,7 @@ where
     let (rt, cache_outcome) = runtime_cache::get_or_build(
         env,
         environment,
-        queries,
+        calls,
         request_config,
         register_blocks,
         register_post_build,
@@ -1094,7 +1096,7 @@ where
     let services = warm_request_services(
         env,
         environment,
-        queries,
+        calls,
         rt.wafer.config_snapshot(),
         &rt.variables_snapshot,
         request_config,
@@ -1286,12 +1288,12 @@ mod deferred_drain_tests {
             .expect("request");
         let env = crate::test_fakes::empty_env();
         let environment = CfEnvironment::capture(&env);
-        let queries = database::D1QueryCount::new();
+        let calls = database::D1CallCount::new();
         let served: RefCell<Option<Rc<AfterResponse>>> = RefCell::default();
         let response = serve_and_register(
             &env,
             &environment,
-            &queries,
+            &calls,
             |after, defer| {
                 *served.borrow_mut() = Some(Rc::clone(&after));
                 let wafer = &wafer;
@@ -1366,13 +1368,13 @@ mod deferred_drain_tests {
             .expect("request");
         let env = crate::test_fakes::empty_env();
         let environment = CfEnvironment::capture(&env);
-        let queries =
-            database::D1QueryCount::reporting_at_end(move |cost| report.borrow_mut().push(cost));
-        queries.note_build(database::BuildKind::Dynamic);
+        let calls =
+            database::D1CallCount::reporting_at_end(move |cost| report.borrow_mut().push(cost));
+        calls.note_build(database::BuildKind::Dynamic);
         let response = serve_and_register(
             &env,
             &environment,
-            &queries,
+            &calls,
             |after, defer| {
                 let wafer = &wafer;
                 async move {
@@ -1391,7 +1393,7 @@ mod deferred_drain_tests {
         .await
         .expect("dispatch");
         assert_eq!(response.status_code(), 200);
-        drop(queries);
+        drop(calls);
         assert!(
             reports.borrow().is_empty(),
             "the deferred task still holds the invocation's count"
@@ -1415,11 +1417,14 @@ mod deferred_drain_tests {
 
     /// The `d1_cost` line: logged for an invocation that built a runtime,
     /// whatever it read, and for one that read more than the threshold;
-    /// quiet otherwise. Its fields are D1's sums, and `unmetered` the
-    /// statements D1 did not report rows for.
+    /// quiet otherwise. Its fields are the calls and statements sent, D1's
+    /// sums, and `unmetered` the statements D1 did not report rows for. The
+    /// fixture's calls are not its statements, so a line printing one for
+    /// the other fails.
     #[wasm_bindgen_test]
     fn the_d1_cost_line_is_logged_for_a_build_or_past_the_threshold() {
         let cost = |built, rows_read| database::D1Cost {
+            calls: 5,
             statements: 12,
             metered: 11,
             rows_read,
@@ -1429,23 +1434,23 @@ mod deferred_drain_tests {
         assert_eq!(
             d1_cost_line(&cost(Some(database::BuildKind::Prepared), 0), 1000).as_deref(),
             Some(
-                "metric=d1_cost build=prepared statements=12 rows_read=0 rows_written=3 \
-                 unmetered=1"
+                "metric=d1_cost build=prepared calls=5 statements=12 rows_read=0 \
+                 rows_written=3 unmetered=1"
             ),
             "a build is logged even when it read nothing"
         );
         assert_eq!(
             d1_cost_line(&cost(Some(database::BuildKind::Dynamic), 353), 1000).as_deref(),
             Some(
-                "metric=d1_cost build=dynamic statements=12 rows_read=353 rows_written=3 \
-                 unmetered=1"
+                "metric=d1_cost build=dynamic calls=5 statements=12 rows_read=353 \
+                 rows_written=3 unmetered=1"
             ),
         );
         assert_eq!(
             d1_cost_line(&cost(None, 1001), 1000).as_deref(),
             Some(
-                "metric=d1_cost build=none statements=12 rows_read=1001 rows_written=3 \
-                 unmetered=1"
+                "metric=d1_cost build=none calls=5 statements=12 rows_read=1001 \
+                 rows_written=3 unmetered=1"
             ),
             "past the threshold without a build"
         );
@@ -1466,31 +1471,31 @@ mod deferred_drain_tests {
     /// task never meets a limit still lowered for a row already written.
     #[wasm_bindgen_test]
     async fn deferred_tasks_run_after_the_audit_row_with_the_reservation_released() {
-        let queries = database::D1QueryCount::new();
-        queries.reserve(impresspress_core::after_response::AUDIT_ROW_STATEMENTS);
+        let calls = database::D1CallCount::new();
+        calls.reserve(impresspress_core::after_response::AUDIT_ROW_CALLS);
         let order: Rc<RefCell<Vec<String>>> = Rc::default();
 
-        let (log, count) = (Rc::clone(&order), queries.clone());
+        let (log, count) = (Rc::clone(&order), calls.clone());
         let audit: BoxedTask = Box::pin(async move {
             yield_once().await;
             log.borrow_mut()
                 .push(format!("row, reserved {}", count.reserved_for_test()));
         });
         let task = |name: &'static str| {
-            let (log, count) = (Rc::clone(&order), queries.clone());
+            let (log, count) = (Rc::clone(&order), calls.clone());
             Box::pin(async move {
                 log.borrow_mut()
                     .push(format!("{name}, reserved {}", count.reserved_for_test()));
             }) as BoxedTask
         };
-        after_response_work(Some(audit), queries.clone(), vec![task("a"), task("b")]).await;
+        after_response_work(Some(audit), calls.clone(), vec![task("a"), task("b")]).await;
 
         assert_eq!(
             *order.borrow(),
             [
                 format!(
                     "row, reserved {}",
-                    impresspress_core::after_response::AUDIT_ROW_STATEMENTS
+                    impresspress_core::after_response::AUDIT_ROW_CALLS
                 ),
                 "a, reserved 0".to_string(),
                 "b, reserved 0".to_string(),
@@ -2096,12 +2101,12 @@ mod final_write_tests {
 
         let env = crate::test_fakes::empty_env();
         let environment = CfEnvironment::capture(&env);
-        let queries = crate::database::D1QueryCount::new();
+        let calls = crate::database::D1CallCount::new();
         let handed: RefCell<Vec<BoxedTask>> = RefCell::default();
         let mut response = serve_and_register(
             &env,
             &environment,
-            &queries,
+            &calls,
             |after, defer| {
                 let wafer = &wafer;
                 async move {
@@ -2328,7 +2333,7 @@ mod executor_trace_wiring_tests {
 }
 
 /// Both Worker entries build their invocation's count through
-/// [`invocation_query_count`]: driven through `run_with_config` and
+/// [`invocation_call_count`]: driven through `run_with_config` and
 /// `run_scheduled_with_config` themselves, each invocation reports its cost
 /// once when its D1 work ends, and a threshold that does not parse is a
 /// warning.
@@ -2457,8 +2462,8 @@ mod entry_wiring_tests {
             captured.lines,
             [(
                 "info",
-                "metric=d1_cost build=dynamic statements=0 rows_read=0 rows_written=0 \
-                 unmetered=0"
+                "metric=d1_cost build=dynamic calls=0 statements=0 rows_read=0 \
+                 rows_written=0 unmetered=0"
                     .to_string()
             )]
         );

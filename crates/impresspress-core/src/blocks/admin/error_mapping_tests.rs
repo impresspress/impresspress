@@ -400,10 +400,10 @@ async fn json_reads_keep_a_wrap_denial() {
     let (ctx, _) = fixture().await;
     for (ops, path) in [
         (every_op_on(AUDIT_LOGS_TABLE), "/b/admin/api/logs"),
-        // The table listing is a raw introspection query, which names no
+        // The table listing is a typed catalog read, which names no
         // collection.
         (
-            vec![("database.query_raw", "")],
+            vec![("database.catalog_tables", "")],
             "/b/admin/api/database/info",
         ),
         (every_op_on(variables::TABLE), "/b/admin/api/settings"),
@@ -530,7 +530,7 @@ async fn page_read_denials_are_the_403_page() {
             "/b/admin/logs?tab=storage",
         ),
         (every_op_on(block_settings::TABLE), "/b/admin/blocks"),
-        (vec![("database.query_raw", "")], "/b/admin/database"),
+        (vec![("database.catalog_tables", "")], "/b/admin/database"),
         (
             every_op_on(wrap_grants::TABLE),
             "/b/admin/settings/permissions",

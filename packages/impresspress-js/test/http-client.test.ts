@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { HttpClient } from "../src/http-client";
-import { ImpresspressError, isStatementBudgetError } from "../src/error";
+import { ImpresspressError, isCallBudgetError } from "../src/error";
 import { fakeBlobResponse, fakeJsonResponse, hangingFetch } from "./fixtures";
 
 /**
@@ -181,9 +181,9 @@ describe("HttpClient", () => {
     });
   });
 
-  describe("the statement-budget refusal", () => {
+  describe("the call-budget refusal", () => {
     // The exact bodies the server sends: `wafer_block::http_codec` renders the
-    // error's detail code as `code` (see `crates/impresspress/tests/statement_budget_http.rs`).
+    // error's detail code as `code` (see `crates/impresspress/tests/call_budget_http.rs`).
     const refused = async (body: unknown, status: number) => {
       const fetchFn = vi.fn().mockResolvedValue(fakeJsonResponse(body, status));
       const http = new HttpClient({ url: "http://api.test", fetch: fetchFn as unknown as typeof fetch });
@@ -197,32 +197,22 @@ describe("HttpClient", () => {
       const budget = await refused(
         {
           error: "ResourceExhausted",
-          message: "batch runs 2 statements; this invocation has 1 of its 1000 left",
-          code: "database.statement_budget_exhausted",
+          message: "call budget exhausted: this invocation has sent 1000 D1 calls and may send 1000",
+          code: "database.call_budget_exhausted",
         },
         429,
       );
-      expect(budget).toMatchObject({ status: 429, detailCode: "database.statement_budget_exhausted" });
-      expect(isStatementBudgetError(budget)).toBe(true);
+      expect(budget).toMatchObject({ status: 429, detailCode: "database.call_budget_exhausted" });
+      expect(isCallBudgetError(budget)).toBe(true);
 
       const rateLimited = await refused(
         { error: "ResourceExhausted", message: "Too many requests", code: "rate_limit_exceeded" },
         429,
       );
-      expect(isStatementBudgetError(rateLimited)).toBe(false);
-    });
-
-    it("covers the write larger than the whole limit", async () => {
-      const tooLarge = await refused(
-        {
-          error: "InvalidArgument",
-          message: "batch runs 2000 statements; the limit is 1000",
-          code: "database.statement_budget_exceeds_limit",
-        },
-        400,
-      );
-      expect(isStatementBudgetError(tooLarge)).toBe(true);
-      expect(isStatementBudgetError(new Error("x"))).toBe(false);
+      expect(isCallBudgetError(rateLimited)).toBe(false);
+      const plain429 = await refused({ error: "ResourceExhausted", message: "quota" }, 429);
+      expect(isCallBudgetError(plain429)).toBe(false);
+      expect(isCallBudgetError(new Error("x"))).toBe(false);
     });
   });
 

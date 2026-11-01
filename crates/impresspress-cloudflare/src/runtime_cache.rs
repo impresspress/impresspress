@@ -1011,14 +1011,14 @@ fn publish_runtime(
 }
 
 /// What every build on the request path reads from its own request: the Env,
-/// the captured environment, the D1 statement budget and the per-request
+/// the captured environment, the D1 call count and the per-request
 /// config. Borrowed together so the path's functions take one argument for
 /// them rather than four.
 #[derive(Clone, Copy)]
 struct RequestInputs<'a> {
     env: &'a worker::Env,
     environment: &'a crate::environment::CfEnvironment,
-    queries: &'a crate::database::D1QueryCount,
+    calls: &'a crate::database::D1CallCount,
     request_config: &'a std::collections::HashMap<String, String>,
 }
 
@@ -1034,7 +1034,7 @@ struct RequestInputs<'a> {
 pub(crate) async fn get_or_build<F, G>(
     env: &worker::Env,
     environment: &crate::environment::CfEnvironment,
-    queries: &crate::database::D1QueryCount,
+    calls: &crate::database::D1CallCount,
     request_config: &std::collections::HashMap<String, String>,
     register_blocks: F,
     register_post_build: G,
@@ -1051,7 +1051,7 @@ where
     let inputs = RequestInputs {
         env,
         environment,
-        queries,
+        calls,
         request_config,
     };
     with_one_reentry(
@@ -1309,9 +1309,7 @@ where
 
     // This invocation's `d1_cost` line names the build its rows were read
     // for, a failed one included.
-    inputs
-        .queries
-        .note_build(crate::database::BuildKind::Dynamic);
+    inputs.calls.note_build(crate::database::BuildKind::Dynamic);
 
     // This build already CONSUMED the dirty flag (`take_dirty` above). If it
     // now fails, that local-write signal must not die with it: the isolate
@@ -1323,7 +1321,7 @@ where
     let built = match crate::runtime_build::build_runtime(
         inputs.env,
         inputs.environment,
-        inputs.queries,
+        inputs.calls,
         inputs.request_config,
         None,
         register_blocks,
@@ -1403,12 +1401,12 @@ where
     // This invocation's `d1_cost` line names the build its rows were read
     // for, a failed one included.
     inputs
-        .queries
+        .calls
         .note_build(crate::database::BuildKind::Prepared);
     let built = crate::runtime_build::build_runtime(
         inputs.env,
         inputs.environment,
-        inputs.queries,
+        inputs.calls,
         inputs.request_config,
         Some(plan),
         register_blocks,
@@ -1691,11 +1689,11 @@ pub(crate) mod tests {
         reset_isolate();
         let env = env_whose_build_fails_at_d1();
         let environment = crate::environment::CfEnvironment::capture(&env);
-        let queries = crate::database::D1QueryCount::new();
+        let calls = crate::database::D1CallCount::new();
         let built = get_or_build(
             &env,
             &environment,
-            &queries,
+            &calls,
             &std::collections::HashMap::new(),
             Ok,
             |_, _| Ok(()),
@@ -1704,7 +1702,7 @@ pub(crate) mod tests {
         reset_isolate();
 
         assert!(built.is_err(), "the build failed at its D1 binding");
-        let cost = queries.cost();
+        let cost = calls.cost();
         assert_eq!(cost.built, Some(crate::database::BuildKind::Dynamic));
         assert_eq!(cost.statements, 0, "it failed before sending anything");
     }
@@ -1715,7 +1713,7 @@ pub(crate) mod tests {
     async fn a_prepared_hydration_notes_its_kind_on_the_invocations_count() {
         let env = env_whose_build_fails_at_d1();
         let environment = crate::environment::CfEnvironment::capture(&env);
-        let queries = crate::database::D1QueryCount::new();
+        let calls = crate::database::D1CallCount::new();
         let request_config = std::collections::HashMap::new();
         let plan = impresspress_core::PreparedRuntimePlan::new_with_config_generation(
             "example",
@@ -1739,7 +1737,7 @@ pub(crate) mod tests {
             RequestInputs {
                 env: &env,
                 environment: &environment,
-                queries: &queries,
+                calls: &calls,
                 request_config: &request_config,
             },
             &plan,
@@ -1751,7 +1749,7 @@ pub(crate) mod tests {
         .await;
 
         assert!(hydrated.is_err(), "the build failed at its D1 binding");
-        let cost = queries.cost();
+        let cost = calls.cost();
         assert_eq!(cost.built, Some(crate::database::BuildKind::Prepared));
         assert_eq!(cost.statements, 0);
     }

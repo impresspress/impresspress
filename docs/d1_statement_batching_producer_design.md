@@ -56,6 +56,11 @@ The D1 adapter implements only the `DbExec` execution *primitives* (`run_fetch`,
 `DbExec` default. All `get/list/count/create/update/...` orchestration lives once
 in `wafer-core`, identical across SQLite, Postgres, the browser backend, and D1.
 
+> **Note (2026-11-02, impresspress #271):** `DbExec::dbx_table_exists` no longer
+> exists. wafer-run #475 replaced it with the free function
+> `exec::table_exists`, which decodes the probe strictly through `run_fetch` and
+> no backend can override; the D1, sql.js and `D1Shaped` overrides were deleted.
+
 ### The `list` expansion (`wafer-core .../database/exec.rs::list`)
 
 ```rust

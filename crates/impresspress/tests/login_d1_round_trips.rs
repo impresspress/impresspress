@@ -1,13 +1,14 @@
 //! The database round trips a password sign-in waits on, counted the way D1
 //! charges them.
 //!
-//! On Cloudflare every D1 statement is a network round trip from the Worker to
-//! the database's region, and a sign-in answers only after the last one it
-//! awaits. Measured on a Workers Free deployment (client and Worker in
+//! On Cloudflare every D1 call (a lone statement, or a whole `db.batch()`) is
+//! a network round trip from the Worker to the database's region, and a
+//! sign-in answers only after the last one it awaits. Measured on a Workers Free deployment (client and Worker in
 //! Auckland, D1 in region `OC`), each of those round trips cost about 20 ms,
 //! and they, not CPU or the password hash, were most of a warm sign-in's time.
 //! So the number of SEQUENTIAL round trips before the response is the latency
-//! budget, and the number of statements the D1 query budget.
+//! budget, and the number of round trips what it spends of the D1 call
+//! budget.
 //!
 //! These tests drive the real `site-main` flow of the runtime the native binary
 //! builds, the way the Cloudflare entry drives it: inside an

@@ -1,6 +1,6 @@
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
-use wafer_sql_utils::{introspect, Backend};
+use wafer_sql_utils::Backend;
 
 use super::contracts;
 use crate::{
@@ -21,83 +21,51 @@ pub(in crate::blocks::admin) struct TableSummary {
 /// schema panel.
 pub(in crate::blocks::admin) struct ColumnInfo {
     pub name: String,
+    /// The declared type, as the catalog spells it (empty when none).
     pub ty: String,
     pub notnull: bool,
+    /// Whether the column is part of the primary key — any position of a
+    /// composite key included.
     pub pk: bool,
-    /// The column's default expression, if any (SQLite `dflt_value`).
+    /// The column's default expression, if any, as the backend spells it.
     pub default_value: Option<String>,
 }
 
 /// Why [`introspect_columns`] has no schema to show.
 pub(in crate::blocks::admin) enum IntrospectError {
-    /// The name is not an identifier the backend can quote. It is user input
-    /// (URL path / `?table=`), so this is the caller's mistake.
+    /// The name is not one the catalog can hold (empty, or with a NUL). It is
+    /// user input (URL path / `?table=`), so this is the caller's mistake.
     InvalidName,
-    /// The backend reports no columns for the name: there is no such table.
+    /// The catalog holds no table by that name.
     NoSuchTable,
     /// A read failed. Never shown as an empty schema or a zero count.
     Read(WaferError),
 }
 
-/// The error for a count statement that could not be built for `name`.
-///
-/// Each caller hands its builder a name that builder accepts by construction
-/// — a name the catalog holds (never empty, never a NUL), or one
-/// `build_table_info` already held to the plain-identifier rule — so a
-/// refusal here is a fault, not user input.
-fn count_build_fault(name: &str, e: wafer_sql_utils::SqlBuildError) -> WaferError {
-    WaferError::new(ErrorCode::Internal, format!("count {name}: {e}"))
-}
-
-/// Run `count_sql`, the row-count statement built for table `name`, and read
-/// its count.
-async fn run_row_count(ctx: &dyn Context, name: &str, count_sql: &str) -> Result<i64, WaferError> {
-    let rows = db::query_raw(ctx, count_sql, &[]).await?;
-    rows.first()
-        .and_then(|r| r.data.get("cnt").and_then(|v| v.as_i64()))
-        .ok_or_else(|| {
-            WaferError::new(
-                ErrorCode::Internal,
-                format!("count {name}: the backend returned no count"),
-            )
-        })
-}
-
 /// List every table with its row count, sorted by name.
 ///
 /// Single source of truth for the table-browser introspection shared by the
-/// JSON API and the SSR page. The per-table COUNT is issued sequentially —
-/// concurrent counts on a single backend connection (the SQLite case) can
-/// deadlock, and the row is read-once-per-page, so the dedupe (not the
-/// fan-out) is the win here.
+/// JSON API and the SSR page: the typed catalog reads (`db::catalog_tables`,
+/// `db::catalog_row_count`), which the host builds and runs through the
+/// backend's ordinary read path, so D1 meters their rows. The per-table
+/// count is issued sequentially — concurrent counts on a single backend
+/// connection (the SQLite case) can deadlock, and the row is
+/// read-once-per-page, so the dedupe (not the fan-out) is the win here.
 ///
 /// Each name is the catalog's, which need not be a name the database layer
 /// would create (a table made by a console or another tool can be `Foo` or
-/// `a-b`), so it is counted through the catalog-name builder, which quotes it
-/// rather than holding it to the plain-identifier rule.
+/// `a-b`); the catalog reads quote it rather than holding it to the
+/// plain-identifier rule.
 ///
 /// A failed listing or count is an error: an empty list or a `0` count would
 /// read as an empty database.
 pub(in crate::blocks::admin) async fn introspect_table_summaries(
     ctx: &dyn Context,
 ) -> Result<Vec<TableSummary>, WaferError> {
-    let backend = crate::db_backend(ctx).await?;
-    let sql = introspect::build_list_tables(backend);
-    let records = db::query_raw(ctx, &sql, &[]).await?;
-    let mut out = Vec::with_capacity(records.len());
-    for r in &records {
-        let name = r
-            .data
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if name.is_empty() {
-            continue;
-        }
-        let count_sql = introspect::build_catalog_table_row_count(&name, backend)
-            .map_err(|e| count_build_fault(&name, e))?;
-        let row_count = run_row_count(ctx, &name, &count_sql).await?;
+    let names = db::catalog_tables(ctx).await?;
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let row_count = db::catalog_row_count(ctx, &name).await?;
         out.push(TableSummary { name, row_count });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -105,55 +73,31 @@ pub(in crate::blocks::admin) async fn introspect_table_summaries(
 }
 
 /// Introspect one table's columns plus its row count. `table` is untrusted
-/// (URL path / selected name).
+/// (URL path / selected name), and named as the catalog lists it, so a
+/// table the listing shows (`Foo`, `a-b`) is browsable.
 pub(in crate::blocks::admin) async fn introspect_columns(
     ctx: &dyn Context,
     table: &str,
 ) -> Result<(Vec<ColumnInfo>, i64), IntrospectError> {
-    let backend = crate::db_backend(ctx)
-        .await
-        .map_err(IntrospectError::Read)?;
-    let (info_sql, info_args) =
-        introspect::build_table_info(table, backend).map_err(|_| IntrospectError::InvalidName)?;
-    let columns = db::query_raw(ctx, &info_sql, &info_args)
-        .await
-        .map_err(IntrospectError::Read)?;
-    // Both backends answer the column read for an unknown table with no rows
-    // rather than an error; counting it would fail, so stop here.
-    if columns.is_empty() {
-        return Err(IntrospectError::NoSuchTable);
-    }
+    let read_error = |e: WaferError| match e.code {
+        ErrorCode::NotFound => IntrospectError::NoSuchTable,
+        ErrorCode::InvalidArgument => IntrospectError::InvalidName,
+        _ => IntrospectError::Read(e),
+    };
+    let columns = db::catalog_columns(ctx, table).await.map_err(read_error)?;
     let cols = columns
-        .iter()
+        .into_iter()
         .map(|c| ColumnInfo {
-            name: c
-                .data
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            ty: c
-                .data
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            notnull: c.data.get("notnull").and_then(|v| v.as_i64()).unwrap_or(0) == 1,
-            pk: c.data.get("pk").and_then(|v| v.as_i64()).unwrap_or(0) == 1,
-            default_value: c
-                .data
-                .get("dflt_value")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            name: c.name,
+            ty: c.decl_type,
+            notnull: c.not_null,
+            pk: c.primary_key_position.is_some(),
+            default_value: c.default_value,
         })
         .collect();
-    // `table` passed `build_table_info`'s plain-identifier rule, the same one
-    // `build_table_row_count` applies.
-    let count_sql = introspect::build_table_row_count(table, backend)
-        .map_err(|e| IntrospectError::Read(count_build_fault(table, e)))?;
-    let row_count = run_row_count(ctx, table, &count_sql)
+    let row_count = db::catalog_row_count(ctx, table)
         .await
-        .map_err(IntrospectError::Read)?;
+        .map_err(read_error)?;
     Ok((cols, row_count))
 }
 
@@ -163,16 +107,10 @@ pub(super) async fn handle_info(ctx: &dyn Context) -> OutputStream {
         Ok(backend) => backend,
         Err(e) => return crud::db_error_internal(e, "Could not read the database backend"),
     };
-    let sql = introspect::build_list_tables(backend);
-    let tables = match db::query_raw(ctx, &sql, &[]).await {
+    let table_names = match db::catalog_tables(ctx).await {
         Ok(t) => t,
         Err(e) => return crud::db_error_internal(e, "Database error"),
     };
-
-    let table_names: Vec<&str> = tables
-        .iter()
-        .filter_map(|r| r.data.get("name").and_then(|v| v.as_str()))
-        .collect();
 
     ok_json(&serde_json::json!({
         "type": backend_name(backend),
@@ -462,6 +400,20 @@ mod tests {
         assert_eq!(output_http_status(out).await, 500);
     }
 
+    /// `break_reads` fails every catalog read itself, never delegating one
+    /// past the break: the routes above would still answer 500 through an
+    /// earlier read (the backend lookup, a row count), which would hide a
+    /// catalog read that slipped through.
+    #[tokio::test]
+    async fn break_reads_fails_every_catalog_read() {
+        let ctx = TestContext::with_admin().await.break_reads();
+        let db = ctx.database_service();
+        let roles = crate::blocks::admin::ROLES_TABLE;
+        assert!(db.catalog_tables().await.is_err());
+        assert!(db.catalog_columns(roles).await.is_err());
+        assert!(db.catalog_row_count(roles).await.is_err());
+    }
+
     /// A failed column read is a 500, not a table with no columns.
     #[tokio::test]
     async fn a_failed_column_read_is_a_500_not_no_columns() {
@@ -587,6 +539,62 @@ mod tests {
                 .any(|c| c["name"] == "name"),
             "{columns}"
         );
+    }
+
+    /// **The schema is described as the catalog declares it.** Each column's
+    /// declared type, `NOT NULL`, default and key membership come from the
+    /// typed catalog read — both columns of a composite primary key included,
+    /// where reading SQLite's `pk` as "is 1" marked only the first. And a
+    /// table named outside the plain-identifier rule is browsable, with its
+    /// count, as the listing shows it.
+    #[tokio::test]
+    async fn the_columns_carry_their_declared_type_not_null_default_and_every_key() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let db = ctx.database_service();
+        db.exec_raw(
+            "CREATE TABLE \"Odd-Name\" (\
+             b TEXT NOT NULL, \
+             a INTEGER NOT NULL, \
+             note VARCHAR(20) DEFAULT 'none', \
+             PRIMARY KEY (a, b))",
+            &[],
+        )
+        .await
+        .expect("create a composite-key table");
+        db.exec_raw(
+            "INSERT INTO \"Odd-Name\" (a, b) VALUES (1, 'x'), (2, 'y'), (3, 'z')",
+            &[],
+        )
+        .await
+        .expect("seed three rows");
+
+        let out = api(&ctx, "/b/admin/api/database/tables/Odd-Name/columns").await;
+        let body = output_json(out).await;
+        let columns = body["columns"].as_array().expect("columns");
+        let column = |name: &str| {
+            columns
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is described: {body}"))
+        };
+        assert_eq!(column("b")["type"], "TEXT", "{body}");
+        assert_eq!(column("b")["notnull"], true, "{body}");
+        assert_eq!(column("b")["pk"], true, "the key's second column: {body}");
+        assert_eq!(column("a")["type"], "INTEGER", "{body}");
+        assert_eq!(column("a")["pk"], true, "the key's first column: {body}");
+        assert_eq!(column("note")["type"], "VARCHAR(20)", "{body}");
+        assert_eq!(column("note")["notnull"], false, "{body}");
+        assert_eq!(column("note")["pk"], false, "{body}");
+        assert_eq!(column("note")["default_value"], "'none'", "{body}");
+
+        let mut msg = admin_msg("retrieve", "/b/admin/database");
+        msg.set_meta("req.query.table", "Odd-Name");
+        let parts = crate::blocks::admin::test_support::browser_request(&ctx, msg).await;
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(html.contains("3 rows"), "{html}");
     }
 
     #[test]

@@ -118,6 +118,13 @@ jobs:
       - name: Lint — nothing names the removed strict-schema switch
         run: bash scripts/grep-guard-strict-schema.sh
 
+      # The D1 budget counts calls since wafer-run f9edcf43 (WR-4). The
+      # compiler catches the removed items; this catches a comment, a detail
+      # code string, a var or a TOML key that still names the per-statement
+      # budget.
+      - name: Lint — nothing names the per-statement D1 budget
+        run: bash scripts/grep-guard-call-budget.sh
+
       # A context stored in block or service state is a reference cycle
       # through the registered blocks: the runtime is never freed. The
       # `Weak` probe tests prove the runtime drops; this points a reviewer at

@@ -38,7 +38,14 @@ const DEFAULT_DEPLOY_SMOKE_PATH: &str = "/health";
 
 /// Toml-shaped, pre-resolution. Every field that can be supplied via env
 /// is `Option<String>`.
+///
+/// `deny_unknown_fields`, like each table inside it: a key this does not
+/// know is refused by name rather than ignored. An ignored key is a setting
+/// that silently does nothing — a misspelt `head_sampling_rat`, or the key
+/// `d1_calls_per_invocation` replaced, would deploy under the default and say
+/// nothing.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawCloudflareConfig {
     pub account_id: Option<String>,
     pub worker_name: Option<String>,
@@ -50,16 +57,16 @@ pub struct RawCloudflareConfig {
     /// defaults to [`DEFAULT_HEAD_SAMPLING_RATE`] when unset by both toml
     /// and env.
     pub head_sampling_rate: Option<f64>,
-    /// D1 queries one Worker invocation may run: 1000 on Workers Free and
-    /// Paid alike, lower only for a Worker whose `limits.subrequests` is
-    /// lower (see
-    /// [`impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_KEY`]).
+    /// D1 calls one Worker invocation may make, a `db.batch()` counting
+    /// once: 1000 on Workers Free and Paid alike, lower only for a Worker
+    /// whose `limits.subrequests` is lower (see
+    /// [`impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_KEY`]).
     /// TOML-only, because the value is
     /// written into the generated config as the Worker var the runtime reads
-    /// ([`impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_KEY`]);
+    /// ([`impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_KEY`]);
     /// defaults to
-    /// [`impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT`].
-    pub d1_queries_per_invocation: Option<u64>,
+    /// [`impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_DEFAULT`].
+    pub d1_calls_per_invocation: Option<u64>,
     /// Cloudflare cron expressions for the Worker's `scheduled` handler.
     /// TOML-only; defaults to [`wrangler::DEFAULT_CRONS`], which is empty.
     /// Setting it is the second of the two steps that turn the sweep on — the
@@ -91,6 +98,7 @@ pub struct RawPasswordHasherConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawD1Config {
     pub binding: String,
     pub database_name: Option<String>,
@@ -98,6 +106,7 @@ pub struct RawD1Config {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawR2Config {
     pub binding: String,
     pub bucket_name: Option<String>,
@@ -209,8 +218,8 @@ impl RawCloudflareConfig {
             .collect::<Result<Vec<_>>>()?;
         let head_sampling_rate =
             resolve_head_sampling_rate(env(HEAD_SAMPLING_RATE_VAR), self.head_sampling_rate)?;
-        let d1_queries_per_invocation =
-            resolve_d1_queries_per_invocation(self.d1_queries_per_invocation)?;
+        let d1_calls_per_invocation =
+            resolve_d1_calls_per_invocation(self.d1_calls_per_invocation)?;
         let crons = resolve_crons(self.crons)?;
         let deploy_smoke_paths = resolve_deploy_smoke_paths(self.deploy_smoke_paths)?;
         let password_hasher =
@@ -233,7 +242,7 @@ impl RawCloudflareConfig {
             },
             wrangler_overrides_path: self.wrangler_overrides_path,
             head_sampling_rate,
-            d1_queries_per_invocation,
+            d1_calls_per_invocation,
             crons,
             deploy_smoke_paths,
             password_hasher,
@@ -277,21 +286,21 @@ fn resolve_head_sampling_rate(env_val: Option<String>, toml_val: Option<f64>) ->
     Ok(rate)
 }
 
-/// Resolve `[cloudflare].d1_queries_per_invocation`: the stated limit, or
+/// Resolve `[cloudflare].d1_calls_per_invocation`: the stated limit, or
 /// the default 1000 when unset. Checked here with the parser the Worker applies
 /// to the var, so a value out of range — above D1's documented maximum of
 /// 1000 (<https://developers.cloudflare.com/d1/platform/limits/>), or too
 /// small to leave room past the audit-row reservation — fails the build
 /// rather than every request of the deployed Worker.
-fn resolve_d1_queries_per_invocation(toml_val: Option<u64>) -> Result<u64> {
+fn resolve_d1_calls_per_invocation(toml_val: Option<u64>) -> Result<u64> {
     use impresspress_core::config_vars::{
-        parse_d1_queries_per_invocation, D1_QUERIES_PER_INVOCATION_DEFAULT,
+        parse_d1_calls_per_invocation, D1_CALLS_PER_INVOCATION_DEFAULT,
     };
     let Some(limit) = toml_val else {
-        return Ok(D1_QUERIES_PER_INVOCATION_DEFAULT);
+        return Ok(D1_CALLS_PER_INVOCATION_DEFAULT);
     };
-    parse_d1_queries_per_invocation(&limit.to_string())
-        .map_err(|e| anyhow!("cloudflare.d1_queries_per_invocation = {limit}: {e}"))
+    parse_d1_calls_per_invocation(&limit.to_string())
+        .map_err(|e| anyhow!("cloudflare.d1_calls_per_invocation = {limit}: {e}"))
 }
 
 /// Resolve `[cloudflare].crons`: an explicit list (empty included, which

@@ -19,73 +19,71 @@ use wafer_run::{ConfigVar, InputType};
 /// `WAFER_RUN_SHARED__*` entry.
 pub const DEPLOY_TOKEN_KEY: &str = "IMPRESSPRESS_DEPLOY_TOKEN";
 
-/// Worker var naming how many D1 queries one Worker invocation may run.
+/// Worker var naming how many D1 calls one Worker invocation may make.
 ///
-/// D1 queries are subrequests to a Cloudflare internal service, and the
-/// Workers limits page caps those at 1,000 per invocation on Workers Free and
-/// at the Worker's configured subrequest limit on Paid
-/// (<https://developers.cloudflare.com/workers/platform/limits/#subrequests>).
-/// D1's own limits page still lists 50 for Free
-/// (<https://developers.cloudflare.com/d1/platform/limits/>), but a Free-plan
-/// Worker runs a fresh database's `/_deploy/prepare` in one invocation, and
-/// its migrations alone send 534 statements (on 2026-11-01: 362 in the files,
-/// 69 ledger rows, 103 of the runner's own), so 50 is not what D1 enforces
-/// there. The adapter admits every statement of a batch against the budget,
-/// though D1 counts a batch as one call; `a_cloudflare_fresh_install_fits_the_d1_budget`
-/// (`tests/migration_history.rs`) counts what a fresh install's migrations
-/// send, and `tests/d1_read_cost.rs` the whole `/_deploy/prepare` (585 on
-/// 2026-11-01), and both keep it within the default. That line is interim:
-/// once the adapter counts a batch as the one call D1 counts, both re-derive
-/// in calls (172 and 214 today; see the migration test's doc).
-/// The default, [`D1_QUERIES_PER_INVOCATION_DEFAULT`], therefore fits every
+/// D1 limits calls, and a `db.batch()` is one call whatever its length: its
+/// limits page says "a `db.batch()` call counts as a single query against it,
+/// not one query per statement" (<https://developers.cloudflare.com/d1/platform/limits/>),
+/// and a Free-plan measurement on 2026-10-23 ran 2,998 statements in 1,000
+/// calls. The limit is 1,000 calls per invocation on Workers Free and on
+/// Paid's default (the Workers limits page's subrequests to internal
+/// services, <https://developers.cloudflare.com/workers/platform/limits/#subrequests>);
+/// D1's page still lists 50 for Free, which is not what D1 enforces there.
+///
+/// A fresh database's `/_deploy/prepare` runs in one invocation. Its
+/// migrations make 172 calls (534 statements; every migration file and its
+/// ledger row are one call), and the whole prepare 220 (591 statements),
+/// measured 2026-11-02 at wafer-run f9edcf43.
+/// `a_cloudflare_fresh_install_fits_the_d1_budget`
+/// (`tests/migration_history.rs`) holds the migrations to half of the
+/// default, and `tests/d1_read_cost.rs` the whole prepare to the default.
+/// The default, [`D1_CALLS_PER_INVOCATION_DEFAULT`], therefore fits every
 /// plan. A lower value is for a Worker whose `limits.subrequests` is set
-/// below 1,000, and it bounds `/_deploy/prepare` too, which applies every
-/// pending migration in one invocation.
+/// below 1,000, and it bounds `/_deploy/prepare` too: below about 220 calls
+/// a fresh database cannot provision.
 ///
 /// Shared by both sides of a deploy: `impresspress build`/`deploy --target
 /// cloudflare` writes it into the generated `wrangler.toml` `[vars]` from
-/// `impresspress.toml`'s `[cloudflare].d1_queries_per_invocation`, and the
+/// `impresspress.toml`'s `[cloudflare].d1_calls_per_invocation`, and the
 /// Cloudflare worker reads it once per invocation as the limit every D1
-/// service reports its statement budget against. A deploy-time Worker var,
-/// never a `variables` row.
-pub const D1_QUERIES_PER_INVOCATION_KEY: &str = "IMPRESSPRESS_D1_QUERIES_PER_INVOCATION";
+/// service spends its calls against. A deploy-time Worker var, never a
+/// `variables` row.
+pub const D1_CALLS_PER_INVOCATION_KEY: &str = "IMPRESSPRESS_D1_CALLS_PER_INVOCATION";
 
-/// The D1 queries per invocation a deploy that does not state
-/// [`D1_QUERIES_PER_INVOCATION_KEY`] runs under: 1,000, which Workers Free
-/// and Workers Paid both allow.
-pub const D1_QUERIES_PER_INVOCATION_DEFAULT: u64 = 1000;
+/// The D1 calls per invocation a deploy that does not state
+/// [`D1_CALLS_PER_INVOCATION_KEY`] runs under: 1,000, which Workers Free and
+/// Workers Paid both allow.
+pub const D1_CALLS_PER_INVOCATION_DEFAULT: u64 = 1000;
 
-/// The most D1 queries per invocation a deploy may state: D1's limits page
-/// gives 1,000 for Workers Paid, so a stated
-/// [`D1_QUERIES_PER_INVOCATION_KEY`] above it could have the budget admit
-/// writes D1 then refuses part-way.
-pub const D1_QUERIES_PER_INVOCATION_MAX: u64 = 1000;
+/// The most D1 calls per invocation a deploy may state: D1 enforces 1,000,
+/// so a stated [`D1_CALLS_PER_INVOCATION_KEY`] above it would have the
+/// adapter send calls D1 then refuses with its own error.
+pub const D1_CALLS_PER_INVOCATION_MAX: u64 = 1000;
 
-/// The fewest queries per invocation a deploy may state: more than a
-/// request's audit-row reservation
-/// ([`crate::after_response::AUDIT_ROW_STATEMENTS`]), or its handlers could
-/// send nothing at all.
-pub const D1_QUERIES_PER_INVOCATION_MIN: u64 = crate::after_response::AUDIT_ROW_STATEMENTS + 1;
+/// The fewest calls per invocation a deploy may state: more than a request's
+/// audit-row reservation ([`crate::after_response::AUDIT_ROW_CALLS`]), or its
+/// handlers could send nothing at all.
+pub const D1_CALLS_PER_INVOCATION_MIN: u64 = crate::after_response::AUDIT_ROW_CALLS + 1;
 
-/// Parse a [`D1_QUERIES_PER_INVOCATION_KEY`] value: a whole number from
-/// [`D1_QUERIES_PER_INVOCATION_MIN`] to [`D1_QUERIES_PER_INVOCATION_MAX`],
+/// Parse a [`D1_CALLS_PER_INVOCATION_KEY`] value: a whole number from
+/// [`D1_CALLS_PER_INVOCATION_MIN`] to [`D1_CALLS_PER_INVOCATION_MAX`],
 /// surrounding whitespace ignored. The Worker applies it to the var it is
 /// deployed with — whatever wrote it, a `wrangler_overrides_path` file
-/// included — and the CLI to `[cloudflare].d1_queries_per_invocation`, so
+/// included — and the CLI to `[cloudflare].d1_calls_per_invocation`, so
 /// both refuse a value out of range with the same words instead of running
 /// a budget D1 does not honour.
-pub fn parse_d1_queries_per_invocation(raw: &str) -> Result<u64, String> {
+pub fn parse_d1_calls_per_invocation(raw: &str) -> Result<u64, String> {
     match raw.trim().parse::<u64>() {
         Ok(limit)
-            if (D1_QUERIES_PER_INVOCATION_MIN..=D1_QUERIES_PER_INVOCATION_MAX).contains(&limit) =>
+            if (D1_CALLS_PER_INVOCATION_MIN..=D1_CALLS_PER_INVOCATION_MAX).contains(&limit) =>
         {
             Ok(limit)
         }
         _ => Err(format!(
-            "{D1_QUERIES_PER_INVOCATION_KEY} is {raw:?}; it must be a whole number from \
-             {D1_QUERIES_PER_INVOCATION_MIN} to {D1_QUERIES_PER_INVOCATION_MAX} (D1 runs at most \
-             1000 queries per invocation; leave it unset unless the Worker's \
-             limits.subrequests is lower)"
+            "{D1_CALLS_PER_INVOCATION_KEY} is {raw:?}; it must be a whole number from \
+             {D1_CALLS_PER_INVOCATION_MIN} to {D1_CALLS_PER_INVOCATION_MAX} (D1 runs at most \
+             1000 calls per invocation, a `db.batch()` counting once; leave it unset unless \
+             the Worker's limits.subrequests is lower)"
         )),
     }
 }
@@ -1391,40 +1389,37 @@ mod screaming_block_tests {
 }
 
 #[cfg(test)]
-mod d1_queries_per_invocation_tests {
+mod d1_calls_per_invocation_tests {
     use super::*;
-    use crate::after_response::AUDIT_ROW_STATEMENTS;
+    use crate::after_response::AUDIT_ROW_CALLS;
 
     /// The shared parser — the Worker's as well as the CLI's — takes a limit
     /// from one more than the audit-row reservation to D1's maximum, and
     /// refuses everything else naming the var. A value at the reservation
     /// would leave a request's handlers nothing; one above 1000 would have
-    /// the budget admit writes D1 refuses part-way.
+    /// the adapter send calls D1 refuses.
     #[test]
     fn the_limit_must_exceed_the_reservation_and_not_exceed_d1s_maximum() {
-        assert_eq!(D1_QUERIES_PER_INVOCATION_MIN, AUDIT_ROW_STATEMENTS + 1);
-        let min = AUDIT_ROW_STATEMENTS + 1;
+        assert_eq!(D1_CALLS_PER_INVOCATION_MIN, AUDIT_ROW_CALLS + 1);
+        let min = AUDIT_ROW_CALLS + 1;
         for (raw, limit) in [
             (min.to_string(), min),
             ("50".to_string(), 50),
             (" 50 ".to_string(), 50),
             ("1000".to_string(), 1000),
         ] {
-            assert_eq!(parse_d1_queries_per_invocation(&raw), Ok(limit), "{raw:?}");
+            assert_eq!(parse_d1_calls_per_invocation(&raw), Ok(limit), "{raw:?}");
         }
         for raw in [
-            AUDIT_ROW_STATEMENTS.to_string(),
+            AUDIT_ROW_CALLS.to_string(),
             "0".to_string(),
             "1001".to_string(),
             "-5".to_string(),
             "fifty".to_string(),
             String::new(),
         ] {
-            let err = parse_d1_queries_per_invocation(&raw).expect_err(&raw);
-            assert!(
-                err.contains(D1_QUERIES_PER_INVOCATION_KEY),
-                "{raw:?}: {err}"
-            );
+            let err = parse_d1_calls_per_invocation(&raw).expect_err(&raw);
+            assert!(err.contains(D1_CALLS_PER_INVOCATION_KEY), "{raw:?}: {err}");
             // The refusal points at the default rather than at a per-plan
             // number: 1000 is what D1 allows on Workers Free and Paid alike.
             assert!(

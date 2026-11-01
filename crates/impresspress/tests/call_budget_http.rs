@@ -1,21 +1,21 @@
-//! A request that asks for more database statements than its invocation has
-//! left is answered 429, through a real route, and writes nothing.
+//! A request whose invocation has no database call left is answered 429,
+//! through a real route, and writes nothing.
 //!
-//! A Cloudflare D1 service reports D1's per-invocation query limit and the
-//! statements the request has already sent
-//! (`impresspress-cloudflare`'s `database` module), and `wafer-core`'s
-//! database handler admits every `create_many` and `batch` against it before
-//! the service runs. This drives that refusal end to end on the runtime the
-//! binary builds: `build_native_runtime`, the shared `boot`, the `site-main`
-//! flow, the router and the auth-ui signup handler, whose account and
-//! credential rows are one `batch`. The database is the real SQLite service
-//! behind a decorator that reports a D1-shaped budget once armed (boot's own
-//! writes run unbudgeted, as a deploy's `/_deploy/init` is its own
-//! invocation).
+//! A Cloudflare D1 service counts the calls its invocation has sent against
+//! D1's per-invocation limit and refuses a call past it before sending it,
+//! with `DatabaseError::CallBudgetExhausted`
+//! (`impresspress-cloudflare`'s `database` module); D1's own refusal of the
+//! limit maps to the same error. This drives that refusal end to end on the
+//! runtime the binary builds: `build_native_runtime`, the shared `boot`, the
+//! `site-main` flow, the router and the auth-ui signup handler, whose account
+//! and credential rows are one `batch`, one call. The database is the real
+//! SQLite service behind a decorator that refuses its multi-row writes once
+//! armed (boot's own writes run unrefused, as a deploy's `/_deploy/init` is
+//! its own invocation).
 //!
 //! The 429 means "this request did too much", not "try again later": the
-//! same signup retried would ask for the same statements. The body carries
-//! the numbers so a client can see which.
+//! same signup retried would make the same calls. The body carries the
+//! refusal's text and its detail code.
 
 use std::{
     collections::HashMap,
@@ -27,7 +27,9 @@ use impresspress_core::builder::{boot, GrantSource, InitPolicy};
 use impresspress_native::InfraConfig;
 use impresspress_server::{build_native_runtime, AppHooks, NativeBootHooks};
 use wafer_block::{http_codec, InputStream};
-use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService, StatementBudget};
+use wafer_core::interfaces::database::service::{
+    DatabaseError, DatabaseService, WriteOp, WriteOutcome,
+};
 
 fn infra_for(db_path: &Path, storage_root: &Path) -> InfraConfig {
     InfraConfig {
@@ -48,13 +50,16 @@ fn infra_for(db_path: &Path, storage_root: &Path) -> InfraConfig {
     }
 }
 
-/// The real SQLite service, reporting `budget` once a test sets it and
-/// `Unbounded` (SQLite's own answer) until then. Every operation is the inner
-/// service's.
+/// The real SQLite service, whose `create_many` and `batch` refuse with
+/// `CallBudgetExhausted` — what a D1 service answers when the invocation has
+/// no call left — once a test arms it, and run until then. Every other
+/// operation is the inner service's.
 struct BudgetedDb {
     inner: Arc<dyn DatabaseService>,
-    budget: Arc<Mutex<StatementBudget>>,
+    spent: Arc<Mutex<bool>>,
 }
+
+const REFUSAL: &str = "this invocation has sent 1000 D1 calls and may send 1000";
 
 impl BudgetedDb {
     fn inner_service(&self) -> &dyn DatabaseService {
@@ -70,7 +75,7 @@ wafer_core::forward_database_service! {
             get: forward,
             list: forward,
             create: forward,
-            create_many: forward,
+            create_many: custom,
             update: forward,
             delete: forward,
             count: forward,
@@ -86,7 +91,7 @@ wafer_core::forward_database_service! {
             increment_field_where: forward,
             upsert: forward,
             aggregate: forward,
-            batch: forward,
+            batch: custom,
             insert_guarded: forward,
             update_guarded: forward,
             ensure_schema_table: forward,
@@ -95,19 +100,35 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            statement_budget: custom,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
         }
 
-        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-            Ok(*self.budget.lock().expect("budget lock"))
+        async fn create_many(
+            &self,
+            collection: &str,
+            rows: Vec<HashMap<String, serde_json::Value>>,
+        ) -> Result<i64, DatabaseError> {
+            if *self.spent.lock().expect("spent lock") {
+                return Err(DatabaseError::CallBudgetExhausted(REFUSAL.into()));
+            }
+            self.inner.create_many(collection, rows).await
+        }
+
+        async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
+            if *self.spent.lock().expect("spent lock") {
+                return Err(DatabaseError::CallBudgetExhausted(REFUSAL.into()));
+            }
+            self.inner.batch(ops).await
         }
     }
 }
 
 #[tokio::test]
-async fn a_signup_past_what_the_invocation_has_left_is_a_429_that_writes_nothing() {
+async fn a_signup_with_no_call_left_is_a_429_that_writes_nothing() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let db_path = tmp.path().join("statement_budget.sqlite3");
+    let db_path = tmp.path().join("call_budget.sqlite3");
     let storage_root = tmp.path().join("storage");
     std::fs::create_dir_all(&storage_root).expect("create storage root");
 
@@ -115,10 +136,10 @@ async fn a_signup_past_what_the_invocation_has_left_is_a_429_that_writes_nothing
     let sqlite = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
-    let budget = Arc::new(Mutex::new(StatementBudget::Unbounded));
+    let spent = Arc::new(Mutex::new(false));
     let database: Arc<dyn DatabaseService> = Arc::new(BudgetedDb {
         inner: sqlite.clone(),
-        budget: Arc::clone(&budget),
+        spent: Arc::clone(&spent),
     });
     let mut wafer = build_native_runtime(
         &infra,
@@ -157,12 +178,9 @@ async fn a_signup_past_what_the_invocation_has_left_is_a_429_that_writes_nothing
     };
     let before = rows().await;
 
-    // The request has already sent 999 of its 1000 statements; the signup's
-    // account and credential rows are one batch of two.
-    *budget.lock().unwrap() = StatementBudget::Limited {
-        limit: 1000,
-        used: 999,
-    };
+    // The invocation has no call left for the signup's one batch, its
+    // account and credential rows.
+    *spent.lock().unwrap() = true;
 
     let body = br#"{"email":"new@example.com","password":"correct-horse-battery"}"#;
     let msg = http_codec::build_http_message(
@@ -188,13 +206,13 @@ async fn a_signup_past_what_the_invocation_has_left_is_a_429_that_writes_nothing
     let text = String::from_utf8_lossy(&parts.body);
     assert_eq!(parts.status, 429, "body: {text}");
     assert!(
-        text.contains("this invocation has 1 of its 1000 left"),
-        "the refusal says what the request asked for and what was left: {text}"
+        text.contains(REFUSAL),
+        "the refusal says what the invocation spent: {text}"
     );
     let body: serde_json::Value = serde_json::from_slice(&parts.body).expect("a JSON error body");
     assert_eq!(
         body["code"],
-        wafer_block::wire::database::STATEMENT_BUDGET_EXHAUSTED,
+        wafer_block::wire::database::CALL_BUDGET_EXHAUSTED,
         "the 429 names the budget, so a client can tell it from a rate limit and not retry: \
          {text}"
     );

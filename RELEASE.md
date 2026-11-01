@@ -110,6 +110,65 @@ above.
   a transient D1 error; deploy again), or repair the row.
 - Clear bootstrap credentials once the first admin exists.
 
+### Cloudflare: the D1 budget counts calls; wafer-run f9edcf43
+
+**What changes.** The wafer-run pin moves from `96860baa` to `f9edcf43`, and
+the Worker's D1 budget is counted the way D1 limits it: in **calls**, a
+`db.batch()` counting once (D1's limits page; measured on a Free account,
+2,998 statements in 1,000 calls).
+
+- A `create_many` or `batch` of any size, and every migration file with its
+  ledger row, is one call. Nothing is admitted ahead of a call any more: a
+  call is refused only when the invocation has no call left. A large batch is
+  bounded by D1's own limits instead — 30 s for the batch, and each
+  statement's size and parameter limits.
+- The Worker var is renamed `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` →
+  **`IMPRESSPRESS_D1_CALLS_PER_INVOCATION`**, and the `impresspress.toml` key
+  `[cloudflare].d1_queries_per_invocation` → **`d1_calls_per_invocation`**.
+  The default stays 1000.
+- `[cloudflare]`, `[cloudflare.d1]` and `[cloudflare.r2]` now refuse a key
+  they do not declare, by name, so a stale `d1_queries_per_invocation` fails
+  the build instead of deploying under the default.
+- The refusal's detail code is renamed `database.statement_budget_exhausted`
+  → **`database.call_budget_exhausted`** (still a 429, still "do not retry
+  as it stands"), and `database.statement_budget_exceeds_limit` (the 400) is
+  gone: no single call can exceed a fresh invocation's limit.
+- D1's own refusal of the limit ("Too many API requests by single Worker
+  invocation", which KV and R2 operations may share) is now that same 429 /
+  `call_budget_exhausted`, and a transient failure for a block's `Init`,
+  where it was an internal error (500).
+- The `d1_cost` line gains `calls=`:
+  `metric=d1_cost build=prepared calls=5 statements=7 rows_read=44 rows_written=1 unmetered=0`.
+  Rows stay per statement. `unmetered` now counts only failed statements and
+  the admin SQL explorer's queries: the admin **Database** page's table list,
+  row counts and column info read through typed catalog operations that D1
+  meters.
+- The admin Database page shows each column's declared type, `NOT NULL` and
+  default as the catalog declares them, marks every column of a composite
+  primary key (it marked only the first), and opens tables whose names are
+  not plain identifiers (`Foo`, `a-b`).
+- **`@impresspress/sdk` 2.0.0** (breaking): `isStatementBudgetError` →
+  `isCallBudgetError`, `STATEMENT_BUDGET_DETAIL_CODES` →
+  `CALL_BUDGET_DETAIL_CODE` (one string).
+
+A fresh Worker database's migrations make 172 calls (534 statements), and the
+whole `/_deploy/prepare` 220 calls (591 statements), measured at this
+release. The tests hold the migrations to half the default limit
+(`tests/migration_history.rs`) and the whole prepare to the limit
+(`tests/d1_read_cost.rs`).
+
+**What to do.**
+- Rename `d1_queries_per_invocation` in your `impresspress.toml`, if you set
+  it, to `d1_calls_per_invocation`; the build refuses the old key.
+- Rename `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` in any
+  `wrangler_overrides_path` file to `IMPRESSPRESS_D1_CALLS_PER_INVOCATION`.
+  Nothing can refuse a stale var there: the Worker ignores it and runs at
+  the default, 1000.
+- Below about 220 calls a fresh database cannot provision; leave the limit at
+  its default unless the Worker's `limits.subrequests` is lower.
+- A client keying on the old detail code, or on the impresspress-js exports,
+  moves to the new names.
+
 ### Cloudflare: each invocation can log the D1 rows it read and wrote
 
 **What changes.** The Worker now adds up, per invocation, the rows D1 reports
@@ -154,6 +213,9 @@ as a warning on every invocation (`metric=d1_rows_log_threshold_invalid`),
 and the default applies.
 
 ### Cloudflare budget: counted statement by statement
+
+Superseded by "Cloudflare: the D1 budget counts calls; wafer-run f9edcf43"
+above, which counts the budget in calls; the figures below are history.
 
 **What changes.** The fresh-install budget is now counted as the Worker's D1
 adapter admits statements against `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION`:

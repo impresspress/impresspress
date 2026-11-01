@@ -111,7 +111,9 @@ wafer_core::forward_database_service! {
             schema_columns: forward,
             schema_drop_table: forward,
             schema_add_column: forward,
-            statement_budget: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
         }
 
         async fn list(
@@ -870,6 +872,56 @@ async fn the_config_block_and_the_source_share_one_read() {
         );
     }
     assert_eq!(counting.lists(), 1, "one read for the source and the block");
+}
+
+/// A failed list whose existence probe D1 answers with NO row is a failed
+/// read, not the cold start. The probe is decoded strictly (wafer-run's
+/// `exec::table_exists`, which no adapter can override): only exactly one row
+/// whose `present` is 0 or 1 is an answer, so an empty `results` is an error,
+/// the list's error stands, and `CONFIG_GET` answers `Unavailable` — never
+/// the boot map's value, never a declared default.
+#[tokio::test]
+async fn an_empty_probe_answer_after_a_failed_list_is_unavailable_never_a_default() {
+    let _generation = GENERATION.lock().await;
+    let (_counting, shaped, db) = shaped().await;
+    seed(&db, "WAFER_RUN_SHARED__APP_NAME", "stored").await;
+    let snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
+    let ctx = context_with_config_block(
+        &db,
+        &snapshot,
+        &[("WAFER_RUN_SHARED__APP_NAME", "from-boot")],
+    )
+    .await;
+    let (probe, _) = wafer_sql_utils::introspect::build_table_exists(
+        variables::TABLE,
+        wafer_sql_utils::Backend::Sqlite,
+    );
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    shaped.answer_no_rows(&probe);
+    shaped.ledger().take();
+
+    let in_boot_map =
+        wafer_core::clients::config::get_default(&ctx, "WAFER_RUN_SHARED__APP_NAME", "default")
+            .await
+            .expect_err("never the boot map's value");
+    assert_eq!(in_boot_map.code, ErrorCode::Unavailable, "{in_boot_map}");
+    assert!(
+        in_boot_map.message.contains("injected outage"),
+        "the list's own error stands: {in_boot_map}"
+    );
+    assert!(
+        shaped
+            .ledger()
+            .take()
+            .iter()
+            .any(|trip| trip.sent.iter().any(|sent| sent.sql == probe)),
+        "the failed list was followed by the probe this test answers empty"
+    );
+    let not_in_boot_map =
+        wafer_core::clients::config::get_default(&ctx, "WAFER_RUN_SHARED__UNSET", "default")
+            .await
+            .expect_err("never NotFound, so never the default");
+    assert_eq!(not_in_boot_map.code, ErrorCode::Unavailable);
 }
 
 /// THE fail-closed rule, through both readers of a REMEMBERED failure — with

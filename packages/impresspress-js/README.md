@@ -316,18 +316,17 @@ surfaced as `error.detailCode` (`"invalid_credentials"`,
 `"rate_limit_exceeded"`, …). Branch on it rather than on `status`: two
 errors can share a status and differ in whether a retry can succeed. A 429
 with `rate_limit_exceeded` can be retried after its `Retry-After`; one with
-`database.statement_budget_exhausted` (or a 400 with
-`database.statement_budget_exceeds_limit`) means the request needs more
-database work than one request may do, and sent again unchanged it fails the
-same way — do not retry it automatically, send less per request:
+`database.call_budget_exhausted` means the request needs more database calls
+than one request may make, and sent again unchanged it fails the same way —
+do not retry it automatically, do less per request:
 
 ```typescript
-import { isStatementBudgetError } from '@impresspress/sdk';
+import { isCallBudgetError } from '@impresspress/sdk';
 
 try {
   await impresspress.auth.signUp({ email: 'new@example.com', password: 'correct-horse' });
 } catch (error) {
-  if (isStatementBudgetError(error)) {
+  if (isCallBudgetError(error)) {
     // Retrying this request would fail the same way: surface it instead.
   }
 }

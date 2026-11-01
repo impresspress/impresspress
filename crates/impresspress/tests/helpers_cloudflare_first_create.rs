@@ -109,7 +109,7 @@ fn sample_cfg() -> CloudflareConfig {
         },
         wrangler_overrides_path: None,
         head_sampling_rate: 1.0,
-        d1_queries_per_invocation: 1000,
+        d1_calls_per_invocation: 1000,
         crons: Vec::new(),
         deploy_smoke_paths: vec!["/health".into()],
         password_hasher: PasswordHasherConfig {

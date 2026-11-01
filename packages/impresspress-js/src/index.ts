@@ -13,11 +13,11 @@ export type { ImpresspressConfig } from './types';
 
 // Export the error type and helpers every service throws/maps
 export {
+  CALL_BUDGET_DETAIL_CODE,
   ImpresspressError,
+  isCallBudgetError,
   isNotFoundError,
-  isStatementBudgetError,
   isUnauthorizedError,
-  STATEMENT_BUDGET_DETAIL_CODES,
 } from './error';
 export type { SdkErrorCode } from './error';
 

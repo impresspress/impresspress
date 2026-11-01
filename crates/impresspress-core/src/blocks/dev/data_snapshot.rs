@@ -883,13 +883,13 @@ const REPLACE_ORDER: &[&str] = &[users::TABLE, local_credentials::TABLE, user_ro
 /// bad row) rolls all of it back, so a failed import leaves the users, their
 /// credentials and every other table as they were.
 ///
-/// The database handler admits the batch, one statement per op, against the
-/// backend's statement budget before anything runs. SQLite and PostgreSQL
-/// take any size. On Cloudflare D1 an import larger than what the request has
-/// left is refused whole (`ResourceExhausted`, or `InvalidArgument` past the
-/// per-invocation limit) and nothing is written: a smaller bundle, or a
-/// raised `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` on a plan that allows it,
-/// is the fix, not a retry.
+/// The batch is one database call whatever its size: SQLite and PostgreSQL
+/// run it as one transaction, and Cloudflare D1 as one `db.batch()`, which
+/// counts once against `IMPRESSPRESS_D1_CALLS_PER_INVOCATION` (bounded only
+/// by D1's 30 s per batch and its per-statement limits). On D1 a request
+/// that has no call left is refused the whole batch before it is sent
+/// (`ResourceExhausted`, detail code `database.call_budget_exhausted`), and
+/// nothing is written.
 ///
 /// Every write is keyed on the snapshot's own row ids, every owned set is
 /// replaced rather than merged, and a carried product's offers are the

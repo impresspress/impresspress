@@ -9,7 +9,7 @@ use impresspress::cli::helpers::cloudflare::{
         generate, generate_candidate_upload, generate_final_upload, generate_password_hasher,
         generate_triggers, generate_upload, generate_upload_with_release, CloudflareConfig,
         D1Config, PasswordHasherConfig, R2Config, ASSET_BASE_URL_VAR,
-        D1_QUERIES_PER_INVOCATION_DEFAULT, D1_QUERIES_PER_INVOCATION_KEY, DEFAULT_CRONS,
+        D1_CALLS_PER_INVOCATION_DEFAULT, D1_CALLS_PER_INVOCATION_KEY, DEFAULT_CRONS,
         PASSWORD_HASHER_CONFIG_FILE, PREPARED_APPLICATION_BUILD_SHA256_VAR,
         PREPARED_APPLICATION_ID_VAR, PREPARED_PLAN_HASH_VAR, PREPARED_PLAN_MODULE_SHA256_VAR,
         PREPARED_WAFER_LOCK_IDENTITY_VAR, RELEASE_ASSET_ID_VAR, RELEASE_ASSET_KEYS_SHA256_VAR,
@@ -39,7 +39,7 @@ fn sample_cfg() -> CloudflareConfig {
         },
         wrangler_overrides_path: None,
         head_sampling_rate: 1.0,
-        d1_queries_per_invocation: D1_QUERIES_PER_INVOCATION_DEFAULT,
+        d1_calls_per_invocation: D1_CALLS_PER_INVOCATION_DEFAULT,
         crons: DEFAULT_CRONS.iter().map(|s| s.to_string()).collect(),
         deploy_smoke_paths: vec!["/health".into()],
         password_hasher: PasswordHasherConfig {
@@ -133,7 +133,7 @@ fn generate_writes_wrangler_toml_with_required_fields() {
     vars.sort_unstable();
     let mut expected = vec![
         impresspress_core::ui::assets::ASSET_BASE_URL_VAR,
-        D1_QUERIES_PER_INVOCATION_KEY,
+        D1_CALLS_PER_INVOCATION_KEY,
         impresspress_password::protocol::SHARDS_VAR,
     ];
     expected.sort_unstable();
@@ -196,37 +196,37 @@ fn generate_writes_configured_head_sampling_rate() {
     );
 }
 
-/// Golden for the D1 query limit a generated config states. The runtime's
-/// statement budget admits every multi-statement write against this var, so
-/// a Worker that ran on a limit above its platform's would be admitted writes
-/// D1 then refuses part-way. Every config that uploads code must carry it —
-/// the default included — along with the note that says when to change it.
+/// Golden for the D1 call limit a generated config states. The runtime's D1
+/// adapter spends every call against this var, so a Worker that ran on a
+/// limit above its platform's would send calls D1 then refuses with its own
+/// error. Every config that uploads code must carry it — the default
+/// included — along with the note that says when to change it.
 #[test]
-fn every_generated_config_states_the_d1_query_limit_and_what_it_depends_on() {
+fn every_generated_config_states_the_d1_call_limit_and_what_it_depends_on() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path();
     let out = repo_root.join("target/impresspress-cloudflare");
     fs::create_dir_all(&out).unwrap();
 
     assert_eq!(
-        D1_QUERIES_PER_INVOCATION_KEY,
-        "IMPRESSPRESS_D1_QUERIES_PER_INVOCATION"
+        D1_CALLS_PER_INVOCATION_KEY,
+        "IMPRESSPRESS_D1_CALLS_PER_INVOCATION"
     );
-    assert_eq!(D1_QUERIES_PER_INVOCATION_DEFAULT, 1000);
-    let note = "# IMPRESSPRESS_D1_QUERIES_PER_INVOCATION is how many D1 queries one \
-                invocation may run: 1000 on Workers Free and Paid alike. Lower it only for a \
-                Worker whose limits.subrequests is lower, with \
-                [cloudflare].d1_queries_per_invocation in impresspress.toml.\n\n";
+    assert_eq!(D1_CALLS_PER_INVOCATION_DEFAULT, 1000);
+    let note = "# IMPRESSPRESS_D1_CALLS_PER_INVOCATION is how many D1 calls one \
+                invocation may make, a db.batch() counting once: 1000 on Workers Free and \
+                Paid alike. Lower it only for a Worker whose limits.subrequests is lower, with \
+                [cloudflare].d1_calls_per_invocation in impresspress.toml.\n\n";
 
     for (limit, line) in [
         (
-            D1_QUERIES_PER_INVOCATION_DEFAULT,
-            "IMPRESSPRESS_D1_QUERIES_PER_INVOCATION = \"1000\"\n",
+            D1_CALLS_PER_INVOCATION_DEFAULT,
+            "IMPRESSPRESS_D1_CALLS_PER_INVOCATION = \"1000\"\n",
         ),
-        (50, "IMPRESSPRESS_D1_QUERIES_PER_INVOCATION = \"50\"\n"),
+        (50, "IMPRESSPRESS_D1_CALLS_PER_INVOCATION = \"50\"\n"),
     ] {
         let mut cfg = sample_cfg();
-        cfg.d1_queries_per_invocation = limit;
+        cfg.d1_calls_per_invocation = limit;
         for path in [
             generate(&cfg, repo_root, &out).unwrap(),
             generate_upload(&cfg, repo_root, &out).unwrap(),

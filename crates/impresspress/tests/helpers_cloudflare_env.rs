@@ -384,62 +384,62 @@ fn release_assets_exclude_globs_are_compiled_and_kept() {
     assert!(!cfg.r2.release_assets_exclude[0].matches("content/legal/terms.md"));
 }
 
-/// `[cloudflare].d1_queries_per_invocation` is the Worker's D1 query limit:
+/// `[cloudflare].d1_calls_per_invocation` is the Worker's D1 call limit:
 /// unset is the default 1000, a stated number up to 1000 is taken as it
 /// is, and 0 — at or below the audit-row reservation, which the Worker would
 /// refuse on every request — or anything above D1's documented maximum of
 /// 1000 is refused here instead.
 #[test]
-fn resolve_d1_queries_per_invocation_defaults_to_1000_and_refuses_out_of_range() {
+fn resolve_d1_calls_per_invocation_defaults_to_1000_and_refuses_out_of_range() {
     let cfg = parse_str(FULL_TOML).resolve(fake_env(&[])).unwrap();
-    assert_eq!(cfg.d1_queries_per_invocation, 1000);
+    assert_eq!(cfg.d1_calls_per_invocation, 1000);
 
     let lowered = FULL_TOML.replace(
         "compatibility_date = \"2026-05-01\"\n",
-        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 50\n",
+        "compatibility_date = \"2026-05-01\"\nd1_calls_per_invocation = 50\n",
     );
     let cfg = parse_str(&lowered).resolve(fake_env(&[])).unwrap();
-    assert_eq!(cfg.d1_queries_per_invocation, 50);
+    assert_eq!(cfg.d1_calls_per_invocation, 50);
 
     let zero = FULL_TOML.replace(
         "compatibility_date = \"2026-05-01\"\n",
-        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 0\n",
+        "compatibility_date = \"2026-05-01\"\nd1_calls_per_invocation = 0\n",
     );
     let err = parse_str(&zero)
         .resolve(fake_env(&[]))
-        .expect_err("0 is not a D1 query limit")
+        .expect_err("0 is not a D1 call limit")
         .to_string();
     assert!(
-        err.contains("cloudflare.d1_queries_per_invocation")
-            && err.contains("IMPRESSPRESS_D1_QUERIES_PER_INVOCATION"),
+        err.contains("cloudflare.d1_calls_per_invocation")
+            && err.contains("IMPRESSPRESS_D1_CALLS_PER_INVOCATION"),
         "{err}"
     );
 
     let over = FULL_TOML.replace(
         "compatibility_date = \"2026-05-01\"\n",
-        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 1001\n",
+        "compatibility_date = \"2026-05-01\"\nd1_calls_per_invocation = 1001\n",
     );
     let err = parse_str(&over)
         .resolve(fake_env(&[]))
-        .expect_err("D1 runs at most 1000 queries per invocation")
+        .expect_err("D1 runs at most 1000 calls per invocation")
         .to_string();
     assert!(
         err.contains(&format!(
             "from {} to 1000",
-            impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_MIN
+            impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_MIN
         )),
         "{err}"
     );
 
     let max = FULL_TOML.replace(
         "compatibility_date = \"2026-05-01\"\n",
-        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 1000\n",
+        "compatibility_date = \"2026-05-01\"\nd1_calls_per_invocation = 1000\n",
     );
     assert_eq!(
         parse_str(&max)
             .resolve(fake_env(&[]))
             .unwrap()
-            .d1_queries_per_invocation,
+            .d1_calls_per_invocation,
         1000
     );
 }
@@ -509,4 +509,93 @@ fn the_password_hasher_section_is_read_and_validated() {
     let tmp = tempdir().unwrap();
     fs::write(tmp.path().join("impresspress.toml"), with("shard = 3")).unwrap();
     assert!(parse(tmp.path()).is_err());
+}
+
+/// The `[cloudflare]` table and each table inside it refuse a key they do
+/// not declare, by name: the key `d1_calls_per_invocation` replaced would
+/// otherwise deploy under the default and say nothing. So does a stray key
+/// in `[cloudflare.d1]` or `[cloudflare.r2]`.
+#[test]
+fn a_stale_or_unknown_cloudflare_key_is_refused_by_name() {
+    for (anchor, key) in [
+        (
+            "compatibility_date = \"2026-05-01\"\n",
+            "d1_queries_per_invocation = 50",
+        ),
+        ("binding = \"DB\"\n", "binding_name = \"DB\""),
+        ("binding = \"STORAGE\"\n", "bucket = \"x-bucket\""),
+    ] {
+        let stale = FULL_TOML.replace(anchor, &format!("{anchor}{key}\n"));
+        assert_ne!(stale, FULL_TOML, "{key} was inserted");
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("impresspress.toml"), &stale).unwrap();
+        let err = format!("{:#}", parse(tmp.path()).expect_err(key));
+        let name = key.split(' ').next().unwrap();
+        assert!(
+            err.contains("unknown field") && err.contains(name),
+            "{key}: {err}"
+        );
+    }
+}
+
+/// Every key the three strict tables declare parses, and so does the
+/// `[cloudflare]` table `site/impresspress.toml` carries (copied here as it
+/// stood at site origin/main 5f829ab, its comments dropped), so the strict
+/// tables refuse nothing a deploy uses.
+#[test]
+fn every_declared_cloudflare_key_and_the_sites_table_parse() {
+    const EVERY_KEY: &str = r#"
+[cloudflare]
+account_id = "acct"
+worker_name = "x"
+compatibility_date = "2026-05-01"
+wrangler_overrides_path = "wrangler.overrides.toml"
+head_sampling_rate = 0.5
+d1_calls_per_invocation = 1000
+crons = ["0 3 * * *"]
+deploy_smoke_paths = ["/health"]
+
+[cloudflare.d1]
+binding = "DB"
+database_name = "x"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[cloudflare.r2]
+binding = "STORAGE"
+bucket_name = "x-bucket"
+release_assets_dir = "data/storage/site/media"
+release_assets_prefix = "site/media"
+release_assets_exclude = ["*.state.json"]
+
+[cloudflare.password_hasher]
+worker_name = "x-password-hasher"
+shards = 8
+pepper_required = false
+"#;
+    const SITE: &str = r#"
+[cloudflare]
+worker_name        = "wafer-site"
+compatibility_date = "2026-05-01"
+wrangler_overrides_path = "wrangler.overrides.toml"
+deploy_smoke_paths = ["/health", "/_health", "/", "/docs/", "/registry", "/registry/search"]
+
+[cloudflare.d1]
+binding       = "DB"
+database_name = "wafer-site-prod"
+
+[cloudflare.r2]
+binding     = "STORAGE"
+bucket_name = "wafer-site-assets"
+
+[cloudflare.password_hasher]
+worker_name = "wafer-site-password-hasher"
+"#;
+    let every = parse_str(EVERY_KEY);
+    assert_eq!(every.d1_calls_per_invocation, Some(1000));
+    assert_eq!(
+        every.r2.release_assets_exclude.as_deref(),
+        Some(&["*.state.json".to_string()][..])
+    );
+    let site = parse_str(SITE);
+    assert_eq!(site.worker_name.as_deref(), Some("wafer-site"));
 }

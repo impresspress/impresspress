@@ -12,7 +12,7 @@
 //!
 //! The scope is selected per POLL, not per isolate: one Workers isolate
 //! interleaves concurrent requests whenever a future returns `Pending`, and
-//! each request is its own invocation with its own D1 query limit. Work kept
+//! each request is its own invocation with its own D1 call limit. Work kept
 //! in an isolate-wide queue would be run by whichever request drained it,
 //! under that request's budget: one request would pay for another's audit
 //! row, and a password-reset mail could be skipped because a stranger's
@@ -22,9 +22,9 @@
 //! # The audit row always fits
 //!
 //! The pipeline writes at most ONE audit row per request, and the slot here
-//! holds at most one, so the statements it costs are known before the
-//! request starts: [`AUDIT_ROW_STATEMENTS`]. The Cloudflare adapter holds
-//! that many statements of the invocation's D1 limit back from the request's
+//! holds at most one, so the D1 calls it costs are known before the
+//! request starts: [`AUDIT_ROW_CALLS`]. The Cloudflare adapter holds
+//! that many calls of the invocation's D1 limit back from the request's
 //! own services — handlers and deferred tasks alike are refused before they
 //! reach them — and writes the row with a handle that may use them. However
 //! the request spends its budget, its audit row still fits.
@@ -71,14 +71,14 @@
 //!   tokio task carries the write while the process is up.
 //!
 //! The write runs in the producer under its own request's services, so on
-//! Cloudflare it counts against that invocation's D1 statements exactly as a
+//! Cloudflare it counts against that invocation's D1 calls exactly as a
 //! handler's write does. Nothing is reserved for it: it is one or two
-//! statements against a per-invocation limit of 1,000 (the Cloudflare
+//! calls against a per-invocation limit of 1,000 (the Cloudflare
 //! adapter's `database` module). It is waited on apart from the audit row
 //! and the deferred tasks, never joined into their ordering. On Cloudflare a
 //! request that queued neither (every SSE stream without the `resp.stream`
 //! marker) runs no after-response work at all, so its
-//! [`AUDIT_ROW_STATEMENTS`] stay reserved for the whole stream. That is
+//! [`AUDIT_ROW_CALLS`] stay reserved for the whole stream. That is
 //! three of a thousand, harmless and older than final writes; it is not a
 //! reason to route final writes through that work.
 
@@ -95,21 +95,21 @@ use wafer_core::interfaces::database::service::DatabaseService;
 
 use crate::{deferred::DeferredTask, IsolateCell};
 
-/// The most D1 statements writing one audit row with `create_many` sends:
-/// the id-policy probe (the row carries no `id`), the column list the JSON
-/// column lookup reads, and the insert. The probe and the column list are
-/// cached per isolate after their first answer, so a warm isolate sends only
-/// the insert. No write adds a column: the table's migration declares every
-/// column the row names.
-pub const AUDIT_ROW_STATEMENTS: u64 = 3;
+/// The most D1 calls writing one audit row with `create_many` makes: the
+/// id-policy probe (the row carries no `id`), the column list the JSON column
+/// lookup reads, and the insert's one transaction — 3 on a cold isolate. The
+/// probe and the column list are cached per isolate after their first
+/// answer, so a warm isolate makes 1, the transaction. No write adds a
+/// column: the table's migration declares every column the row names.
+pub const AUDIT_ROW_CALLS: u64 = 3;
 
-/// The statements to reserve for a request's audit row under the
+/// The D1 calls to reserve for a request's audit row under the
 /// request-log policy `policy` (the raw
 /// [`crate::config_vars::REQUEST_LOG_CONFIG_KEY`] value): none when the policy
-/// writes no rows, [`AUDIT_ROW_STATEMENTS`] otherwise.
+/// writes no rows, [`AUDIT_ROW_CALLS`] otherwise.
 pub fn audit_row_reservation(policy: Option<&str>) -> u64 {
     if crate::pipeline::RequestLogPolicy::parse(policy).writes_rows() {
-        AUDIT_ROW_STATEMENTS
+        AUDIT_ROW_CALLS
     } else {
         0
     }
@@ -240,7 +240,7 @@ fn current() -> Option<Rc<AfterResponse>> {
 
 /// Queue `row` as the audit row of the request being polled. Hands the row
 /// back when no request is in scope — or, since the slot holds the one row
-/// [`AUDIT_ROW_STATEMENTS`] reserves room for, when the request already
+/// [`AUDIT_ROW_CALLS`] reserves room for, when the request already
 /// queued its row — so the caller inserts it itself.
 pub(crate) fn queue_audit_row(row: QueuedRequestLog) -> Result<(), QueuedRequestLog> {
     let Some(after) = current() else {
@@ -433,7 +433,7 @@ pub struct PersistFailure {
 }
 
 /// Write `row` — one request's audit row — through `db`, a handle that may
-/// use the [`AUDIT_ROW_STATEMENTS`] the request's own services were held
+/// use the [`AUDIT_ROW_CALLS`] the request's own services were held
 /// back from. A failure is returned for the caller to log: there is no
 /// response left to carry it.
 pub async fn persist_audit_row(
@@ -458,7 +458,7 @@ mod tests {
     };
 
     use serde_json::json;
-    use wafer_core::interfaces::database::service::{DatabaseError, StatementBudget};
+    use wafer_core::interfaces::database::service::DatabaseError;
 
     use super::*;
 
@@ -718,17 +718,13 @@ mod tests {
     }
 
     /// A request whose policy writes no rows reserves nothing; every other
-    /// policy reserves the row's statements.
+    /// policy reserves the row's calls.
     #[test]
     fn only_a_policy_that_writes_rows_reserves_for_one() {
         assert_eq!(audit_row_reservation(Some("off")), 0);
         assert_eq!(audit_row_reservation(Some(" off ")), 0);
         for policy in [None, Some("all"), Some("errors"), Some("typo")] {
-            assert_eq!(
-                audit_row_reservation(policy),
-                AUDIT_ROW_STATEMENTS,
-                "{policy:?}"
-            );
+            assert_eq!(audit_row_reservation(policy), AUDIT_ROW_CALLS, "{policy:?}");
         }
     }
 
@@ -747,10 +743,13 @@ mod tests {
         assert!(after.take_audit_row().is_none());
     }
 
-    /// A database whose `statement_budget` always reports room, and whose
-    /// `create_many` refuses anyway — D1 answering with its own limit, which
-    /// the budget did not see coming. Every other operation is the in-memory
-    /// SQLite service's and is never called.
+    /// A database whose `create_many` is refused by the platform although the
+    /// adapter's own call count had room — D1 answering "Too many API
+    /// requests by single Worker invocation", which it can when KV or R2
+    /// operations share the invocation's limit (neither Cloudflare page says
+    /// whether they do), and which the Cloudflare adapter maps to
+    /// `CallBudgetExhausted`. Every other operation is the in-memory SQLite
+    /// service's and is never called.
     struct RefusingDb {
         inner: Arc<dyn DatabaseService>,
         attempts: Mutex<usize>,
@@ -795,7 +794,9 @@ mod tests {
                 schema_columns: forward,
                 schema_drop_table: forward,
                 schema_add_column: forward,
-                statement_budget: custom,
+                catalog_tables: forward,
+                catalog_columns: forward,
+                catalog_row_count: forward,
             }
 
             async fn create_many(
@@ -804,20 +805,16 @@ mod tests {
                 _rows: Vec<HashMap<String, serde_json::Value>>,
             ) -> Result<i64, DatabaseError> {
                 *self.attempts.lock().unwrap() += 1;
-                Err(DatabaseError::ResourceExhausted(
-                    "D1 refused: too many queries".into(),
+                Err(DatabaseError::CallBudgetExhausted(
+                    "D1 refused: Too many API requests by single Worker invocation".into(),
                 ))
-            }
-
-            fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
-                Ok(StatementBudget::Limited { limit: 1000, used: 0 })
             }
         }
     }
 
-    /// A write refused although the budget reported room is attempted once
-    /// and handed back as a failure naming the table and the refusal, for the
-    /// caller to log — never swallowed.
+    /// A write the platform refused although the adapter had room is
+    /// attempted once and handed back as a failure naming the table and the
+    /// refusal, for the caller to log — never swallowed.
     #[tokio::test]
     async fn a_refused_write_is_reported_not_swallowed() {
         let db = RefusingDb {
@@ -831,7 +828,10 @@ mod tests {
             .await
             .expect_err("the refusal is reported");
         assert_eq!(failure.table, TABLE);
-        assert!(failure.error.contains("too many queries"), "{failure:?}");
+        assert!(
+            failure.error.contains("Too many API requests"),
+            "{failure:?}"
+        );
         assert_eq!(*db.attempts.lock().unwrap(), 1);
     }
 }
