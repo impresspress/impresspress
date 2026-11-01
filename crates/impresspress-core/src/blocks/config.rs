@@ -304,7 +304,25 @@ impl VariablesConfigBlock {
             // `block_settings::load` and `wrap_grants::load` answer the same
             // cold start with no rows. Not a failed read.
             Err(UnfilteredReadError::Absent(_)) => None,
-            Err(e) => {
+            // Every failed read is `Unavailable` — this is the one place the
+            // config block maps one. Not split the way the config source splits
+            // it (`config_source::database::config_error`: `Transient` or
+            // `SourceFault`), because the two answer different callers:
+            // - A route reading stored config gets `Unavailable` whatever
+            //   failed. The fail-closed rule asks for exactly one answer to a
+            //   failed stored-config read — unavailable, never defaults — so a
+            //   fault is not told apart from an outage here; which status a
+            //   handler gives `Unavailable` is the handler's mapping.
+            // - An `Init` that reads here retries, `Unavailable` being
+            //   transient. A fault cannot hide behind that retry: a boot
+            //   initializes every block, and every block that declares config
+            //   keys (auth-ui, email, files, … in every impresspress runtime)
+            //   reads the table through this same snapshot via the config
+            //   source at its own `Init`, which classifies a fault as
+            //   permanent.
+            Err(
+                e @ (UnfilteredReadError::Read(_) | UnfilteredReadError::MayBeTruncated { .. }),
+            ) => {
                 return Err(WaferError::new(
                     ErrorCode::Unavailable,
                     format!("the variables table could not be read: {e}"),

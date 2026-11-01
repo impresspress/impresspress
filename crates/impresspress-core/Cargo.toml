@@ -340,6 +340,11 @@ rusqlite = { workspace = true }
 # regular optional dep) is off.
 wafer-block-sqlite = { workspace = true }
 wafer-block-http-listener = { workspace = true }
+# `tests/database_config_source.rs` counts the warnings the variables snapshot
+# logs, through a subscriber writing to a buffer: how often a line is written
+# is the behaviour under test there (one per config-write generation, not one
+# per read).
+tracing-subscriber = { workspace = true }
 # The guest SDK, compiled for the host: the parity test renders `BlockInfo`
 # JSON with it and parses the result with the real `wafer_block` types, and
 # the golden test builds the templates beside it.

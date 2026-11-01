@@ -100,7 +100,7 @@ use impresspress_core::{
     features::BlockSettings,
     platform_state::{block_settings, user_roles, variables, wrap_grants},
     test_support::{
-        d1_shaped::{D1Shaped, Ledger, RoundTrip, Sent},
+        d1_shaped::{D1Shaped, Fault, Ledger, RoundTrip, Sent},
         InMemoryStorageService,
     },
     PreparedReleaseAssets, PreparedRuntimePlan, WaferLockIdentity,
@@ -142,6 +142,13 @@ const BLOCK_VARIABLES: [(&str, &str); 4] = [
         "support@example.com",
     ),
 ];
+
+/// Held for the whole body of every test here: the variables snapshot's memo
+/// is keyed on the process-wide config-write generation, and
+/// [`an_outage_leaves_a_page_reading_no_stored_config_serving`] moves it,
+/// which would make the golden run's snapshots read again mid-phase.
+static GENERATION: std::sync::LazyLock<futures::lock::Mutex<()>> =
+    std::sync::LazyLock::new(|| futures::lock::Mutex::new(()));
 
 fn golden_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/d1_read_cost.golden")
@@ -584,6 +591,17 @@ async fn request(
     path: &str,
     cookie: Option<&str>,
 ) -> u16 {
+    request_flow(wafer, db, "site-main", path, cookie).await
+}
+
+/// [`request`] through `flow` rather than the impresspress `site-main`.
+async fn request_flow(
+    wafer: &Wafer,
+    db: &Arc<dyn DatabaseService>,
+    flow: &str,
+    path: &str,
+    cookie: Option<&str>,
+) -> u16 {
     deferred::set_mode(DeferMode::Queued);
     let mut headers = vec![
         ("host", "localhost".to_string()),
@@ -605,11 +623,9 @@ async fn request(
     let status = after_response::scope_root(
         Rc::clone(&after),
         async {
-            http_codec::collect_http_response(
-                wafer.run("site-main", msg, InputStream::empty()).await,
-            )
-            .await
-            .status
+            http_codec::collect_http_response(wafer.run(flow, msg, InputStream::empty()).await)
+                .await
+                .status
         },
         || panic!("a stale after-response scope"),
     )
@@ -1595,6 +1611,7 @@ fn render(runs: &[Run]) -> String {
 /// `tests/d1_read_cost.golden`; and the rules, whatever the golden says.
 #[tokio::test]
 async fn a_cold_isolate_sends_d1_the_golden_statements() {
+    let _generation = GENERATION.lock().await;
     let runs = vec![run(Variant::Mixed).await, run(Variant::Shared).await];
 
     let mut problems = Vec::new();
@@ -1696,6 +1713,213 @@ const COMPILED_FEATURES: &[(&str, bool)] = &[
     ("test-support", cfg!(feature = "test-support")),
     ("wasm", cfg!(feature = "wasm")),
 ];
+
+// ---------------------------------------------------------------------------
+// An outage: what still serves while stored config cannot be read.
+// ---------------------------------------------------------------------------
+
+/// The flow a wafer-site-shaped deployment dispatches to: impresspress's
+/// `site-main` middleware chain step for step, under the site's own id, as
+/// the wafer.run site defines `wafer-site-main` (its `flows::site`).
+const SITE_FLOW: &str = "wafer-site-main";
+
+/// The site's static content block, as the wafer.run site's
+/// `wafer-site/content` is: every path read straight from a storage service,
+/// `/` as `index.html`, no config read.
+struct SiteContent(Arc<InMemoryStorageService>);
+
+impl SiteContent {
+    const NAME: &'static str = "wafer-site/content";
+    const INDEX: &'static [u8] = b"<h1>wafer-site</h1>";
+}
+
+#[wafer_block::wafer_async_trait]
+impl wafer_run::Block for SiteContent {
+    fn info(&self) -> wafer_run::BlockInfo {
+        wafer_run::BlockInfo::new(Self::NAME, "0.0.1", "http-handler@v1", "site content")
+    }
+
+    async fn handle(
+        &self,
+        _ctx: &dyn wafer_run::Context,
+        msg: wafer_run::Message,
+        _input: InputStream,
+    ) -> wafer_run::OutputStream {
+        let path = msg.path().trim_start_matches('/');
+        let key = if path.is_empty() { "index.html" } else { path };
+        match wafer_core::interfaces::storage::service::StorageService::get(
+            self.0.as_ref(),
+            "dist",
+            key,
+        )
+        .await
+        {
+            Ok((data, _)) => wafer_run::OutputStream::respond_with_meta(
+                data,
+                vec![wafer_run::MetaEntry {
+                    key: wafer_run::META_RESP_CONTENT_TYPE.to_string(),
+                    value: "text/html; charset=utf-8".to_string(),
+                }],
+            ),
+            Err(_) => wafer_run::OutputStream::error(wafer_run::WaferError::new(
+                wafer_run::ErrorCode::NotFound,
+                "Not found",
+            )),
+        }
+    }
+
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn wafer_run::Context,
+        _event: wafer_run::LifecycleEvent,
+    ) -> Result<(), wafer_run::WaferError> {
+        Ok(())
+    }
+}
+
+/// Make `wafer` a wafer-site-shaped deployment, after `build()` and before
+/// the boot, as the wafer.run site's `register_post_build_for_site` does: the
+/// content block, the router's route table replaced by the site's (`/b/**`
+/// and `/health` to impresspress, everything else to the content block), and
+/// the site's flow over impresspress's middleware chain.
+async fn make_site_shaped(wafer: &mut Wafer) {
+    let storage = Arc::new(InMemoryStorageService::new());
+    wafer_core::interfaces::storage::service::StorageService::put(
+        storage.as_ref(),
+        "dist",
+        "index.html",
+        SiteContent::INDEX,
+        "text/html",
+    )
+    .await
+    .expect("stage the site's index.html");
+    wafer
+        .register_block(SiteContent::NAME, Arc::new(SiteContent(storage)))
+        .expect("register the site's content block");
+    wafer.add_block_config(
+        "wafer-run/router",
+        json!({ "routes": [
+            { "path": "/b/**",   "block": "impresspress/router" },
+            { "path": "/health", "block": "impresspress/router" },
+            { "path": "/**",     "block": SiteContent::NAME },
+        ] }),
+    );
+    let mut flow: Value =
+        serde_json::from_str(impresspress_core::flows::site_main::JSON).expect("site-main is JSON");
+    flow["id"] = json!(SITE_FLOW);
+    flow.as_object_mut()
+        .expect("a flow object")
+        .remove("config_map");
+    wafer
+        .add_flow_json(&flow.to_string())
+        .expect("register the site's flow");
+}
+
+/// A prepared build over `db`, booted on the request path; `site_shaped`
+/// makes it the wafer-site-shaped deployment first.
+async fn boot_prepared(
+    db: &Arc<dyn DatabaseService>,
+    plan: &PreparedRuntimePlan,
+    site_shaped: bool,
+) -> (Wafer, Arc<VariablesSnapshot>) {
+    let mut built = build(db, Some(plan), false, &HashMap::new()).await;
+    if site_shaped {
+        make_site_shaped(&mut built.wafer).await;
+    }
+    boot_request_runtime(
+        &mut built.wafer,
+        db,
+        &built.block_settings,
+        built.config.clone(),
+        RequestBuild::Prepared,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("the prepared request build boots: {e}"));
+    (built.wafer, built.variables)
+}
+
+/// Put `variables` into its failed state as an outage leaves a published
+/// runtime's: the variables table fails, a config write invalidates the read
+/// the boot made, and the next read fails and is remembered.
+async fn fail_stored_config(
+    shaped: &D1Shaped,
+    db: &Arc<dyn DatabaseService>,
+    variables: &VariablesSnapshot,
+) {
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    impresspress_core::config_generation::note_config_write();
+    variables
+        .read(db)
+        .await
+        .expect_err("the outage fails the variables read");
+}
+
+/// Whether any statement of `trips` names the variables table.
+fn reads_variables(trips: &[RoundTrip]) -> bool {
+    trips
+        .iter()
+        .flat_map(|trip| trip.sent.iter())
+        .any(|sent| sent.sql.contains(variables::TABLE))
+}
+
+/// **An outage leaves a page that reads no stored config serving** (the
+/// outage plan's I3 test; fail closed, binding). With the variables snapshot
+/// failed — every stored-config read `Unavailable` — a wafer-site-shaped
+/// deployment still answers `/` 200 from its content block, sending D1 no
+/// variables read on that request: the middleware chain and the router read
+/// no table config. An impresspress site's `/` reads its landing switch
+/// (`HAS_LANDING_PAGE`, a table key), which fails closed: an error, never the
+/// redirect it answers healthy and never a page decided by the switch's
+/// declared default. (Today's 500 becomes the outage plan's 503 in its I4b.)
+#[tokio::test]
+async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    // The wafer-site-shaped deployment.
+    let shaped = Arc::new(D1Shaped::open(&path, Arc::clone(&ledger)));
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let (wafer, variables) = boot_prepared(&db, &plan, true).await;
+    assert_eq!(request_flow(&wafer, &db, SITE_FLOW, "/", None).await, 200);
+    fail_stored_config(&shaped, &db, &variables).await;
+    ledger.take();
+    assert_eq!(
+        request_flow(&wafer, &db, SITE_FLOW, "/", None).await,
+        200,
+        "the content path reads no stored config, so an outage leaves it serving"
+    );
+    let trips = ledger.take();
+    assert!(
+        !reads_variables(&trips),
+        "the content path sent D1 a variables read: {trips:#?}"
+    );
+    shaped.clear_fault();
+    drop(wafer);
+
+    // An impresspress site.
+    let shaped = Arc::new(D1Shaped::open(&path, Arc::clone(&ledger)));
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let (wafer, variables) = boot_prepared(&db, &plan, false).await;
+    assert_eq!(
+        request(&wafer, &db, "/", None).await,
+        302,
+        "healthy, `/` redirects an anonymous visitor to sign in"
+    );
+    fail_stored_config(&shaped, &db, &variables).await;
+    ledger.take();
+    assert_eq!(
+        request(&wafer, &db, "/", None).await,
+        500,
+        "the landing switch fails closed: an error, not the redirect its default decides"
+    );
+    assert!(
+        !reads_variables(&ledger.take()),
+        "the remembered failure answers with no query"
+    );
+}
 
 /// The `[features]` table of the manifest at `crate_dir`.
 fn manifest_features(crate_dir: &str) -> toml::Table {

@@ -30,8 +30,10 @@
 //!
 //! A failed read is remembered ([`State::Failed`]) and replayed to every reader
 //! until it is retried, with no query. It is never turned into defaults, an
-//! empty map or "not found": `load_for_block` answers `ConfigError::Transient`,
-//! and `CONFIG_GET`/`CONFIG_GET_MANY` answer `ErrorCode::Unavailable`. A route
+//! empty map or "not found": `load_for_block` answers `ConfigError::Transient`
+//! or `ConfigError::SourceFault`, as `config_source::database::config_error`
+//! classifies it, and `CONFIG_GET`/`CONFIG_GET_MANY` answer
+//! `ErrorCode::Unavailable`. A route
 //! that reads stored config therefore answers an error while the table cannot
 //! be read, rather than rendering with config nobody stored.
 //!
@@ -173,11 +175,18 @@ struct Failure {
 /// cell whole.
 #[derive(Debug, Clone, Default)]
 enum State {
-    /// Nothing read yet, or nothing worth remembering: a fresh runtime, or the
-    /// last read was the pre-migration-002 shape (see
-    /// [`VariablesSnapshot::read`]), which is deliberately not memoized.
+    /// Nothing read yet, or nothing worth remembering: a fresh runtime, or a
+    /// table that does not exist yet.
     #[default]
     Empty,
+    /// The last read found the pre-migration-002 shape (see
+    /// [`VariablesSnapshot::read`]). Its rows are deliberately not memoized, so
+    /// every reader reads again, exactly as from `Empty`; what is remembered is
+    /// only that this generation's shape has been warned about, so the warning
+    /// is one line per config-write generation rather than one per read — a
+    /// cold build reads once per config-declaring block, and every
+    /// `CONFIG_GET` reads too.
+    PreMigration002 { warned_at: u64 },
     /// A successful read, and the generation captured before it.
     Loaded {
         generation: u64,
@@ -283,7 +292,9 @@ impl VariablesSnapshot {
     /// migration that adds and backfills it runs as raw SQL through
     /// `migration_helper`, which records no config write to invalidate a memo
     /// with. Memoizing would leave every block on its defaults for the rest of
-    /// the runtime, so that read is served and not remembered. Keyed on the
+    /// the runtime, so that read is served and not remembered. It is warned
+    /// about once per config-write generation ([`State::PreMigration002`]),
+    /// not once per read. Keyed on the
     /// record's shape, not on the grouping: a table holding only shared rows
     /// (`block` NULL on each) has the column, groups to nothing, and is
     /// memoized like any other — otherwise it would be re-read once per
@@ -308,7 +319,7 @@ impl VariablesSnapshot {
                 }
                 failure.failures
             }
-            State::Loaded { .. } | State::Empty => 0,
+            State::Loaded { .. } | State::Empty | State::PreMigration002 { .. } => 0,
         };
 
         // `generation` was captured BEFORE this read: a write that lands while
@@ -321,12 +332,21 @@ impl VariablesSnapshot {
             Ok(read) => {
                 let rows = Arc::new(VariablesRows::new(read.rows));
                 if read.returned > 0 && !read.any_record_has_block_key {
-                    tracing::warn!(
-                        rows = read.returned,
-                        "variables rows carry no `block` column (pre-migration-002); \
-                         serving this read without remembering it"
+                    let warned = matches!(
+                        self.load(),
+                        State::PreMigration002 { warned_at } if warned_at == generation
                     );
-                    self.store(State::Empty);
+                    if !warned {
+                        tracing::warn!(
+                            rows = read.returned,
+                            "variables rows carry no `block` column (pre-migration-002); \
+                             serving every read without remembering it until migration 002 \
+                             has run (warned once per config-write generation)"
+                        );
+                    }
+                    self.store(State::PreMigration002 {
+                        warned_at: generation,
+                    });
                 } else {
                     self.store(State::Loaded {
                         generation,
