@@ -37,11 +37,11 @@ use impresspress_core::{
     platform_state::variables::{self, NewVariable},
     test_support::{
         d1_shaped::{D1Shaped, Fault, Ledger},
-        migrate_sqlite, TestContext,
+        migrate_sqlite, MessageCapture, TestContext,
     },
 };
 use wafer_block::ConfigVar;
-use wafer_core::interfaces::database::service::{DatabaseService, RecordList};
+use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService, RecordList};
 use wafer_run::{ConfigError, ConfigSource, ErrorCode};
 
 /// Held by every test for its whole body: see the module doc.
@@ -525,6 +525,61 @@ async fn rows_without_a_block_column_are_not_memoized_as_empty() {
     assert_eq!(counting.lists(), 2);
 }
 
+/// The pre-migration-002 shape is read again by every reader, deliberately,
+/// but warned about once per config-write generation — not once per read,
+/// which on a cold build is once per config-declaring block, and once per
+/// `CONFIG_GET` after it.
+#[tokio::test(flavor = "current_thread")]
+async fn the_pre_migration_002_shape_is_warned_about_once_per_generation() {
+    let _generation = GENERATION.lock().await;
+    let (counting, db) = database();
+    run_raw(&db, 0).await;
+    let mut row = NewVariable {
+        key: "WAFER_RUN__AUTH__A".to_string(),
+        value: "backfilled".to_string(),
+        name: String::new(),
+        description: String::new(),
+        warning: String::new(),
+        sensitive: false,
+        updated_by: String::new(),
+        block: None,
+    }
+    .into_row()
+    .to_data();
+    row.remove("block");
+    db.create(variables::TABLE, row)
+        .await
+        .expect("seed a pre-002 row");
+    let source = DatabaseConfigSource::new(db.clone(), Arc::default());
+    let logged = MessageCapture::default();
+    let _subscriber = tracing::subscriber::set_default(logged.clone());
+    let load_all = || async {
+        for block in ["wafer-run/auth", "impresspress/email", "impresspress/files"] {
+            source
+                .load_for_block(block, &[optional("WAFER_RUN__AUTH__A")])
+                .await
+                .expect("resolves on defaults");
+        }
+    };
+
+    load_all().await;
+    assert_eq!(counting.lists(), 3, "the shape is still read every time");
+    assert_eq!(
+        logged.count_containing("pre-migration-002"),
+        1,
+        "one warning, not one per block"
+    );
+
+    note_config_write();
+    load_all().await;
+    assert_eq!(counting.lists(), 6);
+    assert_eq!(
+        logged.count_containing("pre-migration-002"),
+        2,
+        "a new generation is warned about once more"
+    );
+}
+
 /// A table holding only shared rows groups to nothing too, but it is
 /// memoized: the pre-002 rule is keyed on the record's shape, and a shared
 /// row carries the `block` column (NULL). Keyed on the grouping instead, every
@@ -601,13 +656,23 @@ async fn a_full_page_fails_the_load_instead_of_serving_partial_config() {
         .load_for_block("wafer-run/auth", &declared)
         .await
         .expect_err("incomplete config must not resolve");
-    let ConfigError::Transient { block, source } = &err else {
-        panic!("must be Transient so the block slot does not cache it permanently: {err:?}");
+    // A source fault: reading the same table again returns the same full
+    // page, so retrying cannot cure it — the block's permanent failure, not a
+    // transient one retried forever on a 60 s backoff.
+    let ConfigError::SourceFault { block, source } = &err else {
+        panic!("a possibly truncated page is a source fault: {err:?}");
     };
     assert_eq!(block, "wafer-run/auth");
     assert!(
         source.to_string().contains("may be truncated"),
         "the refusal says why: {source}"
+    );
+    assert!(
+        matches!(
+            source.downcast_ref::<variables::UnfilteredReadError>(),
+            Some(variables::UnfilteredReadError::MayBeTruncated { .. })
+        ),
+        "the read error stays typed behind the SourceFault: {source:?}"
     );
 }
 
@@ -985,6 +1050,249 @@ async fn a_remembered_failure_is_unavailable_never_a_default_or_the_boot_map() {
         1,
         "every reader got the remembered failure with no query"
     );
+}
+
+/// A D1 failure nobody has classified as one that clears (an `Internal`
+/// text), on every statement naming the variables table: the list fails, and
+/// so does the schema probe after it, so the read is a failed `Read`, not the
+/// cold start's `Absent`. What a fault the source cannot retry away looks
+/// like; a genuinely missing table is not one (its probe answers "absent").
+fn unclassified_variables_fault() -> Fault {
+    Fault::Internal("D1_ERROR: some unclassified fault: SQLITE_ERROR".to_string())
+}
+
+/// `load_for_block`'s error for a read failing with `fault`, fresh, and then
+/// remembered (replayed to another block with no query, after the fault is
+/// cleared): both must be classified alike.
+async fn fresh_and_remembered(fault: Fault) -> [ConfigError; 2] {
+    let (counting, shaped, db) = shaped().await;
+    seed(&db, "WAFER_RUN__AUTH__K", "stored").await;
+    let clock = Clock::default();
+    let source = DatabaseConfigSource::new(db, clock.snapshot(RetryMode::Backoff));
+    let declared = [ConfigVar::new("WAFER_RUN__AUTH__K", "doc", "the-default")];
+
+    shaped.fail_table(variables::TABLE, fault);
+    let fresh = source
+        .load_for_block("wafer-run/auth", &declared)
+        .await
+        .expect_err("a failed read never resolves to the default");
+    assert_eq!(counting.lists(), 1);
+    shaped.clear_fault();
+    let remembered = source
+        .load_for_block("impresspress/email", &declared)
+        .await
+        .expect_err("a remembered failure is replayed, never the default");
+    assert_eq!(counting.lists(), 1, "the replay sends no query");
+    [fresh, remembered]
+}
+
+/// The typed database error behind a config error's source.
+fn database_error_behind(err: &ConfigError) -> &DatabaseError {
+    let (ConfigError::Transient { source, .. } | ConfigError::SourceFault { source, .. }) = err
+    else {
+        panic!("a failed read, not {err:?}");
+    };
+    let typed = source
+        .downcast_ref::<variables::UnfilteredReadError>()
+        .unwrap_or_else(|| panic!("the read error stays typed: {source:?}"));
+    assert!(
+        matches!(typed, variables::UnfilteredReadError::Read(_)),
+        "the table is there, so the list's failure is a failed read: {typed:?}"
+    );
+    typed
+        .database_error()
+        .expect("a failed list carries its error")
+}
+
+/// **A read retrying cannot fix is a `SourceFault`**, fresh and remembered:
+/// an unclassified D1 failure ([`unclassified_variables_fault`]). Classified by
+/// wafer-run's `init_failure_is_transient`, which calls `Internal` permanent:
+/// the block's `Init` is cached as failed, where `Transient` would retry it
+/// on every backoff for the isolate's life.
+#[tokio::test]
+async fn a_read_retrying_cannot_fix_is_a_source_fault_fresh_and_remembered() {
+    let _generation = GENERATION.lock().await;
+    for err in fresh_and_remembered(unclassified_variables_fault()).await {
+        assert!(
+            matches!(&err, ConfigError::SourceFault { source, .. } if source.to_string().contains("some unclassified fault")),
+            "{err:?}"
+        );
+        assert!(
+            matches!(database_error_behind(&err), DatabaseError::Internal(_)),
+            "{err:?}"
+        );
+    }
+}
+
+/// **An outage is `Transient`**, fresh and remembered: D1's transient texts
+/// are `Unavailable` (`sqlite_text_error`), which may clear on its own.
+#[tokio::test]
+async fn an_unavailable_database_is_transient_fresh_and_remembered() {
+    let _generation = GENERATION.lock().await;
+    for err in fresh_and_remembered(Fault::Unavailable).await {
+        assert!(
+            matches!(&err, ConfigError::Transient { source, .. } if source.to_string().contains("injected outage")),
+            "{err:?}"
+        );
+        assert!(
+            matches!(database_error_behind(&err), DatabaseError::Unavailable(_)),
+            "{err:?}"
+        );
+    }
+}
+
+/// **A spent call budget is `Transient`**, fresh and remembered, although its
+/// code is `ResourceExhausted`: its detail code `CALL_BUDGET_EXHAUSTED` says a
+/// fresh invocation may run the read (wafer-run's `ResourceExhausted` rule).
+/// The D1 adapter answers the platform's own refusal ("Too many API requests
+/// by single Worker invocation") with the same variant, so neither is a 500.
+#[tokio::test]
+async fn a_spent_call_budget_is_transient_fresh_and_remembered() {
+    let _generation = GENERATION.lock().await;
+    for err in fresh_and_remembered(Fault::CallBudgetExhausted).await {
+        assert!(
+            matches!(&err, ConfigError::Transient { source, .. } if source.to_string().contains("Too many API requests")),
+            "{err:?}"
+        );
+        let database = database_error_behind(&err);
+        assert_eq!(database.code(), ErrorCode::ResourceExhausted);
+        assert!(
+            matches!(database, DatabaseError::CallBudgetExhausted(_)),
+            "{err:?}"
+        );
+    }
+}
+
+/// A block declaring one config key, counting its `Init`s.
+struct Configured {
+    inits: AtomicUsize,
+}
+
+impl Configured {
+    const NAME: &'static str = "wafer-run/auth";
+}
+
+#[wafer_block::wafer_async_trait]
+impl wafer_run::Block for Configured {
+    fn info(&self) -> wafer_run::BlockInfo {
+        wafer_run::BlockInfo::new(Self::NAME, "0.1.0", "test/configured@v1", "test").config_keys(
+            vec![ConfigVar::new("WAFER_RUN__AUTH__K", "doc", "the-default")],
+        )
+    }
+
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn wafer_block::context::Context,
+        event: wafer_run::LifecycleEvent,
+    ) -> Result<(), wafer_run::WaferError> {
+        if event.event_type == wafer_run::LifecycleType::Init {
+            self.inits.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _ctx: &dyn wafer_block::context::Context,
+        _msg: wafer_run::Message,
+        _input: wafer_run::InputStream,
+    ) -> wafer_run::OutputStream {
+        wafer_run::OutputStream::respond(Vec::new())
+    }
+}
+
+/// A runtime holding only [`Configured`], resolving its config through a
+/// [`DatabaseConfigSource`] over `db`.
+fn configured_runtime(
+    db: &Arc<dyn DatabaseService>,
+    snapshot: Arc<VariablesSnapshot>,
+) -> (wafer_run::Wafer, Arc<Configured>) {
+    let block = Arc::new(Configured {
+        inits: AtomicUsize::new(0),
+    });
+    let mut wafer = wafer_run::Wafer::builder()
+        .disable_inventory()
+        .disable_lockfile()
+        .config_source(Arc::new(DatabaseConfigSource::new(db.clone(), snapshot)))
+        .build()
+        .expect("build a bare runtime");
+    wafer
+        .register_block(Configured::NAME, block.clone())
+        .expect("register the configured block");
+    (wafer, block)
+}
+
+/// **Through wafer-run, a source fault is the block's permanent failure and
+/// an outage is not.** The classification decides what the runtime does with
+/// the block: a `SourceFault` is cached for the slot's life (a later healthy
+/// read does not revive it, and the block's `Init` never runs), and the
+/// validator reports it as `SourceFault`; an outage is retried, and reported
+/// `Transient`.
+#[tokio::test]
+async fn a_source_fault_is_the_blocks_permanent_init_failure_and_an_outage_is_not() {
+    let _generation = GENERATION.lock().await;
+
+    // An outage: transient, reported so, and the block's Init has not run.
+    let (_counting, outage, db) = shaped().await;
+    outage.fail_table(variables::TABLE, Fault::Unavailable);
+    let (wafer, block) =
+        configured_runtime(&db, Arc::new(VariablesSnapshot::new(RetryMode::Backoff)));
+    let report = wafer.validate_all_block_configs().await;
+    assert_eq!(
+        report
+            .unavailable
+            .iter()
+            .map(|u| (u.block.as_str(), u.reason))
+            .collect::<Vec<_>>(),
+        [(Configured::NAME, wafer_run::UnavailableReason::Transient)]
+    );
+    let outage = wafer
+        .init_block(Configured::NAME)
+        .await
+        .expect_err("the outage fails the Init");
+    assert!(
+        matches!(&outage, wafer_run::InitError::Transient(m) if m.contains("injected outage")),
+        "{outage:?}"
+    );
+    assert_eq!(block.inits.load(Ordering::SeqCst), 0);
+
+    // A source fault: permanent, reported so, and still failed once the
+    // database answers again — the read is re-read (a config write), but the
+    // slot never asks.
+    let (counting, faulty, db) = shaped().await;
+    faulty.fail_table(variables::TABLE, unclassified_variables_fault());
+    let (wafer, block) =
+        configured_runtime(&db, Arc::new(VariablesSnapshot::new(RetryMode::Backoff)));
+    let report = wafer.validate_all_block_configs().await;
+    assert_eq!(
+        report
+            .unavailable
+            .iter()
+            .map(|u| (u.block.as_str(), u.reason))
+            .collect::<Vec<_>>(),
+        [(Configured::NAME, wafer_run::UnavailableReason::SourceFault)]
+    );
+    let fault = wafer
+        .init_block(Configured::NAME)
+        .await
+        .expect_err("the source fault fails the Init");
+    assert!(
+        matches!(&fault, wafer_run::InitError::Permanent(m) if m.contains("some unclassified fault")),
+        "{fault:?}"
+    );
+    faulty.clear_fault();
+    note_config_write();
+    let lists = counting.lists();
+    let cached = wafer
+        .init_block(Configured::NAME)
+        .await
+        .expect_err("a source fault is cached for the slot's life");
+    assert!(
+        matches!(&cached, wafer_run::InitError::Permanent(m) if m.contains("some unclassified fault")),
+        "{cached:?}"
+    );
+    assert_eq!(counting.lists(), lists, "a cached failure reads nothing");
+    assert_eq!(block.inits.load(Ordering::SeqCst), 0);
 }
 
 /// A test context whose `wafer-run/config` is the production config block over

@@ -32,7 +32,8 @@
 //!
 //! **Fault switch.** [`D1Shaped::fail_table`] makes every statement that
 //! names a table fail as D1 would — [`Fault::Unavailable`] for a transient
-//! fault, [`Fault::Internal`] for anything else (`no such table`) — without
+//! fault, [`Fault::CallBudgetExhausted`] for the invocation's spent call
+//! budget, [`Fault::Internal`] for anything else (`no such table`) — without
 //! the statement reaching SQLite. The statement is still recorded: D1 counts
 //! a call it was sent whether or not it answered. [`D1Shaped::answer_no_rows`]
 //! makes one statement "succeed" with an empty `results` instead, as a
@@ -129,6 +130,11 @@ pub enum Fault {
     /// A transient fault: [`DatabaseError::Unavailable`], as the D1 adapter
     /// classifies an overloaded or unreachable database.
     Unavailable,
+    /// The invocation's call budget is spent:
+    /// [`DatabaseError::CallBudgetExhausted`], as the D1 adapter answers its
+    /// own refusal and the platform's ("Too many API requests by single
+    /// Worker invocation").
+    CallBudgetExhausted,
     /// Any other failure, with D1's message: [`DatabaseError::Internal`] —
     /// `"no such table: …"` for a table that is not there.
     Internal(String),
@@ -243,6 +249,10 @@ impl D1Shaped {
             Fault::Unavailable => {
                 DatabaseError::Unavailable(format!("D1_ERROR: injected outage on {table}"))
             }
+            Fault::CallBudgetExhausted => DatabaseError::CallBudgetExhausted(format!(
+                "D1 refused the call: Too many API requests by single Worker invocation \
+                 (injected on {table})"
+            )),
             Fault::Internal(message) => DatabaseError::Internal(message.clone()),
         })
     }

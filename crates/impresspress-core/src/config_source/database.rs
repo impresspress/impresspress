@@ -41,7 +41,7 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use wafer_block::ConfigVar;
 use wafer_core::interfaces::database::service::DatabaseService;
-use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig};
+use wafer_run::{init_failure_is_transient, ConfigError, ConfigSource, EnvBlockConfig};
 
 use super::VariablesSnapshot;
 use crate::platform_state::variables::UnfilteredReadError;
@@ -53,10 +53,12 @@ use crate::platform_state::variables::UnfilteredReadError;
 /// Returns [`ConfigError::MissingRequired`] for keys with `optional ==
 /// false` where neither the overlay, the row nor a non-empty default supplies
 /// a value. A failed read of the table — fresh, or remembered by the snapshot
-/// until its retry — surfaces as [`ConfigError::Transient`] (see
+/// until its retry — surfaces as [`ConfigError::Transient`] when it may clear
+/// on its own and [`ConfigError::SourceFault`] when it cannot (see
 /// [`config_error`]), never as defaults. wafer-run does not cache a transient
 /// error in the block slot: it retries the block's `Init` after its transient
-/// backoff, and that retry reads through the snapshot again.
+/// backoff, and that retry reads through the snapshot again. A source fault is
+/// cached as the block's permanent failure.
 pub struct DatabaseConfigSource {
     db: Arc<dyn DatabaseService>,
     /// Static overlay applied on top of the rows in `load_for_block`. Keys
@@ -92,25 +94,54 @@ impl DatabaseConfigSource {
 }
 
 /// The [`ConfigError`] a block's load reports when the variables table could
-/// not be read.
+/// not be read: the one place a snapshot failure becomes a config error, and
+/// the one place it is classified. The snapshot remembers the failure and
+/// replays it until its retry, so a remembered failure reaches this exactly as
+/// a fresh one did and is classified the same way.
 ///
-/// The one place a snapshot failure becomes a config error, so the day the
-/// classification grows (a database fault told apart from a transient one) it
-/// changes here and nowhere else; `error` arrives typed for that. Every
-/// failure is `Transient` today: wafer-run does not cache it in the block
-/// slot, so the block's `Init` is retried after wafer-run's transient backoff
-/// rather than run on defaults it was never configured with.
+/// - [`UnfilteredReadError::Read`]: the database's own error, classified by
+///   wafer-run's [`init_failure_is_transient`] over its code and detail code —
+///   the rule a block `Init` that fails the same way is classified by, so the
+///   config path and the lifecycle path cannot disagree about one refusal.
+///   `Unavailable` (a backend down, overloaded, over a quota that resets: the
+///   D1 texts `sqlite_text_error` lists) and a spent per-invocation call
+///   budget (`CallBudgetExhausted`, the adapter's own refusal or the
+///   platform's "Too many API requests by single Worker invocation") are
+///   [`ConfigError::Transient`]: wafer-run does not cache them in the block
+///   slot, and retries the block's `Init` after its transient backoff. Every
+///   other variant — a malformed query, a constraint, a D1 text nobody has
+///   classified as one that clears — is [`ConfigError::SourceFault`]: an
+///   answer retrying cannot change, cached as the block's permanent failure.
+///   A missing table is not one of these: its failed list is followed by a
+///   schema probe that answers "absent", which is `Absent` below, whether the
+///   database was ever migrated or not.
+/// - [`UnfilteredReadError::Absent`]: `Transient`. The table does not exist
+///   yet — a fresh database before admin's migrations — so a block
+///   initialized before them is retried once they have run and the deploy
+///   hook has seeded, rather than resolved on defaults: a required key the
+///   seed provides (products' auto-generated webhook secret) would otherwise
+///   be a permanent `MissingRequired`.
+/// - [`UnfilteredReadError::MayBeTruncated`]: `SourceFault`. A page that came
+///   back exactly full is a table too large for one bounded read; reading it
+///   again returns the same page until the table shrinks (an admin deleting
+///   rows: a config write) or the read changes (a raised limit, pagination).
 ///
-/// That includes a table that does not exist yet
-/// ([`UnfilteredReadError::Absent`]): a block initialized before admin's
-/// migrations is retried once they have run and the deploy hook has seeded,
-/// rather than resolved on defaults — a required key the seed provides
-/// (products' auto-generated webhook secret) would otherwise be a permanent
-/// `MissingRequired`.
+/// The typed error stays behind either variant (`source`), so a reader of the
+/// [`ConfigError`] can still downcast to the [`UnfilteredReadError`].
 fn config_error(block: &str, error: UnfilteredReadError) -> ConfigError {
-    ConfigError::Transient {
-        block: block.to_string(),
-        source: Box::new(error),
+    let transient = match &error {
+        UnfilteredReadError::Read(database) => {
+            init_failure_is_transient(database.code(), database.detail_code())
+        }
+        UnfilteredReadError::Absent(_) => true,
+        UnfilteredReadError::MayBeTruncated { .. } => false,
+    };
+    let block = block.to_string();
+    let source = Box::new(error);
+    if transient {
+        ConfigError::Transient { block, source }
+    } else {
+        ConfigError::SourceFault { block, source }
     }
 }
 

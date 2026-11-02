@@ -1158,8 +1158,24 @@ impl LoggerService for ScopedLoggerService {
     }
 }
 
+/// The cached runtime's config source: the current request's
+/// `DatabaseConfigSource`, which classifies a failed read of the variables
+/// table itself.
+///
+/// With no request in scope (or a bundle carrying no source, which only a
+/// test constructs) there is no source to ask. That is
+/// [`ConfigError::Transient`], not [`ConfigError::SourceFault`], although it
+/// is a bug rather than an outage: a source fault is cached as the block's
+/// permanent failure for the slot's lifetime — the cached runtime's, up to the
+/// isolate's — so one
+/// misscoped load would leave the block dead on every later request, where a
+/// transient failure is retried by the next load inside a scope. It is logged
+/// at `error!` so the scope bug is seen, not retried silently.
 #[derive(Default)]
 pub(crate) struct ScopedConfigSource;
+
+/// What [`ScopedConfigSource`] answers with no request in scope.
+const CONFIG_SOURCE_OUT_OF_SCOPE: &str = "Cloudflare config source used outside request poll scope";
 
 #[wafer_block::wafer_async_trait]
 impl ConfigSource for ScopedConfigSource {
@@ -1168,14 +1184,17 @@ impl ConfigSource for ScopedConfigSource {
         block: &str,
         declared_keys: &[ConfigVar],
     ) -> Result<EnvBlockConfig, ConfigError> {
-        let source = current()
-            .and_then(|services| services.config_source.clone())
-            .ok_or_else(|| ConfigError::Transient {
+        let Some(source) = current().and_then(|services| services.config_source.clone()) else {
+            tracing::error!(
+                block,
+                "{CONFIG_SOURCE_OUT_OF_SCOPE}: a scope bug; the load fails transiently \
+                 so the block is retried inside a request rather than cached as failed"
+            );
+            return Err(ConfigError::Transient {
                 block: block.to_string(),
-                source: Box::new(std::io::Error::other(
-                    "Cloudflare config source used outside request poll scope",
-                )),
-            })?;
+                source: Box::new(std::io::Error::other(CONFIG_SOURCE_OUT_OF_SCOPE)),
+            });
+        };
         source.load_for_block(block, declared_keys).await
     }
 }
@@ -1397,6 +1416,31 @@ mod tests {
         assert_eq!(marker(), None);
         assert!(ScopedConfigService.get("anything").is_none());
         assert!(ScopedCryptoService.random_bytes(1).await.is_err());
+    }
+
+    /// A config load with no request in scope is `Transient`, never a
+    /// `SourceFault`: a source fault is cached as the block's permanent
+    /// failure for the isolate's life, and a scope bug must not turn one
+    /// misscoped load into a block dead on every later request.
+    #[wasm_bindgen_test]
+    async fn a_config_load_outside_a_request_scope_is_transient() {
+        assert_eq!(marker(), None);
+        let err = ScopedConfigSource
+            .load_for_block(
+                "wafer-run/auth",
+                &[ConfigVar::new("WAFER_RUN__AUTH__K", "doc", "the-default")],
+            )
+            .await
+            .expect_err("no request in scope: no source to ask, and never the default");
+        assert!(
+            matches!(
+                &err,
+                ConfigError::Transient { block, source }
+                    if block == "wafer-run/auth"
+                        && source.to_string() == CONFIG_SOURCE_OUT_OF_SCOPE
+            ),
+            "{err:?}"
+        );
     }
 
     #[wasm_bindgen_test]
