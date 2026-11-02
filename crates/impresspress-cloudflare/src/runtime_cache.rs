@@ -1345,10 +1345,11 @@ where
 
     // One lifecycle: D1 grants before seal, seal, admin first, the request
     // path's read-only hook, every remaining slot, then the grants into the
-    // storage block. Strict, because publishing a Wafer with a failed
-    // lazy-init slot would let concurrent requests wait on one another's init
-    // future, which is not a valid execution model here. The concrete services
-    // are dropped instead of entering ReadyRuntime.
+    // storage block, under the request path's `Serving` policy: a block whose
+    // Init failed transiently is published unsettled and answers
+    // `Unavailable` (the runtime is `InitWait::Refuse`, so no request runs its
+    // Init); anything permanent fails the build. The concrete services are
+    // dropped instead of entering ReadyRuntime.
     let finished = finish_runtime(
         built,
         RuntimeKind::Dynamic {

@@ -478,8 +478,8 @@ mod strict_upgrade_tests {
     /// duplicate `ALTER … ADD COLUMN`, so the error propagates, the file is
     /// never recorded as applied, and every later boot runs it again and
     /// fails again. On
-    /// Cloudflare `builder::InitPolicy::Strict` turns a block Init failure
-    /// into `Err`, and `IMPRESSPRESS_RUN_MIGRATIONS` is baked into the
+    /// Cloudflare `builder::InitPolicy::Serving` fails the build on a
+    /// permanent block Init failure (a refused statement is one), and `IMPRESSPRESS_RUN_MIGRATIONS` is baked into the
     /// deployment — so every request 500s until someone hand-edits D1.
     /// Natively `boot_native` refuses to start on it (`InitPolicy::Reported`,
     /// then a refusal on any failed Init), and SQLite rolls the whole

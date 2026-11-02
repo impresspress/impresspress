@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use wafer_core::interfaces::database::service::DatabaseService;
-use wafer_run::{RuntimeError, Wafer};
+use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+use wafer_run::{InitError, InitWait, RuntimeError, Wafer};
 
 /// Request-current config flag set only while an authenticated deployment
 /// candidate is exporting a prepared runtime plan.
@@ -29,6 +29,10 @@ pub const PREPARE_RUNTIME_PLAN_KEY: &str = "IMPRESSPRESS_PREPARE_RUNTIME_PLAN";
 /// What a block `Init` failure, a seed-hook failure or a failed
 /// [`GrantSource::Database`] read *does*. The ordering [`boot`] runs is
 /// identical under all three; only the consequence differs.
+///
+/// [`InitPolicy::Tolerant`] and [`InitPolicy::Serving`] return a
+/// [`BootError`] where they abort; [`InitPolicy::Reported`] never does for a
+/// step's failure, only for the runtime's own (`seal`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitPolicy {
     /// Log and continue. The runtime is published even with a broken block, so
@@ -51,11 +55,29 @@ pub enum InitPolicy {
     /// stays usable to repair the database. The failure is logged and is in
     /// [`BootReport::grants`].
     Tolerant,
-    /// Fail closed on the first failure. Used by the Cloudflare request path:
-    /// publishing a runtime with a failed lazy-init slot would let concurrent
-    /// requests wait on one another's init future, which is not a valid
-    /// execution model for a request-isolated platform.
-    Strict,
+    /// Serve what can be served. Used by the Cloudflare request path, whose
+    /// runtime is rebuilt rather than repaired in place.
+    ///
+    /// - A block whose `Init` fails **transiently** (its backend unreachable,
+    ///   a condition that clears) is recorded in [`BootReport::degraded`] and
+    ///   the boot goes on: the runtime is published without it, every other
+    ///   block serves, and a dispatch to it answers `Unavailable`. The caller
+    ///   retries by building a fresh runtime, never by re-running `Init` in a
+    ///   request.
+    /// - A **permanent** block `Init` failure (a real config bug), a failed
+    ///   admin `Init` of either kind, a failed grants read and a failed seed
+    ///   hook abort the boot with a [`BootError`] that says which.
+    ///
+    /// Admin is a precondition for the reason [`Self::Tolerant`] gives: its
+    /// `Init` creates the tables the seed hook reads and, on a provisioning
+    /// build, seeds them. On a settled request-path build it reads nothing.
+    ///
+    /// Requires a runtime built with [`InitWait::Refuse`], and [`boot`]
+    /// refuses the pair otherwise, before anything runs: under
+    /// [`InitWait::Await`] a published slot that is not initialized would run
+    /// its `Init` inside a later request, which may be stopped part-way while
+    /// it holds the slot's attempt lock — on Workers, for the runtime's life.
+    Serving,
     /// Capture every outcome and keep going, so the caller can render the full
     /// picture. Used by `/_deploy/init`, whose whole product is the report, and
     /// by the native boot (`impresspress_server::boot_native`), which names
@@ -144,9 +166,9 @@ pub struct BlockInitOutcome {
 /// consumer of that shape ever appears it needs the envelope, not a relaxed
 /// argument.
 ///
-/// [`InitPolicy::Tolerant`] and [`InitPolicy::Strict`] callers may ignore it:
-/// under `Strict` a failure is an `Err` instead, and under `Tolerant` the same
-/// failures are logged.
+/// [`InitPolicy::Tolerant`] and [`InitPolicy::Serving`] callers read it for
+/// what they published without ([`Self::degraded`], `Serving` only); the
+/// failures they abort on are a [`BootError`] instead.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootReport {
     pub sealed: bool,
@@ -155,8 +177,122 @@ pub struct BootReport {
     pub grants: StepOutcome,
     pub seed: StepOutcome,
     pub blocks: Vec<BlockInitOutcome>,
+    /// The blocks an [`InitPolicy::Serving`] boot published without, because
+    /// their `Init` failed transiently. Also in [`Self::blocks`] as failed.
+    /// Never filled by [`InitPolicy::Reported`], so the deploy wire shape
+    /// (and its schema version) does not change: an empty list is not
+    /// serialized, and an absent one reads as empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<DegradedBlock>,
     /// True iff every step and every block init succeeded.
     pub ok: bool,
+}
+
+/// A block an [`InitPolicy::Serving`] boot published without.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DegradedBlock {
+    pub block: String,
+    /// The transient `Init` failure, rendered.
+    pub reason: String,
+}
+
+/// Why a seed hook ([`BootHooks::seed_after_admin_init`]) failed, classified
+/// so the caller can tell an outage (retry later) from a fault (fix it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedError {
+    /// The store the hook reads or writes could not be reached; a retry may
+    /// succeed.
+    Unavailable(String),
+    /// Anything a retry cannot fix.
+    Fault(String),
+}
+
+impl SeedError {
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+    }
+}
+
+impl std::fmt::Display for SeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(message) | Self::Fault(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for SeedError {}
+
+impl From<DatabaseError> for SeedError {
+    /// Classified by the one transient rule every `Init` and config source
+    /// failure is ([`wafer_run::init_failure_is_transient`]).
+    fn from(e: DatabaseError) -> Self {
+        if wafer_run::init_failure_is_transient(e.code(), e.detail_code()) {
+            Self::Unavailable(e.to_string())
+        } else {
+            Self::Fault(e.to_string())
+        }
+    }
+}
+
+/// Why [`boot`] aborted, typed so a caller can answer an outage (503, retry)
+/// differently from a fault (500): [`Self::is_transient`].
+#[derive(Debug)]
+pub enum BootError {
+    /// A block's `Init` failed in a way the policy does not degrade: a
+    /// permanent failure under [`InitPolicy::Serving`], or admin's failure of
+    /// either kind under `Serving` and [`InitPolicy::Tolerant`].
+    BlockInit { block: String, error: InitError },
+    /// The deployment-owned WRAP grants could not be read
+    /// ([`GrantSource::Database`]).
+    Grants(DatabaseError),
+    /// The seed hook failed.
+    Seed(SeedError),
+    /// The runtime itself failed (`seal`, a malformed grant), or the boot was
+    /// asked for a policy its runtime cannot run. Always permanent.
+    Runtime(RuntimeError),
+}
+
+impl BootError {
+    /// Whether a fresh attempt may succeed: a transient `Init` failure, an
+    /// unreachable grants read or seed store — by the same rule every `Init`
+    /// failure is classified with ([`wafer_run::init_failure_is_transient`]).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::BlockInit { error, .. } => matches!(error, InitError::Transient(_)),
+            Self::Grants(e) => wafer_run::init_failure_is_transient(e.code(), e.detail_code()),
+            Self::Seed(e) => e.is_transient(),
+            Self::Runtime(_) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for BootError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BlockInit { block, error } => write!(f, "block `{block}` Init failed: {error}"),
+            Self::Grants(e) => write!(f, "load the admin-created WRAP grants: {e}"),
+            Self::Seed(e) => write!(f, "seed after admin init: {e}"),
+            Self::Runtime(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for BootError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BlockInit { error, .. } => Some(error),
+            Self::Grants(e) => Some(e),
+            Self::Seed(e) => Some(e),
+            Self::Runtime(e) => Some(e),
+        }
+    }
+}
+
+impl From<RuntimeError> for BootError {
+    fn from(e: RuntimeError) -> Self {
+        Self::Runtime(e)
+    }
 }
 
 /// Per-target boot I/O for [`boot`]. Implemented by each platform to supply
@@ -189,9 +325,11 @@ pub trait BootHooks {
     /// [`super::RuntimeConfig::republish`], so both config surfaces move
     /// together.
     ///
-    /// Under [`InitPolicy::Tolerant`] and [`InitPolicy::Strict`] an `Err`
-    /// aborts the boot; under [`InitPolicy::Reported`] it is captured in
-    /// [`BootReport::seed`]. Return `Err` for a genuinely fatal condition (for
+    /// Under [`InitPolicy::Tolerant`] and [`InitPolicy::Serving`] an `Err`
+    /// aborts the boot ([`BootError::Seed`]); under [`InitPolicy::Reported`]
+    /// it is captured in [`BootReport::seed`]. Classify it: a store that could
+    /// not be reached is [`SeedError::Unavailable`] (`From<DatabaseError>`
+    /// does that by the shared rule), anything else [`SeedError::Fault`]. Return `Err` for a genuinely fatal condition (for
     /// example, structural settings could not be persisted consistently, or a
     /// required secret cannot be read). Optional best-effort per-key seeds
     /// should still log and continue inside the implementation.
@@ -199,28 +337,31 @@ pub trait BootHooks {
     /// Receives `&mut Wafer` so a target that could not know its settings
     /// before admin migration (browser/Cloudflare first deploy) can publish the
     /// seeded values into the config snapshot before any other block initializes.
-    async fn seed_after_admin_init(&self, wafer: &mut Wafer) -> Result<(), String>;
+    async fn seed_after_admin_init(&self, wafer: &mut Wafer) -> Result<(), SeedError>;
 }
 
 /// The one post-`build()` lifecycle, for every target:
 ///
 /// 1. `grants` — register deployment-owned WRAP grants. MUST precede `seal`.
 ///    A failed [`GrantSource::Database`] read aborts the boot under
-///    [`InitPolicy::Strict`], is captured in [`BootReport::grants`] under
-///    [`InitPolicy::Reported`], and is logged under [`InitPolicy::Tolerant`];
-///    the runtime then seals without the admin-created grants.
+///    [`InitPolicy::Serving`] ([`BootError::Grants`]), is captured in
+///    [`BootReport::grants`] under [`InitPolicy::Reported`], and is logged
+///    under [`InitPolicy::Tolerant`]; the last two then seal without the
+///    admin-created grants.
 /// 2. `seal()` — finalize composite/uses/capability/snapshot wiring.
 /// 3. `init_block(admin)` FIRST — admin's migrations create the variables /
 ///    block_settings tables before any other block's `Init` writes to them,
 ///    and before the seed step reads them; on a provisioning build it also
 ///    seeds the shared variables. A failure aborts under
-///    [`InitPolicy::Strict`] and [`InitPolicy::Tolerant`].
+///    [`InitPolicy::Serving`] and [`InitPolicy::Tolerant`].
 /// 4. `hooks.seed_after_admin_init` — seed + publish (see [`BootHooks`]).
 /// 5. every remaining block, in `Wafer::block_names()` order (sorted, so the
 ///    sequence is identical across processes and platforms).
 ///
 /// `policy` changes none of that ordering; it decides only what a failure at
-/// step 1, 3, 4 or 5 does. See [`InitPolicy`].
+/// step 1, 3, 4 or 5 does. See [`InitPolicy`]. Before step 1, an
+/// [`InitPolicy::Serving`] boot of a runtime that is not
+/// [`InitWait::Refuse`] is refused ([`BootError::Runtime`]), with nothing run.
 ///
 /// The caller must have already wired the pre-seal bits its platform needs
 /// (`set_asset_loader`, any post-build block registration) onto `wafer` before
@@ -238,7 +379,17 @@ pub async fn boot(
     hooks: &dyn BootHooks,
     grants: GrantSource<'_>,
     policy: InitPolicy,
-) -> Result<BootReport, RuntimeError> {
+) -> Result<BootReport, BootError> {
+    // 0. `Serving` publishes unsettled slots; only a runtime that never runs
+    //    an `Init` in a dispatch may hold them (see `InitPolicy::Serving`).
+    if policy == InitPolicy::Serving && wafer.init_wait() != InitWait::Refuse {
+        return Err(BootError::Runtime(RuntimeError::Config(format!(
+            "InitPolicy::Serving publishes blocks whose Init has not succeeded, so it needs a \
+             runtime built with InitWait::Refuse; this one is {:?}",
+            wafer.init_wait()
+        ))));
+    }
+
     // 1. Deployment-owned WRAP grants, before seal — `add_wrap_grants` after
     //    seal is silently ignored.
     let grants = match grants {
@@ -254,21 +405,17 @@ pub async fn boot(
                 }
             }
             Err(e) => {
+                if policy == InitPolicy::Serving {
+                    // Typed, so an unreachable table (503) and anything else
+                    // (500) stay apart — never classified from a string.
+                    return Err(BootError::Grants(e));
+                }
                 let error = format!("load the admin-created WRAP grants: {e}");
-                match policy {
-                    // Stringified like the seed and init arms. D1-OUTAGE IP-B
-                    // replaces this with `BootError::Grants`, which must
-                    // carry `e` itself so `Unavailable` (transient, 503) and
-                    // anything else (500) stay distinguishable — never
-                    // classified from this string.
-                    InitPolicy::Strict => return Err(RuntimeError::Config(error)),
-                    InitPolicy::Tolerant => {
-                        tracing::error!(
-                            error = %error,
-                            "booting without the admin-created WRAP grants",
-                        );
-                    }
-                    InitPolicy::Reported => {}
+                if policy == InitPolicy::Tolerant {
+                    tracing::error!(
+                        error = %error,
+                        "booting without the admin-created WRAP grants",
+                    );
                 }
                 StepOutcome {
                     ok: false,
@@ -288,22 +435,34 @@ pub async fn boot(
     let admin_id = crate::blocks::admin::ADMIN_BLOCK_ID;
     let names = wafer.block_names();
     let mut blocks = Vec::new();
+    let mut degraded = Vec::new();
 
     // 3. Admin first — its Init creates the variables / block_settings tables
     //    the seed step reads, and migration 002's `block` column the auto-gen
-    //    seeder writes.
+    //    seeder writes. A precondition under `Tolerant` and `Serving` (see
+    //    `InitPolicy::Tolerant`); `Reported` keeps going so its report is
+    //    complete.
     if names.iter().any(|name| name == admin_id) {
-        let admin = init_one(wafer, admin_id, policy).await?;
-        // `Strict` has already returned; `Reported` keeps going so its report
-        // is complete. `Tolerant` aborts, as for a failed seed hook (see
-        // `InitPolicy::Tolerant`).
-        if policy == InitPolicy::Tolerant && !admin.ok {
-            return Err(RuntimeError::Config(format!(
-                "block `{admin_id}` Init failed: {}",
-                admin.error.as_deref().unwrap_or_default()
-            )));
+        match wafer.init_block(admin_id).await {
+            Ok(_) => blocks.push(BlockInitOutcome {
+                block: admin_id.to_string(),
+                ok: true,
+                error: None,
+            }),
+            Err(error) => {
+                if policy != InitPolicy::Reported {
+                    return Err(BootError::BlockInit {
+                        block: admin_id.to_string(),
+                        error,
+                    });
+                }
+                blocks.push(BlockInitOutcome {
+                    block: admin_id.to_string(),
+                    ok: false,
+                    error: Some(error.to_string()),
+                });
+            }
         }
-        blocks.push(admin);
     }
 
     // 4. Seed + publish.
@@ -315,9 +474,9 @@ pub async fn boot(
         Err(e) => match policy {
             InitPolicy::Reported => StepOutcome {
                 ok: false,
-                error: Some(e),
+                error: Some(e.to_string()),
             },
-            InitPolicy::Tolerant | InitPolicy::Strict => return Err(RuntimeError::Config(e)),
+            InitPolicy::Tolerant | InitPolicy::Serving => return Err(BootError::Seed(e)),
         },
     };
 
@@ -329,7 +488,47 @@ pub async fn boot(
         if name == admin_id {
             continue;
         }
-        blocks.push(init_one(wafer, name, policy).await?);
+        match wafer.init_block(name).await {
+            Ok(_) => blocks.push(BlockInitOutcome {
+                block: name.clone(),
+                ok: true,
+                error: None,
+            }),
+            Err(error) => {
+                match policy {
+                    InitPolicy::Serving => {
+                        if !matches!(error, InitError::Transient(_)) {
+                            return Err(BootError::BlockInit {
+                                block: name.clone(),
+                                error,
+                            });
+                        }
+                        tracing::warn!(
+                            block = %name,
+                            error = %error,
+                            "publishing without a block whose Init failed transiently",
+                        );
+                        degraded.push(DegradedBlock {
+                            block: name.clone(),
+                            reason: error.to_string(),
+                        });
+                    }
+                    InitPolicy::Tolerant => {
+                        tracing::error!(
+                            block = %name,
+                            error = %error,
+                            "block init lifecycle failed during boot",
+                        );
+                    }
+                    InitPolicy::Reported => {}
+                }
+                blocks.push(BlockInitOutcome {
+                    block: name.clone(),
+                    ok: false,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
     }
 
     let ok = grants.ok && seed.ok && blocks.iter().all(|b| b.ok);
@@ -338,46 +537,9 @@ pub async fn boot(
         grants,
         seed,
         blocks,
+        degraded,
         ok,
     })
-}
-
-/// Initialize one block and turn the outcome into what `policy` asks for.
-/// `Strict` is the only arm that can return `Err`.
-async fn init_one(
-    wafer: &Wafer,
-    name: &str,
-    policy: InitPolicy,
-) -> Result<BlockInitOutcome, RuntimeError> {
-    match wafer.init_block(name).await {
-        Ok(_) => Ok(BlockInitOutcome {
-            block: name.to_string(),
-            ok: true,
-            error: None,
-        }),
-        Err(e) => match policy {
-            InitPolicy::Strict => Err(RuntimeError::Config(format!(
-                "block `{name}` Init failed: {e}"
-            ))),
-            InitPolicy::Tolerant => {
-                tracing::error!(
-                    block = %name,
-                    error = %e,
-                    "block init lifecycle failed during boot",
-                );
-                Ok(BlockInitOutcome {
-                    block: name.to_string(),
-                    ok: false,
-                    error: Some(e.to_string()),
-                })
-            }
-            InitPolicy::Reported => Ok(BlockInitOutcome {
-                block: name.to_string(),
-                ok: false,
-                error: Some(e.to_string()),
-            }),
-        },
-    }
 }
 
 /// Register the `wafer-run/vector` runtime block backed by native
@@ -446,7 +608,10 @@ mod tests {
     struct InitProbeBlock {
         name: &'static str,
         order: Arc<Mutex<Vec<String>>>,
-        fail: bool,
+        /// The code its `Init` fails with, if it fails: `Unknown` is
+        /// permanent, `Unavailable` transient
+        /// ([`wafer_run::init_failure_is_transient`]).
+        fail: Option<ErrorCode>,
     }
 
     #[wafer_block::wafer_async_trait]
@@ -462,11 +627,8 @@ mod tests {
         ) -> Result<(), WaferError> {
             if event.event_type == LifecycleType::Init {
                 push(&self.order, self.name);
-                if self.fail {
-                    return Err(WaferError::new(
-                        ErrorCode::Unknown,
-                        "deliberate Init failure",
-                    ));
+                if let Some(code) = self.fail {
+                    return Err(WaferError::new(code, "deliberate Init failure"));
                 }
             }
             Ok(())
@@ -506,10 +668,10 @@ mod tests {
 
     #[wafer_block::wafer_async_trait]
     impl BootHooks for ProbeHooks {
-        async fn seed_after_admin_init(&self, _wafer: &mut Wafer) -> Result<(), String> {
+        async fn seed_after_admin_init(&self, _wafer: &mut Wafer) -> Result<(), SeedError> {
             push(&self.order, "seed");
             if self.fail {
-                return Err("deliberate seed failure".to_string());
+                return Err(SeedError::Fault("deliberate seed failure".to_string()));
             }
             Ok(())
         }
@@ -519,7 +681,7 @@ mod tests {
         wafer: &mut Wafer,
         name: &'static str,
         order: &Arc<Mutex<Vec<String>>>,
-        fail: bool,
+        fail: Option<ErrorCode>,
     ) {
         wafer
             .register_block(
@@ -558,30 +720,60 @@ mod tests {
     /// blocks stay out: `wafer-run/web` requires a storage block these probes
     /// never register, and seal refuses a block whose `requires` is unmet.
     fn empty_wafer() -> Wafer {
+        empty_wafer_waiting(InitWait::Await)
+    }
+
+    fn empty_wafer_waiting(init_wait: InitWait) -> Wafer {
         Wafer::builder()
             .disable_inventory()
             .disable_lockfile()
+            .init_wait(init_wait)
             .build()
             .expect("build a bare runtime")
     }
 
-    /// Three probes plus the admin id, one of which optionally fails.
+    /// Three probes plus the admin id, one of which optionally fails
+    /// permanently.
     fn wafer_with_probes(order: &Arc<Mutex<Vec<String>>>, failing: Option<&'static str>) -> Wafer {
-        let mut wafer = empty_wafer();
-        register_probe(&mut wafer, "test/zeta", order, failing == Some("test/zeta"));
+        probes_in(
+            empty_wafer(),
+            order,
+            failing.map(|name| (name, ErrorCode::Unknown)),
+        )
+    }
+
+    /// [`wafer_with_probes`] on a runtime that never initializes in a
+    /// dispatch — the one [`InitPolicy::Serving`] boots — with the failing
+    /// probe's code chosen.
+    fn serving_wafer(
+        order: &Arc<Mutex<Vec<String>>>,
+        failing: Option<(&'static str, ErrorCode)>,
+    ) -> Wafer {
+        probes_in(empty_wafer_waiting(InitWait::Refuse), order, failing)
+    }
+
+    fn probes_in(
+        mut wafer: Wafer,
+        order: &Arc<Mutex<Vec<String>>>,
+        failing: Option<(&'static str, ErrorCode)>,
+    ) -> Wafer {
+        let fails = |name: &str| failing.filter(|(f, _)| *f == name).map(|(_, code)| code);
+        register_probe(&mut wafer, "test/zeta", order, fails("test/zeta"));
         register_probe(
             &mut wafer,
             crate::blocks::admin::ADMIN_BLOCK_ID,
             order,
-            failing == Some(crate::blocks::admin::ADMIN_BLOCK_ID),
+            fails(crate::blocks::admin::ADMIN_BLOCK_ID),
         );
-        register_probe(
-            &mut wafer,
-            "test/alpha",
-            order,
-            failing == Some("test/alpha"),
-        );
+        register_probe(&mut wafer, "test/alpha", order, fails("test/alpha"));
         wafer
+    }
+
+    fn hooks(order: &Arc<Mutex<Vec<String>>>, fail: bool) -> ProbeHooks {
+        ProbeHooks {
+            order: order.clone(),
+            fail,
+        }
     }
 
     async fn bare_db() -> Arc<dyn DatabaseService> {
@@ -630,7 +822,7 @@ mod tests {
         );
     }
 
-    /// The hook runs under EVERY policy, including the `Strict` one the
+    /// The hook runs under EVERY policy, including the `Serving` one the
     /// Cloudflare request path uses. Before this funnel existed, that path
     /// called `strict_init_all_blocks` directly and no `BootHooks` value
     /// reached it at all, so `seed_after_admin_init` never ran on a Cloudflare
@@ -645,11 +837,11 @@ mod tests {
     async fn every_policy_runs_the_seed_hook_after_admin() {
         for policy in [
             InitPolicy::Tolerant,
-            InitPolicy::Strict,
+            InitPolicy::Serving,
             InitPolicy::Reported,
         ] {
             let order = Arc::new(Mutex::new(Vec::new()));
-            let mut wafer = wafer_with_probes(&order, None);
+            let mut wafer = serving_wafer(&order, None);
 
             boot(
                 &mut wafer,
@@ -745,27 +937,151 @@ mod tests {
         assert!(taken(&order).contains(&"test/zeta".to_string()));
     }
 
+    /// `Serving` aborts on a block's **permanent** `Init` failure — a config
+    /// bug no rebuild cures — with the typed error, and initializes nothing
+    /// after it.
     #[tokio::test]
-    async fn strict_fails_closed_without_initializing_later_blocks() {
+    async fn serving_aborts_on_a_permanent_failure_without_initializing_later_blocks() {
         let order = Arc::new(Mutex::new(Vec::new()));
-        let mut wafer = wafer_with_probes(&order, Some("test/alpha"));
+        let mut wafer = serving_wafer(&order, Some(("test/alpha", ErrorCode::Unknown)));
 
         let error = boot(
             &mut wafer,
-            &ProbeHooks {
-                order: order.clone(),
-                fail: false,
-            },
+            &hooks(&order, false),
             GrantSource::PreInstalled("test fixture declares none"),
-            InitPolicy::Strict,
+            InitPolicy::Serving,
         )
         .await
-        .expect_err("strict boot must fail closed");
+        .expect_err("a permanent Init failure aborts a Serving boot");
 
-        assert!(error.to_string().contains("test/alpha"), "{error}");
+        assert!(
+            matches!(
+                &error,
+                BootError::BlockInit { block, error: InitError::Permanent(_) } if block == "test/alpha"
+            ),
+            "{error:?}"
+        );
+        assert!(!error.is_transient());
         assert!(
             !taken(&order).contains(&"test/zeta".to_string()),
             "no block after the failing one may initialize",
+        );
+    }
+
+    /// `Serving` publishes past a block whose `Init` failed **transiently**:
+    /// it is listed in `degraded`, every other block initializes, and a
+    /// dispatch to it answers `Unavailable` without running its `Init` again
+    /// — the runtime is retried by being rebuilt, never in a request.
+    #[tokio::test]
+    async fn serving_publishes_without_a_block_whose_init_failed_transiently() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut wafer = serving_wafer(&order, Some(("test/alpha", ErrorCode::Unavailable)));
+
+        let report = boot(
+            &mut wafer,
+            &hooks(&order, false),
+            GrantSource::PreInstalled("test fixture declares none"),
+            InitPolicy::Serving,
+        )
+        .await
+        .expect("a transient Init failure publishes degraded");
+
+        assert!(!report.ok);
+        assert_eq!(
+            report
+                .degraded
+                .iter()
+                .map(|d| d.block.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test/alpha"]
+        );
+        assert!(
+            taken(&order).contains(&"test/zeta".to_string()),
+            "the block after the degraded one initializes",
+        );
+        let inits_before = taken(&order).len();
+
+        let healthy = wafer
+            .run_block("test/zeta", Message::new("probe"), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await;
+        assert!(healthy.is_ok(), "a healthy block serves: {healthy:?}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let refused = wafer
+            .run_block("test/alpha", Message::new("probe"), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+            .expect_err("a degraded block answers an error");
+        assert!(
+            matches!(&refused, wafer_block::TerminalNotResponse::Error(e) if e.code == ErrorCode::Unavailable),
+            "{refused:?}"
+        );
+        assert_eq!(
+            taken(&order).len(),
+            inits_before,
+            "the dispatch ran no Init: {:?}",
+            taken(&order)
+        );
+    }
+
+    /// `Serving` refuses a runtime that would run an `Init` in a dispatch,
+    /// before anything runs: the pair cannot be split by a builder flag.
+    #[tokio::test]
+    async fn serving_refuses_an_await_runtime_before_any_init() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut wafer = wafer_with_probes(&order, None);
+
+        let error = boot(
+            &mut wafer,
+            &hooks(&order, false),
+            GrantSource::PreInstalled("test fixture declares none"),
+            InitPolicy::Serving,
+        )
+        .await
+        .expect_err("Serving needs InitWait::Refuse");
+
+        assert!(matches!(error, BootError::Runtime(_)), "{error:?}");
+        assert!(!error.is_transient());
+        assert!(
+            taken(&order).is_empty(),
+            "no Init and no hook ran: {:?}",
+            taken(&order)
+        );
+    }
+
+    /// Admin is a precondition under `Serving`: even a transient admin
+    /// failure aborts (transiently), before the seed hook and every later
+    /// block — the hook would read tables admin did not create.
+    #[tokio::test]
+    async fn a_failed_admin_init_aborts_a_serving_boot() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let admin = crate::blocks::admin::ADMIN_BLOCK_ID;
+        let mut wafer = serving_wafer(&order, Some((admin, ErrorCode::Unavailable)));
+
+        let error = boot(
+            &mut wafer,
+            &hooks(&order, false),
+            GrantSource::PreInstalled("test fixture declares none"),
+            InitPolicy::Serving,
+        )
+        .await
+        .expect_err("a failed admin Init aborts a Serving boot");
+
+        assert!(
+            matches!(
+                &error,
+                BootError::BlockInit { block, error: InitError::Transient(_) } if block == admin
+            ),
+            "{error:?}"
+        );
+        assert!(error.is_transient());
+        assert_eq!(
+            taken(&order),
+            vec![admin.to_string()],
+            "neither the seed hook nor any later block runs"
         );
     }
 
@@ -802,9 +1118,9 @@ mod tests {
 
     #[tokio::test]
     async fn seed_failure_is_fatal_except_under_reported() {
-        for policy in [InitPolicy::Tolerant, InitPolicy::Strict] {
+        for policy in [InitPolicy::Tolerant, InitPolicy::Serving] {
             let order = Arc::new(Mutex::new(Vec::new()));
-            let mut wafer = wafer_with_probes(&order, None);
+            let mut wafer = serving_wafer(&order, None);
 
             let error = boot(
                 &mut wafer,
@@ -817,6 +1133,10 @@ mod tests {
             )
             .await
             .expect_err(&format!("seed failure must abort under {policy:?}"));
+            assert!(
+                matches!(&error, BootError::Seed(SeedError::Fault(_))),
+                "{policy:?}: {error:?}"
+            );
             assert!(error.to_string().contains("deliberate seed failure"));
         }
 
@@ -924,7 +1244,7 @@ mod tests {
             &mut wafer,
             &ProbeHooks { order, fail: false },
             GrantSource::PreInstalled("the plan is authoritative"),
-            InitPolicy::Strict,
+            InitPolicy::Tolerant,
         )
         .await
         .expect("boot");
@@ -937,13 +1257,15 @@ mod tests {
     }
 
     /// A grants read that failed is a failed step, never "no grants": the
-    /// request path's `Strict` boot refuses to build a runtime that would
-    /// deny every access the admin-created grants allow.
+    /// request path's `Serving` boot refuses to build a runtime that would
+    /// deny every access the admin-created grants allow, and keeps the
+    /// database's error typed, so an outage (here) is transient — a 503 — and
+    /// anything else a 500.
     #[tokio::test]
-    async fn a_failed_grants_read_fails_a_strict_boot() {
+    async fn a_failed_grants_read_fails_a_serving_boot() {
         let db = crate::platform_state::wrap_grants::fixture_with_failing_reads().await;
         let order = Arc::new(Mutex::new(Vec::new()));
-        let mut wafer = wafer_with_probes(&order, None);
+        let mut wafer = serving_wafer(&order, None);
         let error = boot(
             &mut wafer,
             &ProbeHooks {
@@ -951,10 +1273,15 @@ mod tests {
                 fail: false,
             },
             GrantSource::Database(&db),
-            InitPolicy::Strict,
+            InitPolicy::Serving,
         )
         .await
-        .expect_err("a Strict boot must not build without its grants");
+        .expect_err("a Serving boot must not build without its grants");
+        assert!(
+            matches!(&error, BootError::Grants(DatabaseError::Unavailable(_))),
+            "{error:?}"
+        );
+        assert!(error.is_transient());
         assert!(
             error
                 .to_string()

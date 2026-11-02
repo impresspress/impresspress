@@ -599,6 +599,7 @@ mod tests {
                 ok: true,
                 error: None,
             }],
+            degraded: Vec::new(),
             ok: true,
         };
         let body = serde_json::to_vec(&serde_json::json!({

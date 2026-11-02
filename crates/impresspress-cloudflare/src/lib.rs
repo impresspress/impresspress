@@ -904,8 +904,10 @@ where
     // request path, and a cron has all three plus nobody watching.
     // `InitPolicy::Reported` is wrong for the same reason: nothing reads the
     // report, so a "reported" failure would publish a half-initialized runtime
-    // into the isolate cache for the next fetch to serve. `Strict`, which is
-    // what the request funnels use, refuses instead.
+    // into the isolate cache for the next fetch to serve. `Serving`, which is
+    // what the request funnels use, publishes only a runtime whose unsettled
+    // blocks answer `Unavailable` (never initialized in a dispatch) and fails
+    // the build on anything permanent.
     //
     // A cron is a serving-time invocation that happens to have no client. It
     // belongs on the serving funnels.

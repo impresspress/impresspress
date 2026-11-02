@@ -81,20 +81,36 @@ impl BrowserBootHooks<'_> {
     /// Propagates rather than fabricating "every block enabled".
     async fn load_block_settings(
         &self,
-    ) -> Result<impresspress_core::features::BlockSettings, String> {
+    ) -> Result<impresspress_core::features::BlockSettings, builder::SeedError> {
         impresspress_core::platform_state::block_settings::load_and_seed(
             &self.db,
             &impresspress_core::blocks::block_enabled_defaults(),
         )
         .await
-        .map_err(|e| format!("load block settings: {e}"))
+        .map_err(|e| match builder::SeedError::from(e) {
+            builder::SeedError::Unavailable(cause) => {
+                builder::SeedError::Unavailable(format!("load block settings: {cause}"))
+            }
+            builder::SeedError::Fault(cause) => {
+                builder::SeedError::Fault(format!("load block settings: {cause}"))
+            }
+        })
     }
 }
 
 #[wafer_block::wafer_async_trait]
 impl BootHooks for BrowserBootHooks<'_> {
-    async fn seed_after_admin_init(&self, wafer: &mut wafer_run::Wafer) -> Result<(), String> {
-        let vars = self.seed_and_load_variables().await?;
+    async fn seed_after_admin_init(
+        &self,
+        wafer: &mut wafer_run::Wafer,
+    ) -> Result<(), builder::SeedError> {
+        // The variables seed answers in text (its own and the app seed's), so
+        // it is not classified: the browser boots `Tolerant`, where a failed
+        // seed stops the boot either way and nothing retries on the class.
+        let vars = self
+            .seed_and_load_variables()
+            .await
+            .map_err(builder::SeedError::Fault)?;
         web_sys::console::log_1(
             &format!(
                 "impresspress: {} variables loaded from database",

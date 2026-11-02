@@ -298,7 +298,12 @@ where
     let (wafer, block_settings_handle, plan_exporter) = request_services::scope_sync(
         services.clone(),
         || -> Result<_, Box<dyn std::error::Error>> {
+            // A Worker may stop a request part-way, so no dispatch may run a
+            // block's `Init` (it would hold the slot's attempt lock for the
+            // runtime's life): only the boot initializes, and the request
+            // path's `Serving` boot requires exactly this.
             let builder = config_installed
+                .init_wait(wafer_run::InitWait::Refuse)
                 .storage(storage_proxy.clone())
                 .crypto(crypto_proxy)
                 .network(network_proxy)

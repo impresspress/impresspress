@@ -35,29 +35,36 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use wafer_core::interfaces::{config::service::ConfigService, database::service::DatabaseService};
-use wafer_run::{RuntimeError, Wafer};
+use wafer_core::interfaces::{
+    config::service::ConfigService,
+    database::service::{DatabaseError, DatabaseService},
+};
+use wafer_run::Wafer;
 
 use super::{
-    boot, BootHooks, BootReport, GrantSource, InitPolicy, PreparedPlanExporter, RuntimeConfig,
+    boot, BootError, BootHooks, BootReport, GrantSource, InitPolicy, PreparedPlanExporter,
+    RuntimeConfig, SeedError,
 };
 use crate::features::BlockSettings;
 
 /// The policy both request-path builds boot under.
 ///
-/// `Strict`: a failure fails the build rather than publishing a runtime with a
-/// failed lazy-init slot. Concurrent requests would then wait on one another's
-/// init future, which is not a valid execution model for a request-isolated
-/// platform.
+/// `Serving`: a block whose `Init` fails transiently is published without
+/// (the D1 outage plan's degraded runtime), so a backend outage costs the
+/// blocks that need it rather than every route; a permanent failure, admin's,
+/// the grants read's and the hook's still fail the build. The runtime must be
+/// built with `InitWait::Refuse` — `boot` refuses the pair otherwise — and
+/// its owner retries by building a fresh one, never by running `Init` in a
+/// request.
 ///
-/// A hook failure is fatal too, and for [`RequestBootHooks`] that is the
+/// A hook failure is fatal, and for [`RequestBootHooks`] that is the
 /// right coupling rather than an accident of the policy: its only failure is
 /// an operational failure of the same `block_settings` read the build already
 /// made and already treats as fatal (see
 /// [`crate::platform_state::block_settings::load`] for what it tolerates).
 /// Serving requests off a half-known enablement map is exactly what that read
 /// fails closed to prevent.
-const REQUEST_PATH_POLICY: InitPolicy = InitPolicy::Strict;
+const REQUEST_PATH_POLICY: InitPolicy = InitPolicy::Serving;
 
 /// Which request-path build a runtime is: the only thing a request-path
 /// caller chooses.
@@ -94,7 +101,7 @@ pub async fn boot_request_runtime(
     block_settings: &Arc<RwLock<BlockSettings>>,
     config: Arc<dyn ConfigService>,
     build: RequestBuild,
-) -> Result<BootReport, RuntimeError> {
+) -> Result<BootReport, BootError> {
     match build {
         RequestBuild::Database => {
             let hooks = RequestBootHooks {
@@ -145,7 +152,7 @@ pub async fn boot_deploy_runtime(
     db: &Arc<dyn DatabaseService>,
     block_settings: &Arc<RwLock<BlockSettings>>,
     config: Arc<dyn ConfigService>,
-) -> Result<BootReport, RuntimeError> {
+) -> Result<BootReport, BootError> {
     let hooks = DeployBootHooks::new(db.clone(), block_settings.clone(), config);
     boot(
         wafer,
@@ -169,12 +176,62 @@ pub async fn boot_deploy_runtime(
 pub async fn seal_prepared_plan(
     db: &Arc<dyn DatabaseService>,
     exporter: &PreparedPlanExporter,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let final_settings = crate::platform_state::block_settings::load(db).await?;
-    let final_grants = crate::platform_state::wrap_grants::load(db).await?;
-    exporter.publish_block_settings(final_settings)?;
-    exporter.publish_wrap_grants(&final_grants)?;
+) -> Result<(), SealError> {
+    let final_settings = crate::platform_state::block_settings::load(db)
+        .await
+        .map_err(SealError::BlockSettings)?;
+    let final_grants = crate::platform_state::wrap_grants::load(db)
+        .await
+        .map_err(SealError::Grants)?;
+    exporter
+        .publish_block_settings(final_settings)
+        .map_err(|e| SealError::Export(e.to_string()))?;
+    exporter
+        .publish_wrap_grants(&final_grants)
+        .map_err(|e| SealError::Export(e.to_string()))?;
     Ok(())
+}
+
+/// Why [`seal_prepared_plan`] failed: one of its two reads (typed, so an
+/// unreachable database is told apart from a fault), or the export itself.
+#[derive(Debug)]
+pub enum SealError {
+    BlockSettings(DatabaseError),
+    Grants(DatabaseError),
+    /// The exporter refused what it was given. Always permanent.
+    Export(String),
+}
+
+impl SealError {
+    /// Whether a retry may succeed, by the shared transient rule
+    /// ([`wafer_run::init_failure_is_transient`]).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::BlockSettings(e) | Self::Grants(e) => {
+                wafer_run::init_failure_is_transient(e.code(), e.detail_code())
+            }
+            Self::Export(_) => false,
+        }
+    }
+}
+
+impl std::fmt::Display for SealError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BlockSettings(e) => write!(f, "read block_settings to seal the plan: {e}"),
+            Self::Grants(e) => write!(f, "read the WRAP grants to seal the plan: {e}"),
+            Self::Export(e) => write!(f, "export the plan: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SealError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BlockSettings(e) | Self::Grants(e) => Some(e),
+            Self::Export(_) => None,
+        }
+    }
 }
 
 /// [`BootHooks`] for the deploy funnel's runtime — the one hosted path that
@@ -247,7 +304,7 @@ impl DeployBootHooks {
     /// which write. Public because `seed_after_admin_init` needs a
     /// `&mut Wafer` that a target's wrapper tests cannot produce, and what
     /// those tests are about is the writes.
-    pub async fn seed_and_load(&self) -> Result<BlockSettings, String> {
+    pub async fn seed_and_load(&self) -> Result<BlockSettings, DatabaseError> {
         crate::platform_state::variables::seed_auto_generated(&self.db).await;
 
         // The hosted target's only call site for the sensitive-flag repair.
@@ -265,16 +322,17 @@ impl DeployBootHooks {
         // are legacy, so deploy time is both sufficient and the only safe slot.
         crate::platform_state::variables::repair_sensitive_flags(&self.db).await;
 
-        crate::platform_state::block_settings::load_and_seed(&self.db, &self.seed_defaults)
-            .await
-            .map_err(|e| format!("seed block_settings after admin init: {e}"))
+        crate::platform_state::block_settings::load_and_seed(&self.db, &self.seed_defaults).await
     }
 }
 
 #[wafer_block::wafer_async_trait]
 impl BootHooks for DeployBootHooks {
-    async fn seed_after_admin_init(&self, wafer: &mut Wafer) -> Result<(), String> {
-        let block_settings = self.seed_and_load().await?;
+    async fn seed_after_admin_init(&self, wafer: &mut Wafer) -> Result<(), SeedError> {
+        let block_settings = self
+            .seed_and_load()
+            .await
+            .map_err(|e| hook_error("seed block_settings after admin init", e))?;
         publish_block_settings(
             wafer,
             &self.config,
@@ -306,8 +364,8 @@ impl BootHooks for DeployBootHooks {
 /// missing feature (`platform_state::block_settings::load` states the same
 /// thing at its own definition). Seeding here — as ruling 5.5 originally asked
 /// — has three failure modes the deploy funnel does not have, all of them
-/// under [`REQUEST_PATH_POLICY`], where a hook error is a 500 on every
-/// request:
+/// under [`REQUEST_PATH_POLICY`], where a hook error fails the build: a 503
+/// on every request when it is an outage, a 500 when it is not:
 ///
 /// 1. **Missing tables 500 every request.** `read_rows` tolerates a missing
 ///    table, so the seed planner plans an `Insert` for every block; `db.create`
@@ -353,17 +411,18 @@ impl RequestBootHooks {
     /// The database half of [`BootHooks::seed_after_admin_init`]: one read,
     /// and there is no second half. Public for the same reason as
     /// [`DeployBootHooks::seed_and_load`].
-    pub async fn load(&self) -> Result<BlockSettings, String> {
-        crate::platform_state::block_settings::load(&self.db)
-            .await
-            .map_err(|e| format!("read block_settings after admin init: {e}"))
+    pub async fn load(&self) -> Result<BlockSettings, DatabaseError> {
+        crate::platform_state::block_settings::load(&self.db).await
     }
 }
 
 #[wafer_block::wafer_async_trait]
 impl BootHooks for RequestBootHooks {
-    async fn seed_after_admin_init(&self, wafer: &mut Wafer) -> Result<(), String> {
-        let block_settings = self.load().await?;
+    async fn seed_after_admin_init(&self, wafer: &mut Wafer) -> Result<(), SeedError> {
+        let block_settings = self
+            .load()
+            .await
+            .map_err(|e| hook_error("read block_settings after admin init", e))?;
         publish_block_settings(
             wafer,
             &self.config,
@@ -396,8 +455,17 @@ pub struct PreparedPlanBootHooks;
 
 #[wafer_block::wafer_async_trait]
 impl BootHooks for PreparedPlanBootHooks {
-    async fn seed_after_admin_init(&self, _wafer: &mut Wafer) -> Result<(), String> {
+    async fn seed_after_admin_init(&self, _wafer: &mut Wafer) -> Result<(), SeedError> {
         Ok(())
+    }
+}
+
+/// A hook's failed `step`, classified by the shared rule
+/// ([`SeedError::from`]) and named.
+fn hook_error(step: &str, e: DatabaseError) -> SeedError {
+    match SeedError::from(e) {
+        SeedError::Unavailable(cause) => SeedError::Unavailable(format!("{step}: {cause}")),
+        SeedError::Fault(cause) => SeedError::Fault(format!("{step}: {cause}")),
     }
 }
 

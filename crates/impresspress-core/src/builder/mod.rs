@@ -37,8 +37,8 @@ mod registration;
 mod request_path;
 
 pub use boot::{
-    boot, BlockInitOutcome, BootHooks, BootReport, GrantSource, InitPolicy, StepOutcome,
-    DEPLOY_RESPONSE_SCHEMA_VERSION, PREPARE_RUNTIME_PLAN_KEY,
+    boot, BlockInitOutcome, BootError, BootHooks, BootReport, DegradedBlock, GrantSource,
+    InitPolicy, SeedError, StepOutcome, DEPLOY_RESPONSE_SCHEMA_VERSION, PREPARE_RUNTIME_PLAN_KEY,
 };
 pub use config::{fill_config_service, RuntimeConfig, ServiceOnlyKey};
 pub use prepared::PreparedPlanExporter;
@@ -58,8 +58,8 @@ pub use registration::{register_middleware_blocks, MIDDLEWARE_BLOCKS};
 pub use request_path::{
     add_request_config, boot_deploy_runtime, boot_request_runtime, environment_owns_config_key,
     request_config_source, seal_prepared_plan, structural_runtime_config, warm_config_surfaces,
-    DeployBootHooks, PreparedPlanBootHooks, RequestBootHooks, RequestBuild, StructuralConfigInputs,
-    BUILDER_WORKER_VAR_KEYS, PROTECTED_ENV_KEYS,
+    DeployBootHooks, PreparedPlanBootHooks, RequestBootHooks, RequestBuild, SealError,
+    StructuralConfigInputs, BUILDER_WORKER_VAR_KEYS, PROTECTED_ENV_KEYS,
 };
 
 pub struct ImpresspressBuilder {
@@ -147,6 +147,8 @@ pub struct ImpresspressBuilder {
     /// ([`Self::variables_snapshot`]) — which a target whose config source
     /// reads the same table must do, so the two share one read.
     variables_snapshot: Arc<crate::config_source::VariablesSnapshot>,
+    /// See [`Self::init_wait`].
+    init_wait: wafer_run::InitWait,
 }
 
 impl Default for ImpresspressBuilder {
@@ -184,6 +186,7 @@ impl ImpresspressBuilder {
             extra_embedding_service: None,
             config_source: None,
             variables_snapshot: Arc::default(),
+            init_wait: wafer_run::InitWait::Await,
         }
     }
 
@@ -369,6 +372,19 @@ impl ImpresspressBuilder {
         snapshot: Arc<crate::config_source::VariablesSnapshot>,
     ) -> Self {
         self.variables_snapshot = snapshot;
+        self
+    }
+
+    /// What a dispatch does on reaching a block whose `Init` has not
+    /// succeeded ([`wafer_run::InitWait`]). [`wafer_run::InitWait::Await`]
+    /// unless set: run the `Init` in the dispatch, which is right for a host
+    /// that never stops a request part-way (native, the browser).
+    /// [`wafer_run::InitWait::Refuse`] for a host that may (Cloudflare
+    /// Workers): only `boot` initializes, and a dispatch to an unsettled
+    /// block answers `Unavailable`. [`super::InitPolicy::Serving`] requires
+    /// it.
+    pub fn init_wait(mut self, mode: wafer_run::InitWait) -> Self {
+        self.init_wait = mode;
         self
     }
 

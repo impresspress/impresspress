@@ -125,7 +125,10 @@ impl ImpresspressBuilder {
             .config_source
             .clone()
             .unwrap_or_else(|| Arc::new(wafer_run::StaticConfigSource::default()));
-        let mut wafer = Wafer::new(config_source)?;
+        let mut wafer = Wafer::builder()
+            .config_source(config_source)
+            .init_wait(self.init_wait)
+            .build()?;
         wafer.set_admin_block(crate::blocks::admin::ADMIN_BLOCK_ID);
 
         // 4. Register service blocks

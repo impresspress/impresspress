@@ -71,6 +71,24 @@ fn backend_error(error: WaferError, context: &str) -> AuthError {
     }
 }
 
+/// An `Init` step's failure, for the runtime rather than a client: the cause
+/// as it stands — its code and detail code, which decide whether the runtime
+/// retries the block (`wafer_run::init_failure_is_transient`) — named by
+/// `context`.
+///
+/// Not [`backend_error`]: that is the handler mapping, which seals a fault as
+/// a generic `Internal` and turns an unreachable backend into
+/// [`AuthError::ProviderDown`] for a client to be told. Neither reaches the
+/// runtime with its class — `wafer-core`'s auth block answers every
+/// `AuthError` but `Internal` and `Backend` as `Internal` at `Init` — so an
+/// outage read at `Init` (a stored-config read during a D1 outage) would fail
+/// the block permanently, and with it a whole request-path build.
+fn init_error(error: WaferError, context: &str) -> AuthError {
+    let mut error = error;
+    error.message = format!("{context}: {}", error.message);
+    AuthError::Backend(error)
+}
+
 /// `AuthService` implementation backed by the auth block's repo layer.
 ///
 /// It holds nothing. Every method reaches the database through the `ctx` of
@@ -362,7 +380,7 @@ impl AuthService for AuthServiceImpl {
                 .map_err(|e| AuthError::Backend(e.to_wafer_error()))?;
         let cfg = super::config::AuthConfig::from_ctx(ctx)
             .await
-            .map_err(|e| backend_error(e, "auth init: config"))?;
+            .map_err(|e| init_error(e, "auth init: config"))?;
         if !super::bootstrap::should_run(ctx, outcome, &cfg) {
             return Ok(());
         }
@@ -373,7 +391,7 @@ impl AuthService for AuthServiceImpl {
                 // refuses to start says which key is missing.
                 super::bootstrap::RunError::Misconfigured(refusal) => AuthError::Backend(refusal),
                 super::bootstrap::RunError::Failed(e) => {
-                    backend_error(e, "auth init: bootstrap admin")
+                    init_error(e, "auth init: bootstrap admin")
                 }
             })?;
         Ok(())
