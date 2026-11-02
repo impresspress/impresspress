@@ -74,10 +74,14 @@ pub enum CacheOutcome {
     /// `waited_ms` is how long it waited. Concurrent cold requests in one
     /// isolate share one build this way instead of building one each.
     Waited { waited_ms: u64 },
-    /// A runtime this isolate knows is not current — published degraded,
-    /// kept after a rebuild failed, or hydrated from a stale plan — served
-    /// while the isolate's retry window lasts (the D1 outage plan's I5). No
-    /// KV read and no build by this request.
+    /// A runtime this isolate knows is not current — degraded, or stale — was
+    /// served, and this request published no runtime (the D1 outage plan's
+    /// I5): inside the retry window, with no probe and no build; or after this
+    /// request's own rebuild attempt failed (a probe, and a build that
+    /// published nothing); or after an unavailable probe could not confirm a
+    /// plan already known to be stale. A request that did publish a runtime,
+    /// a stale plan hydrated during an outage included, reports `ColdBuilt` or
+    /// `Rebuilt` instead, so `Server-Timing` carries its build.
     Stale,
 }
 

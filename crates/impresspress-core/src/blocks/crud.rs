@@ -813,7 +813,6 @@ mod db_error_tests {
         }
     }
 
-    /// `db_error_internal` is the same classification MINUS the 404: a
     /// An unreachable backend is a 503 on the plain helpers and a
     /// "temporarily unavailable" notice behind a swap; the backend's text is
     /// never passed on (D1 outage plan I4b).
@@ -835,6 +834,7 @@ mod db_error_tests {
         assert_eq!(output_http_status(out).await, 500);
     }
 
+    /// `db_error_internal` is the same classification MINUS the 404: a
     /// `NotFound` from a call the block addressed names no row of the
     /// caller's, so it is a 500, not their missing row.
     #[tokio::test]

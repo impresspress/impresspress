@@ -444,6 +444,18 @@ where
     )
     .await;
 
+    edge_response(result)
+}
+
+/// What the Worker answers for a dispatched request's result: the one place
+/// a runtime-cache failure becomes a status (D1 outage plan I4). An outage
+/// (`RuntimeBuildError::Unavailable`) is the 503 with `Retry-After`; any other
+/// error the opaque 500 with a reference; a response passes through, a bare
+/// 503 gaining a `Retry-After`. Pure over its input, so its tests pin
+/// exactly what `route_request` sends.
+fn edge_response(
+    result: Result<worker::Response, Box<dyn std::error::Error>>,
+) -> worker::Result<worker::Response> {
     match result {
         // Every 503 the Worker returns carries `Retry-After`: a block that
         // answered `Unavailable` (degraded, or a stored-config read failing
@@ -1472,12 +1484,6 @@ mod deferred_drain_tests {
         );
     }
 
-    /// The `d1_cost` line: logged for an invocation that built a runtime,
-    /// whatever it read, and for one that read more than the threshold;
-    /// quiet otherwise. Its fields are the calls and statements sent, D1's
-    /// sums, and `unmetered` the statements D1 did not report rows for. The
-    /// fixture's calls are not its statements, so a line printing one for
-    /// the other fails.
     /// **A runtime the cache could not build for an outage is a 503 the
     /// client can retry** (D1 outage plan I4): `Retry-After` as the cache
     /// computed it, never cached, and a body that says what happened and
@@ -1503,6 +1509,41 @@ mod deferred_drain_tests {
         );
     }
 
+    /// **What `route_request` answers, through its own mapping**
+    /// (`edge_response`; #275 review m3): a runtime the cache could not build
+    /// for an outage is the 503 with `Retry-After` and `no-store`, never the
+    /// 500; any other failure is the opaque 500; and a dispatched 503 with no
+    /// `Retry-After` of its own gains one.
+    #[wasm_bindgen_test]
+    fn the_edge_answers_an_outage_503_a_fault_500_and_fills_retry_after() {
+        let outage: Box<dyn std::error::Error> =
+            Box::new(runtime_cache::RuntimeBuildError::Unavailable {
+                cause: "D1_ERROR: Network connection lost.".to_string(),
+                retry_after_secs: 9,
+            });
+        let response = edge_response(Err(outage)).expect("a response");
+        assert_eq!(response.status_code(), 503);
+        assert_eq!(
+            response.headers().get("Retry-After").unwrap().as_deref(),
+            Some("9")
+        );
+        assert_eq!(
+            response.headers().get("Cache-Control").unwrap().as_deref(),
+            Some("no-store")
+        );
+
+        let fault: Box<dyn std::error::Error> = Box::new(runtime_cache::RuntimeBuildError::Fault(
+            "D1_ERROR: no such column".to_string(),
+        ));
+        let response = edge_response(Err(fault)).expect("a response");
+        assert_eq!(response.status_code(), 500);
+        assert!(response.headers().get("Retry-After").unwrap().is_none());
+
+        let dispatched = worker::Response::error("unavailable", 503).unwrap();
+        let response = edge_response(Ok(dispatched)).expect("a response");
+        assert!(response.headers().get("Retry-After").unwrap().is_some());
+    }
+
     /// **Every 503 the Worker returns carries `Retry-After`**: a block's
     /// `Unavailable` sets none of its own under `InitWait::Refuse`, so the
     /// edge adds one; a 503 that has one keeps it, and other statuses are
@@ -1526,6 +1567,12 @@ mod deferred_drain_tests {
         assert!(fault.headers().get("Retry-After").unwrap().is_none());
     }
 
+    /// The `d1_cost` line: logged for an invocation that built a runtime,
+    /// whatever it read, and for one that read more than the threshold;
+    /// quiet otherwise. Its fields are the calls and statements sent, D1's
+    /// sums, and `unmetered` the statements D1 did not report rows for. The
+    /// fixture's calls are not its statements, so a line printing one for
+    /// the other fails.
     #[wasm_bindgen_test]
     fn the_d1_cost_line_is_logged_for_a_build_or_past_the_threshold() {
         let cost = |built, rows_read| database::D1Cost {

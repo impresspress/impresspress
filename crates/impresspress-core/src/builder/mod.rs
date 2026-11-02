@@ -390,6 +390,12 @@ impl ImpresspressBuilder {
         self
     }
 
+    /// The mode [`Self::init_wait`] set: what the runtime `build()` makes will
+    /// do on reaching a block whose `Init` has not succeeded.
+    pub fn configured_init_wait(&self) -> wafer_run::InitWait {
+        self.init_wait
+    }
+
     pub fn block_config(mut self, name: impl Into<String>, config: serde_json::Value) -> Self {
         self.block_configs.push((name.into(), config));
         self

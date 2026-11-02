@@ -352,6 +352,24 @@ impl RuntimeBuildError {
         matches!(self, Self::Unavailable { .. })
     }
 
+    /// This error with a `Retry-After` no earlier than the isolate's retry
+    /// window, where one is armed: a waiter answered `LeaderFailed` or
+    /// `SlotBusy` (one second) inside a just-armed window would otherwise be
+    /// told to come back before anything may be built (#275 review n6).
+    fn at_least_the_window(self, now: u64) -> Self {
+        match self {
+            Self::Unavailable {
+                cause,
+                retry_after_secs,
+            } => Self::Unavailable {
+                cause,
+                retry_after_secs: retry_after_secs
+                    .max(armed_window(now).map_or(0, |window| window.remaining_secs(now))),
+            },
+            fault => fault,
+        }
+    }
+
     /// An outage-class failure (one second to retry; the window, where one is
     /// armed, replaces it), or a fault.
     pub(crate) fn classified(transient: bool, cause: String) -> Self {
@@ -396,6 +414,9 @@ pub(crate) enum WindowCause {
     BuildUnavailable,
     /// A rebuild failed transiently; the runtime it was replacing serves on.
     RebuildFailed,
+    /// The stale-plan hydrate (U-B1 (b)) failed transiently with nothing
+    /// cached: no further hydrate until the window ends.
+    HydrateFailed,
     /// A build failed permanently.
     Fault,
 }
@@ -1479,44 +1500,40 @@ async fn get_or_build_with(
     io: &dyn BuildIo,
     timer: &dyn WaitTimer,
 ) -> Result<(Rc<ReadyRuntime>, CacheOutcome), RuntimeBuildError> {
-    let served =
-        with_one_reentry((), |(), attempt| get_or_build_attempt(io, timer, attempt)).await?;
+    let served = with_one_reentry(|attempt| get_or_build_attempt(io, timer, attempt))
+        .await
+        .map_err(|error| error.at_least_the_window(timer.now_ms()))?;
     observe_snapshot(&served.0, timer.now_ms());
     Ok(served)
 }
 
 /// How one pass through the cache ended.
-enum Pass<H, T> {
+enum Pass<T> {
     Done(T),
-    /// The request waited and found nothing it accepts; `H` is what it still
-    /// owns for the next pass.
-    Reenter(H),
+    /// The request waited and found nothing it accepts: pass again, once.
+    Reenter,
 }
 
 /// The one place a request's passes are sequenced: an [`Attempt::First`]
 /// pass, and at most one [`Attempt::Reentry`] pass after it. A `Reentry`
 /// pass never waits ([`admit_cold`] answers `SlotBusy` instead), so no request
 /// waits more than once; a second `Reenter` is answered the same way.
-async fn with_one_reentry<H, T, E, Fut>(
-    hooks: H,
-    mut pass: impl FnMut(H, Attempt) -> Fut,
-) -> Result<T, E>
+async fn with_one_reentry<T, E, Fut>(mut pass: impl FnMut(Attempt) -> Fut) -> Result<T, E>
 where
     E: From<RuntimeBuildBusy>,
-    Fut: std::future::Future<Output = Result<Pass<H, T>, E>>,
+    Fut: std::future::Future<Output = Result<Pass<T>, E>>,
 {
-    let hooks = match pass(hooks, Attempt::First).await? {
-        Pass::Done(done) => return Ok(done),
-        Pass::Reenter(hooks) => hooks,
-    };
-    match pass(hooks, Attempt::Reentry).await? {
+    if let Pass::Done(done) = pass(Attempt::First).await? {
+        return Ok(done);
+    }
+    match pass(Attempt::Reentry).await? {
         Pass::Done(done) => Ok(done),
-        Pass::Reenter(_) => Err(RuntimeBuildBusy::SlotBusy.into()),
+        Pass::Reenter => Err(RuntimeBuildBusy::SlotBusy.into()),
     }
 }
 
 /// What a pass through the cache produces: a runtime, or a re-entry.
-type PassResult = Result<Pass<(), (Rc<ReadyRuntime>, CacheOutcome)>, RuntimeBuildError>;
+type PassResult = Result<Pass<(Rc<ReadyRuntime>, CacheOutcome)>, RuntimeBuildError>;
 
 /// One pass through the cache. A request that waited and found nothing comes
 /// back here once as [`Attempt::Reentry`], through [`with_one_reentry`].
@@ -1591,15 +1608,19 @@ async fn get_or_build_attempt(
 /// older than the database's config, so it went dynamic — hydrates that plan
 /// and serves it marked stale, rather than answering 503 on every route.
 ///
-/// - With a plan for this version and a window whose cause is not a
-///   [`WindowCause::Fault`]: take the slot and hydrate (a waiter accepts
-///   whatever runtime is published for its identity), publish it
-///   [`RuntimeHealth::stale`] since the window was armed, and leave the
-///   window as it is, whatever the boot's outcome (addendum §4.2): the plan
-///   is known to be older than the database, so even a healthy hydrate is
-///   retried after the window, through the prepared owner's probe and the
-///   dynamic hand-off. `PREPARED_BYPASS` stays unset and `DIRTY` untouched.
-/// - Without a plan, or after a permanent failure: the window's own answer.
+/// - With a plan for this version and a window whose cause is neither
+///   [`WindowCause::Fault`] nor [`WindowCause::HydrateFailed`]: take the slot
+///   and hydrate (a waiter accepts whatever runtime is published for its
+///   identity), publish it stale ([`RuntimeHealth::stale_since_ms`]) since
+///   the window was armed, and leave the window as it is, whatever the boot's
+///   outcome (addendum §4.2): the plan is known to be older than the
+///   database, so even a healthy hydrate is retried after the window, through
+///   the prepared owner's probe and the dynamic hand-off. `PREPARED_BYPASS`
+///   stays unset and `DIRTY` untouched. A failed hydrate paces itself like any
+///   failed build: `HydrateFailed` (doubled) or `Fault`, so at most one
+///   hydrate runs per window.
+/// - Without a plan, after a permanent failure, or once this window's
+///   hydrate has failed: the window's own answer.
 async fn serve_without_runtime(
     io: &dyn BuildIo,
     timer: &dyn WaitTimer,
@@ -1609,7 +1630,13 @@ async fn serve_without_runtime(
     environment_identity: String,
 ) -> PassResult {
     let now = timer.now_ms();
-    let Some(plan) = plan.filter(|_| window.cause != WindowCause::Fault) else {
+    // One hydrate per window: not after a permanent failure, and not again
+    // once this window's hydrate has failed (#275 review M1).
+    let hydrates = !matches!(
+        window.cause,
+        WindowCause::Fault | WindowCause::HydrateFailed
+    );
+    let Some(plan) = plan.filter(|_| hydrates) else {
         return Err(window.error(now));
     };
     let identity = environment_identity.clone();
@@ -1622,23 +1649,26 @@ async fn serve_without_runtime(
         ColdAdmission::Serve { rt, waited_ms } => {
             return Ok(Pass::Done((rt, CacheOutcome::Waited { waited_ms })));
         }
-        ColdAdmission::Reenter => return Ok(Pass::Reenter(())),
+        ColdAdmission::Reenter => return Ok(Pass::Reenter),
     };
-    let finished = as_owner(
+    let finished = match as_owner(
         &build_guard,
         timer,
         io.hydrate_prepared(&plan, environment_identity, now),
     )
     .await
-    .map_err(|e| match e {
-        // Inside an armed window, a hydrate an outage defeated answers with
-        // the window's remaining time; the window is not moved by it.
-        RuntimeBuildError::Unavailable { cause, .. } => RuntimeBuildError::Unavailable {
-            cause,
-            retry_after_secs: window.remaining_secs(timer.now_ms()),
-        },
-        fault => fault,
-    })?;
+    {
+        Ok(finished) => finished,
+        // A failed hydrate paces itself like every failed build: a transient
+        // one doubles the window, a permanent one re-arms it as a `Fault`, so
+        // this isolate builds at most once per window (#275 review M1).
+        Err(error) => {
+            return match rebuild_failed(&build_guard, timer, error, None, FailedBuild::Hydrate) {
+                AfterFailure::Answer(error) => Err(error),
+                AfterFailure::Serve(rt) => Ok(Pass::Done((rt, CacheOutcome::Stale))),
+            };
+        }
+    };
     finished.rt.health.set(RuntimeHealth {
         stale_since_ms: Some(window.armed_at_ms),
         degraded_since_ms: finished.degraded.then_some(now),
@@ -1648,14 +1678,16 @@ async fn serve_without_runtime(
         degraded = finished.degraded,
         "serving this version's packaged plan, stale, while the retry window lasts"
     );
-    let (_outcome, _stored) = publish_runtime(
+    // The outcome names the build this request ran (`ColdBuilt`), so
+    // `Server-Timing` carries it; the runtime's health says it is stale.
+    let (outcome, _stored) = publish_runtime(
         &build_guard,
         &finished.rt,
         finished.build_ordinal,
         finished.duration_ms,
         true,
     );
-    Ok(Pass::Done((finished.rt, CacheOutcome::Stale)))
+    Ok(Pass::Done((finished.rt, outcome)))
 }
 
 async fn get_or_build_dynamic(
@@ -1665,6 +1697,33 @@ async fn get_or_build_dynamic(
     now: u64,
     attempt: Attempt,
     commit_bypass: Option<String>,
+) -> PassResult {
+    let served = dynamic_pass(io, timer, environment_identity.clone(), now, attempt).await;
+    // A hand-off commits the plan's bypass once this isolate's cached runtime
+    // is a dynamic one for this environment — the meaning `PREPARED_BYPASS`
+    // has — however the pass got there: built and stored by this request, or
+    // found cached (a waiter's owner published it, or a warm hit). Never for a
+    // runtime a superseded owner served request-locally, which is not the
+    // cached one (addendum §4.1; #275 review n9, n4).
+    if let (Some(prepared_identity), Ok(Pass::Done((rt, _)))) = (commit_bypass, &served) {
+        let is_cached = cached().is_some_and(|cached| Rc::ptr_eq(&cached, rt));
+        if is_cached
+            && rt.config_version.is_none()
+            && rt.environment_identity == environment_identity
+        {
+            bypass_prepared(prepared_identity);
+        }
+    }
+    served
+}
+
+/// The dynamic path's pass, without the hand-off's bypass commit.
+async fn dynamic_pass(
+    io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
+    environment_identity: String,
+    now: u64,
+    attempt: Attempt,
 ) -> PassResult {
     // Zero-await warm hit (dominant path once warm). Skipped while another
     // request owns the build slot: it may be replacing this runtime with
@@ -1693,19 +1752,12 @@ async fn get_or_build_dynamic(
         ColdAdmission::Serve { rt, waited_ms } => {
             return Ok(Pass::Done((rt, CacheOutcome::Waited { waited_ms })));
         }
-        ColdAdmission::Reenter => return Ok(Pass::Reenter(())),
+        ColdAdmission::Reenter => return Ok(Pass::Reenter),
     };
     let served = as_owner(
         &build_guard,
         timer,
-        build_dynamic_as_owner(
-            &build_guard,
-            io,
-            timer,
-            environment_identity,
-            now,
-            commit_bypass,
-        ),
+        build_dynamic_as_owner(&build_guard, io, timer, environment_identity, now),
     )
     .await?;
     Ok(Pass::Done(served))
@@ -1717,7 +1769,6 @@ async fn build_dynamic_as_owner(
     timer: &dyn WaitTimer,
     environment_identity: String,
     now: u64,
-    commit_bypass: Option<String>,
 ) -> Result<(Rc<ReadyRuntime>, CacheOutcome), RuntimeBuildError> {
     // Whether this request's build attempt CONSUMED the isolate dirty flag.
     // Only a consumed signal may be re-marked if the build then fails: the
@@ -1816,7 +1867,7 @@ async fn build_dynamic_as_owner(
             // rebuild leaves serving (I5d, Decision 1): a dynamic one, or the
             // prepared one a hand-off was replacing.
             let keep = previous.filter(|rt| rt.environment_identity == environment_identity);
-            return match rebuild_failed(build_guard, timer, error, keep) {
+            return match rebuild_failed(build_guard, timer, error, keep, FailedBuild::Rebuild) {
                 AfterFailure::Serve(rt) => Ok((rt, CacheOutcome::Stale)),
                 AfterFailure::Answer(error) => Err(error),
             };
@@ -1836,15 +1887,17 @@ async fn build_dynamic_as_owner(
         is_cold,
     );
     if stored {
-        // The bypass means "this isolate has a dynamic runtime for the moved
-        // config", so it is committed here, when one is stored, and nowhere
-        // else; a superseded owner commits nothing (addendum §4.1, n9).
-        if let Some(prepared_identity) = commit_bypass {
-            bypass_prepared(prepared_identity);
-        }
         settle_window(build_guard, timer.now_ms(), finished.degraded);
     }
     Ok((finished.rt, outcome))
+}
+
+/// Which build failed ([`rebuild_failed`]): the stale-plan hydrate inside a
+/// window, or any other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedBuild {
+    Rebuild,
+    Hydrate,
 }
 
 /// What a failed build leaves this request with ([`rebuild_failed`]).
@@ -1869,13 +1922,15 @@ fn rebuild_failed(
     timer: &dyn WaitTimer,
     error: RuntimeBuildError,
     keep: Option<Rc<ReadyRuntime>>,
+    failed: FailedBuild,
 ) -> AfterFailure {
     let now = timer.now_ms();
     let transient = error.is_unavailable();
-    let cause = match (transient, keep.is_some()) {
-        (true, true) => WindowCause::RebuildFailed,
-        (true, false) => WindowCause::BuildUnavailable,
-        (false, _) => WindowCause::Fault,
+    let cause = match (transient, keep.is_some(), failed) {
+        (false, _, _) => WindowCause::Fault,
+        (true, true, _) => WindowCause::RebuildFailed,
+        (true, false, FailedBuild::Hydrate) => WindowCause::HydrateFailed,
+        (true, false, FailedBuild::Rebuild) => WindowCause::BuildUnavailable,
     };
     let window = if guard.is_current() {
         Some(arm_window(now, cause))
@@ -2019,7 +2074,7 @@ async fn get_or_build_prepared(
         // path while this request waited: the runtime it published is dynamic,
         // which this path's predicate refuses, and re-entry routes to the
         // dynamic path once the bypass is committed.
-        ColdAdmission::Reenter => return Ok(Pass::Reenter(())),
+        ColdAdmission::Reenter => return Ok(Pass::Reenter),
     };
     let owned = as_owner(
         &build_guard,
@@ -2105,6 +2160,21 @@ async fn build_prepared_as_owner(
                 return Err(e);
             }
         };
+        if !healthy
+            && rt.health.get().stale_since_ms.is_some()
+            && matches!(probe, VersionProbe::Unavailable)
+        {
+            // This isolate knows the plan is older than the database's config
+            // (a failed rebuild kept it, or U-B1's hydrate served it), and an
+            // unavailable probe cannot say otherwise: keep serving it stale and
+            // retry after a doubled window — never re-hydrate and republish it
+            // as current (#275 review m1).
+            rt.note_probe_failure(now);
+            if build_guard.is_current() {
+                arm_window(now, WindowCause::RebuildFailed);
+            }
+            return Ok(PreparedOwned::Ready(rt, CacheOutcome::Stale));
+        }
         if prepared_probe_requires_fallback(dirty, &cached_config_version, &probe) {
             tracing::info!(
                 plan_hash = %plan_generation,
@@ -2153,7 +2223,7 @@ async fn build_prepared_as_owner(
     let finished = match io.hydrate_prepared(plan, environment_identity, now).await {
         Ok(finished) => finished,
         Err(error) => {
-            return match rebuild_failed(build_guard, timer, error, previous) {
+            return match rebuild_failed(build_guard, timer, error, previous, FailedBuild::Rebuild) {
                 AfterFailure::Serve(rt) => Ok(PreparedOwned::Ready(rt, CacheOutcome::Stale)),
                 AfterFailure::Answer(error) => Err(error),
             };
@@ -2177,11 +2247,13 @@ async fn build_prepared_as_owner(
     Ok(PreparedOwned::Ready(finished.rt, outcome))
 }
 
-/// After a request is served: a runtime whose variables snapshot is now
+/// Before this request is dispatched, on the runtime it will be dispatched
+/// to: a variables snapshot that a previous request's dispatch left
 /// remembering a failed read answers every stored-config read `Unavailable`
-/// until it is rebuilt — under `RetryMode::Rebuild` nothing else retries it —
-/// so it is marked degraded and the retry window armed, if it is not already
-/// (I5a). Reads isolate state only.
+/// until the runtime is rebuilt — under `RetryMode::Rebuild` nothing else
+/// retries it — so the runtime is marked degraded and the retry window armed,
+/// if it is not already (I5a). The failure is noticed one request late, by
+/// the first request after it. Reads isolate state only.
 fn observe_snapshot(rt: &ReadyRuntime, now: u64) {
     if !rt.variables_snapshot.remembers_a_failure() {
         return;
@@ -2412,40 +2484,39 @@ pub(crate) mod tests {
         build_ticks: u32,
         build_fails: bool,
     ) -> Served {
-        let served: Result<Served, RuntimeBuildBusy> =
-            with_one_reentry((), |(), attempt| async move {
-                let admission = admit_cold(attempt, timer, |rt, now| {
-                    dynamic_runtime_is_warm(rt, "env-test", now)
-                })
-                .await?;
-                let guard = match admission {
-                    ColdAdmission::Serve { .. } => return Ok(Pass::Done(Served::Waited)),
-                    ColdAdmission::Reenter => return Ok(Pass::Reenter(())),
-                    ColdAdmission::Build(guard) => guard,
-                };
-                let built = as_owner(&guard, timer, async {
-                    builds.set(builds.get() + 1);
-                    for _ in 0..build_ticks {
-                        YieldOnce(false).await;
-                    }
-                    if build_fails {
-                        Err("admin Init failed")
-                    } else {
-                        Ok(ready_runtime_until(
-                            timer.now_ms() + PROBE_INTERVAL_FLOOR_MS,
-                        ))
-                    }
-                })
-                .await;
-                Ok(Pass::Done(match built {
-                    Ok(rt) => {
-                        publish_runtime(&guard, &rt, builds.get(), 0, true);
-                        Served::Built
-                    }
-                    Err(_) => Served::BuildFailed,
-                }))
+        let served: Result<Served, RuntimeBuildBusy> = with_one_reentry(|attempt| async move {
+            let admission = admit_cold(attempt, timer, |rt, now| {
+                dynamic_runtime_is_warm(rt, "env-test", now)
+            })
+            .await?;
+            let guard = match admission {
+                ColdAdmission::Serve { .. } => return Ok(Pass::Done(Served::Waited)),
+                ColdAdmission::Reenter => return Ok(Pass::Reenter),
+                ColdAdmission::Build(guard) => guard,
+            };
+            let built = as_owner(&guard, timer, async {
+                builds.set(builds.get() + 1);
+                for _ in 0..build_ticks {
+                    YieldOnce(false).await;
+                }
+                if build_fails {
+                    Err("admin Init failed")
+                } else {
+                    Ok(ready_runtime_until(
+                        timer.now_ms() + PROBE_INTERVAL_FLOOR_MS,
+                    ))
+                }
             })
             .await;
+            Ok(Pass::Done(match built {
+                Ok(rt) => {
+                    publish_runtime(&guard, &rt, builds.get(), 0, true);
+                    Served::Built
+                }
+                Err(_) => Served::BuildFailed,
+            }))
+        })
+        .await;
         match served {
             Ok(served) => served,
             Err(busy) => Served::Refused(busy),
@@ -3213,6 +3284,8 @@ pub(crate) mod tests {
     struct FakeIo {
         plan: Option<Rc<impresspress_core::PreparedRuntimePlan>>,
         stamp: std::cell::RefCell<String>,
+        /// The KV probe fails (`VersionProbe::Unavailable`).
+        probe_unavailable: Cell<bool>,
         dynamic: Cell<Ends>,
         hydrate: Cell<Ends>,
         /// I/O turns each build takes, so concurrent requests interleave.
@@ -3231,6 +3304,7 @@ pub(crate) mod tests {
             Self {
                 plan,
                 stamp: std::cell::RefCell::new(PLAN_GENERATION.to_string()),
+                probe_unavailable: Cell::new(false),
                 dynamic: Cell::new(Ends::Healthy),
                 hydrate: Cell::new(Ends::Healthy),
                 build_ticks: Cell::new(0),
@@ -3281,6 +3355,9 @@ pub(crate) mod tests {
 
         async fn probe_version(&self) -> Result<VersionProbe, RuntimeBuildError> {
             self.probes.set(self.probes.get() + 1);
+            if self.probe_unavailable.get() {
+                return Ok(VersionProbe::Unavailable);
+            }
             Ok(VersionProbe::Stamped(self.stamp.borrow().clone()))
         }
 
@@ -3407,7 +3484,10 @@ pub(crate) mod tests {
         let (rt, outcome) = get_or_build_with(&io, &timer)
             .await
             .expect("request 2 is served");
-        assert_eq!(outcome, CacheOutcome::Stale);
+        assert!(
+            matches!(outcome, CacheOutcome::ColdBuilt { .. }),
+            "the hydrate is this request's build: {outcome:?}"
+        );
         assert_eq!(rt.config_version.as_deref(), Some(PLAN_GENERATION));
         assert_eq!(rt.health.get().stale_since_ms, Some(armed.armed_at_ms));
         assert_eq!((io.builds.get(), io.hydrates.get()), (1, 1));
@@ -3493,8 +3573,7 @@ pub(crate) mod tests {
         let armed = window().expect("armed");
 
         io.hydrate.set(Ends::Healthy);
-        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("served");
-        assert_eq!(outcome, CacheOutcome::Stale);
+        let (rt, _outcome) = get_or_build_with(&io, &timer).await.expect("served");
         assert!(rt.health.get().stale_since_ms.is_some());
         assert_eq!(window(), Some(armed), "neither cleared nor doubled");
         reset_isolate();
@@ -3563,8 +3642,8 @@ pub(crate) mod tests {
         let io = FakeIo::new(Some(packaged_plan()));
         arm_window(START, WindowCause::Degraded);
 
-        let (_rt, outcome) = get_or_build_with(&io, &timer).await.expect("hydrated");
-        assert_eq!(outcome, CacheOutcome::Stale);
+        let (rt, _outcome) = get_or_build_with(&io, &timer).await.expect("hydrated");
+        assert!(rt.health.get().stale_since_ms.is_some());
         assert_eq!(io.hydrates.get(), 1);
         reset_isolate();
     }
@@ -3643,7 +3722,9 @@ pub(crate) mod tests {
         let outcomes = [a.expect("served").1, b.expect("served").1];
         assert_eq!(io.hydrates.get(), 1, "one hydrate for both");
         assert!(
-            outcomes.contains(&CacheOutcome::Stale)
+            outcomes
+                .iter()
+                .any(|o| matches!(o, CacheOutcome::ColdBuilt { .. }))
                 && outcomes
                     .iter()
                     .any(|o| matches!(o, CacheOutcome::Waited { .. })),
@@ -3722,5 +3803,163 @@ pub(crate) mod tests {
         assert_eq!(window.remaining_secs(0), 3);
         assert_eq!(window.remaining_secs(2_400), 1);
         assert_eq!(window.remaining_secs(9_000), 1, "never Retry-After: 0");
+    }
+
+    /// **A hand-off that ends on the isolate's cached dynamic runtime
+    /// commits the bypass** (#275 review n4): the bypass means "this isolate
+    /// has a dynamic runtime for the moved config", which it does, so later
+    /// requests go straight to the dynamic path instead of probing KV and
+    /// handing off every time.
+    #[wasm_bindgen_test]
+    async fn a_hand_off_to_a_cached_dynamic_runtime_commits_the_bypass() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let plan = packaged_plan();
+        let io = FakeIo::new(Some(plan.clone()));
+        *io.stamp.borrow_mut() = MOVED_GENERATION.to_string();
+        store(runtime(IDENTITY, MOVED_GENERATION, None, u64::MAX));
+
+        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("served");
+        assert_eq!(outcome, CacheOutcome::Hit, "the cached dynamic runtime");
+        assert_eq!(rt.config_version, None);
+        assert_eq!(io.builds.get(), 0);
+        assert!(bypassed(&plan), "the bypass is committed");
+        reset_isolate();
+    }
+
+    /// **A failed hydrate paces itself** (#275 review M1): it doubles the
+    /// window (transient) or re-arms it as a `Fault` (permanent), so a third
+    /// request inside the new window builds nothing — one build per window,
+    /// not one per request.
+    #[wasm_bindgen_test]
+    async fn a_failed_hydrate_builds_at_most_once_per_window() {
+        for (fails_with, cause) in [
+            (Ends::Unavailable, WindowCause::HydrateFailed),
+            (Ends::Fault, WindowCause::Fault),
+        ] {
+            reset_isolate();
+            let timer = FakeTimer::starting_at(START);
+            let io = FakeIo::new(Some(packaged_plan()));
+            *io.stamp.borrow_mut() = MOVED_GENERATION.to_string();
+            io.dynamic.set(Ends::Unavailable);
+            io.hydrate.set(fails_with);
+            let _ = get_or_build_with(&io, &timer).await;
+            let first = window().expect("armed by the dynamic build");
+
+            let second = get_or_build_with(&io, &timer).await;
+            assert!(second.is_err(), "{fails_with:?}: {second:?}");
+            let paced = window().expect("still armed");
+            assert_eq!(paced.cause, cause, "{fails_with:?}");
+            assert_eq!(paced.failures, first.failures + 1, "{fails_with:?}");
+
+            let third = get_or_build_with(&io, &timer).await;
+            assert!(third.is_err(), "{fails_with:?}: {third:?}");
+            assert_eq!(
+                (io.builds.get(), io.hydrates.get()),
+                (1, 1),
+                "{fails_with:?}: nothing is built inside the paced window"
+            );
+        }
+        reset_isolate();
+    }
+
+    /// **A stale plan is never republished as current on an unavailable
+    /// probe** (#275 review m1): after the window, a KV probe that fails
+    /// cannot tell the isolate the plan is current, so the stale runtime keeps
+    /// serving, stale since when it was, and the window doubles — no hydrate,
+    /// no `Healthy`, no cleared window.
+    #[wasm_bindgen_test]
+    async fn an_unavailable_probe_keeps_a_stale_plan_stale() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(Some(packaged_plan()));
+        *io.stamp.borrow_mut() = MOVED_GENERATION.to_string();
+        io.dynamic.set(Ends::Unavailable);
+        let _ = get_or_build_with(&io, &timer).await;
+        let (rt, _) = get_or_build_with(&io, &timer)
+            .await
+            .expect("the stale plan");
+        let stale_since = rt.health.get().stale_since_ms;
+        let armed = window().expect("armed");
+
+        timer.now.set(armed.retry_at_ms);
+        io.probe_unavailable.set(true);
+        io.hydrate.set(Ends::Healthy);
+        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("served");
+        assert_eq!(outcome, CacheOutcome::Stale);
+        assert_eq!(rt.health.get().stale_since_ms, stale_since);
+        assert_eq!(io.hydrates.get(), 1, "not re-hydrated as current");
+        let doubled = window().expect("the window is not cleared");
+        assert_eq!(doubled.failures, armed.failures + 1);
+        reset_isolate();
+    }
+
+    /// A D1 binding that rejects every statement as an outage would.
+    fn d1_that_is_down() -> worker::D1Database {
+        let d1 = js_sys::Function::new_no_args(
+            "const fail = () => Promise.reject(new Error('D1_ERROR: Network connection lost.'));
+             return {
+                 prepare() {
+                     const stmt = { bind() { return stmt; }, all: fail, run: fail, raw: fail,
+                                    first: fail };
+                     return stmt;
+                 },
+                 batch: fail,
+             };",
+        )
+        .call0(&wasm_bindgen::JsValue::NULL)
+        .expect("the fake binding builds");
+        wasm_bindgen::JsCast::unchecked_into::<worker::D1Database>(d1)
+    }
+
+    /// **A published runtime whose variables snapshot remembers a failed
+    /// read arms the window** (I5a; #275 review m2): under
+    /// `RetryMode::Rebuild` that arming is the only retry its stored config
+    /// gets. The next request marks it degraded and arms `Degraded`, so the
+    /// runtime is rebuilt within the window rather than the probe's 5–10
+    /// minutes.
+    #[wasm_bindgen_test]
+    async fn a_runtime_whose_snapshot_failed_arms_the_window() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        let snapshot =
+            std::sync::Arc::new(impresspress_core::config_source::VariablesSnapshot::new(
+                impresspress_core::config_source::RetryMode::Rebuild,
+            ));
+        let db: std::sync::Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            std::sync::Arc::new(crate::database::D1DatabaseService::new(
+                d1_that_is_down(),
+                "DB",
+                crate::database::D1CallCount::new(),
+                1000,
+            ));
+        crate::database::forget_isolate_schema();
+        snapshot
+            .read(&db)
+            .await
+            .expect_err("the outage fails the read");
+        assert!(snapshot.remembers_a_failure());
+
+        let rt = Rc::new(ReadyRuntime {
+            wafer: wafer_run::Wafer::new(std::sync::Arc::new(
+                wafer_run::StaticConfigSource::default(),
+            ))
+            .expect("a bare runtime"),
+            variables_snapshot: snapshot,
+            version: "v".to_string(),
+            config_version: None,
+            environment_identity: IDENTITY.to_string(),
+            probe_deadline_ms: Cell::new(u64::MAX),
+            probe_failures: Cell::new(0),
+            health: Cell::new(RuntimeHealth::default()),
+        });
+        store(rt);
+        assert_eq!(window(), None);
+
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("served");
+        assert!(rt.health.get().degraded_since_ms.is_some());
+        assert_eq!(window().map(|w| w.cause), Some(WindowCause::Degraded));
+        reset_isolate();
     }
 }

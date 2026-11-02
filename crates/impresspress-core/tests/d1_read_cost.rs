@@ -2059,6 +2059,7 @@ async fn boot_prepared_while_variables_fail(
 ) -> (
     Result<impresspress_core::builder::BootReport, impresspress_core::builder::BootError>,
     Wafer,
+    Arc<dyn DatabaseService>,
 ) {
     let shaped = Arc::new(D1Shaped::open(path, Arc::clone(ledger)));
     let db: Arc<dyn DatabaseService> = shaped.clone();
@@ -2079,7 +2080,7 @@ async fn boot_prepared_while_variables_fail(
         RequestBuild::Prepared,
     )
     .await;
-    (booted, built.wafer)
+    (booted, built.wafer, db)
 }
 
 /// The blocks of `wafer` that declare config keys, by registered name.
@@ -2112,7 +2113,7 @@ async fn a_serving_boot_over_a_variables_fault_fails_permanently() {
     let ledger = Arc::new(Ledger::default());
     let plan = provision(&cold(&path, &ledger)).await;
 
-    let (booted, wafer) = boot_prepared_while_variables_fail(
+    let (booted, wafer, _db) = boot_prepared_while_variables_fail(
         &path,
         &ledger,
         &plan,
@@ -2158,7 +2159,7 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
     let ledger = Arc::new(Ledger::default());
     let plan = provision(&cold(&path, &ledger)).await;
 
-    let (booted, wafer) =
+    let (booted, wafer, db) =
         boot_prepared_while_variables_fail(&path, &ledger, &plan, Fault::Unavailable).await;
     let report = booted.expect("an outage publishes degraded");
 
@@ -2194,7 +2195,16 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
         );
     }
 
+    // A route that needs no stored config still serves, over the database
+    // that is still refusing the variables table.
+    assert_eq!(
+        request(&wafer, &db, "/health", None).await,
+        200,
+        "a block with no D1 dependency serves"
+    );
+
     let degraded_block = declaring.first().expect("a degraded block").clone();
+    ledger.take();
     let refused = wafer
         .run_block(
             &degraded_block,
@@ -2214,7 +2224,12 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
             wafer.init_states().get(&degraded_block),
             Some(wafer_run::BlockInitState::Retrying { .. })
         ),
-        "the dispatch ran no Init on `{degraded_block}`"
+        "`{degraded_block}` is still unsettled"
+    );
+    let sent = ledger.take();
+    assert!(
+        sent.is_empty(),
+        "the dispatch ran no Init on `{degraded_block}` — an Init would read its config: {sent:#?}"
     );
 }
 

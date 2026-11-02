@@ -326,29 +326,18 @@ where
     // construction is synchronous but reads ConfigService immediately, so it
     // runs under the same request scope as async dispatch.
     let storage_proxy = request_services::storage_proxy();
-    let crypto_proxy = request_services::crypto_proxy();
-    let network_proxy = request_services::network_proxy();
-    let logger_proxy = request_services::logger_proxy();
-    let config_source_proxy = request_services::config_source_proxy();
     let prepared_identity = prepared_plan
         .map(|_| environment.prepared_runtime_identity())
         .transpose()?;
     let (wafer, block_settings_handle, plan_exporter) = request_services::scope_sync(
         services.clone(),
         || -> Result<_, Box<dyn std::error::Error>> {
-            // A Worker may stop a request part-way, so no dispatch may run a
-            // block's `Init` (it would hold the slot's attempt lock for the
-            // runtime's life): only the boot initializes, and the request
-            // path's `Serving` boot requires exactly this.
-            let builder = config_installed
-                .init_wait(wafer_run::InitWait::Refuse)
-                .storage(storage_proxy.clone())
-                .crypto(crypto_proxy)
-                .network(network_proxy)
-                .logger(logger_proxy)
-                .block_settings(block_settings)
-                .config_source(config_source_proxy)
-                .variables_snapshot(variables_snapshot.clone());
+            let builder = request_path_builder(
+                config_installed,
+                storage_proxy.clone(),
+                block_settings,
+                variables_snapshot.clone(),
+            );
 
             // 5. Consumer registers its blocks.
             let builder = register_blocks(builder)?;
@@ -510,6 +499,31 @@ fn request_crypto_service(
         jwt_secret,
         crate::crypto_service::PasswordHasher::from_env(env, environment.password_hasher_shards()?),
     ))
+}
+
+/// The settings every runtime this Worker builds takes, over the builder
+/// `install_config_surfaces` returned: the stateless request-scoped proxies
+/// an isolate-cached runtime may keep, the block settings and the variables
+/// snapshot — and `InitWait::Refuse`. A Worker may stop a request part-way,
+/// so no dispatch may run a block's `Init` (it would hold the slot's attempt
+/// lock for the runtime's life): only the boot initializes, and the request
+/// path's `Serving` boot refuses any other mode, so without it every route
+/// would answer 500.
+fn request_path_builder(
+    builder: ImpresspressBuilder,
+    storage_proxy: Arc<dyn StorageService>,
+    block_settings: impresspress_core::features::BlockSettings,
+    variables_snapshot: Arc<VariablesSnapshot>,
+) -> ImpresspressBuilder {
+    builder
+        .init_wait(wafer_run::InitWait::Refuse)
+        .storage(storage_proxy)
+        .crypto(request_services::crypto_proxy())
+        .network(request_services::network_proxy())
+        .logger(request_services::logger_proxy())
+        .block_settings(block_settings)
+        .config_source(request_services::config_source_proxy())
+        .variables_snapshot(variables_snapshot)
 }
 
 /// Hand both config surfaces to a new builder, the database first: the step
@@ -709,6 +723,22 @@ mod tests {
         );
     }
 
+    /// **Every runtime this Worker builds is `InitWait::Refuse`** (#275 review
+    /// m4): the request path boots `Serving`, which refuses any other mode, so
+    /// losing it would make every route answer 500. Runs `build_runtime`'s own
+    /// builder steps ([`install_config_surfaces`], [`request_path_builder`]).
+    #[wasm_bindgen_test]
+    fn every_runtime_this_worker_builds_refuses_inline_init() {
+        let (builder, _concrete) = install_config_surfaces(RuntimeConfig::new()).expect("installs");
+        let builder = request_path_builder(
+            builder,
+            request_services::storage_proxy(),
+            impresspress_core::features::BlockSettings::default(),
+            Arc::new(VariablesSnapshot::new(RetryMode::Rebuild)),
+        );
+        assert_eq!(builder.configured_init_wait(), wafer_run::InitWait::Refuse);
+    }
+
     /// The database dialect reaches the **async** surface on this target,
     /// whose concrete `ConfigService` is built from `install`'s map and whose
     /// `set` is a no-op. This runs `build_runtime`'s own install step
@@ -864,11 +894,6 @@ mod tests {
         );
     }
 
-    /// A D1 binding over a migrated variables table holding `rows` (a JS
-    /// array literal of row objects), answering the executor's introspection
-    /// as SQLite answers it. Every statement it runs is pushed onto `log` as
-    /// `[sql, params]` JSON, in order. A write, a batch or a `raw()` read
-    /// rejects: the config source sends none.
     /// A Worker `Env` whose D1 binding rejects every statement with `error`
     /// (a D1 error text) and whose KV row cache misses, so a dynamic build's
     /// one database read — `block_settings` — reaches D1 and fails.
@@ -936,6 +961,11 @@ mod tests {
         }
     }
 
+    /// A D1 binding over a migrated variables table holding `rows` (a JS
+    /// array literal of row objects), answering the executor's introspection
+    /// as SQLite answers it. Every statement it runs is pushed onto `log` as
+    /// `[sql, params]` JSON, in order. A write, a batch or a `raw()` read
+    /// rejects: the config source sends none.
     fn variables_d1(log: &js_sys::Array, rows: &str) -> worker::D1Database {
         let handle = js_sys::Function::new_with_args(
             "log",
