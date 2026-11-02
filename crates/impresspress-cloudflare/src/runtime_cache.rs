@@ -59,12 +59,17 @@
 //! runtime serving.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, OnceCell},
     rc::{Rc, Weak},
     sync::Arc,
 };
 
-use impresspress_core::{cache_key::CONFIG_VERSION_KEY, metrics::CacheOutcome, IsolateCell};
+use impresspress_core::{
+    cache_key::CONFIG_VERSION_KEY,
+    metrics::CacheOutcome,
+    runtime_health::{PlatformHealth, RetryEpisode, RetryStreaks},
+    IsolateCell,
+};
 
 /// Floor of the isolate-local warm-hit probe window (ms) — see
 /// [`next_probe_deadline_ms`].
@@ -169,9 +174,16 @@ pub(crate) struct ReadyRuntime {
     /// Whether this runtime is known not to be current: published without a
     /// block (degraded), or kept, or hydrated, from config older than the
     /// database's (stale). Never a warm hit while it is not healthy, so the
-    /// first request after the retry window rebuilds it. IP-C's `/health`
-    /// reports it.
+    /// first request after the retry window rebuilds it. `/health` reports
+    /// it ([`platform_health`]).
     pub health: Cell<RuntimeHealth>,
+    /// Which blocks were retrying their `Init` when this runtime was stored,
+    /// carried on from the runtime it replaced ([`RetryStreaks::carried`]),
+    /// so `/health` can tell a block that has failed the same way across
+    /// rebuilds from one that failed once. Set once, by [`publish_runtime`]
+    /// when it stores the runtime; a `OnceCell`, which has no borrow flag to
+    /// strand (see the `thread_local!` block's comment).
+    retry_streaks: OnceCell<RetryStreaks>,
 }
 
 impl ReadyRuntime {
@@ -1222,6 +1234,7 @@ async fn finish_runtime(
         probe_deadline_ms: Cell::new(tag.probe_deadline_ms),
         probe_failures: Cell::new(0),
         health: Cell::new(RuntimeHealth::default()),
+        retry_streaks: OnceCell::new(),
     });
     if !report.degraded.is_empty() {
         tracing::warn!(
@@ -1260,7 +1273,22 @@ fn publish_runtime(
     is_cold: bool,
 ) -> (CacheOutcome, bool) {
     let label = rt.kind_label();
+    let replaced = cached();
     let stored = store_if_current(guard, rt.clone());
+    if stored {
+        let streaks = replaced
+            .as_deref()
+            .and_then(|previous| previous.retry_streaks.get())
+            .cloned()
+            .unwrap_or_default()
+            .carried(
+                &rt.wafer.init_states(),
+                impresspress_core::util::now_millis(),
+            );
+        // A runtime is stored once; a second store of the same one keeps the
+        // streaks of its first.
+        let _ = rt.retry_streaks.set(streaks);
+    }
     if !stored {
         tracing::warn!(
             build_ordinal,
@@ -2252,6 +2280,36 @@ async fn build_prepared_as_owner(
     Ok(PreparedOwned::Ready(finished.rt, outcome))
 }
 
+/// What `/health` reports beyond the runtime's slots (D1 outage plan I6),
+/// read from this isolate: the cached runtime's [`RuntimeHealth`] and
+/// [`RetryStreaks`], and the retry window. The Cloudflare entry registers it
+/// as the isolate's [`impresspress_core::runtime_health`] source. Reads
+/// isolate state only.
+///
+/// The cached runtime is the one a request is served from, but for a
+/// superseded owner's runtime, which serves its own request only.
+pub(crate) fn platform_health() -> PlatformHealth {
+    let episode = RETRY_WINDOW.with(Cell::get).map(|window| RetryEpisode {
+        since_ms: window.armed_at_ms,
+        retry_at_ms: window.retry_at_ms,
+        rebuilds: window.failures,
+        failed: window.cause == WindowCause::Fault,
+    });
+    let Some(rt) = cached() else {
+        return PlatformHealth {
+            episode,
+            ..PlatformHealth::default()
+        };
+    };
+    let health = rt.health.get();
+    PlatformHealth {
+        episode,
+        degraded_since_ms: health.degraded_since_ms,
+        stale_since_ms: health.stale_since_ms,
+        retry_streaks: rt.retry_streaks.get().cloned().unwrap_or_default(),
+    }
+}
+
 /// Before this request is dispatched, on the runtime it will be dispatched
 /// to: a variables snapshot that a previous request's dispatch left
 /// remembering a failed read answers every stored-config read `Unavailable`
@@ -2408,6 +2466,7 @@ pub(crate) mod tests {
             probe_deadline_ms: Cell::new(probe_deadline_ms),
             probe_failures: Cell::new(0),
             health: Cell::new(RuntimeHealth::default()),
+            retry_streaks: OnceCell::new(),
         })
     }
 
@@ -3302,6 +3361,9 @@ pub(crate) mod tests {
         probes: Cell<u32>,
         builds: Cell<u32>,
         hydrates: Cell<u32>,
+        /// Each runtime built carries [`health_wafer`]'s real slots rather
+        /// than none: a degraded one with `test/resets` retrying.
+        real_slots: Cell<bool>,
     }
 
     impl FakeIo {
@@ -3318,10 +3380,11 @@ pub(crate) mod tests {
                 probes: Cell::new(0),
                 builds: Cell::new(0),
                 hydrates: Cell::new(0),
+                real_slots: Cell::new(false),
             }
         }
 
-        fn finish(
+        async fn finish(
             &self,
             ends: Ends,
             version: String,
@@ -3337,7 +3400,17 @@ pub(crate) mod tests {
                     "D1_ERROR: no such column".to_string(),
                 )),
                 Ends::Healthy | Ends::Degraded => Ok(Finished {
-                    rt: runtime(IDENTITY, &version, config_version, u64::MAX),
+                    rt: if self.real_slots.get() {
+                        runtime_of(
+                            health_wafer(ends == Ends::Degraded).await,
+                            IDENTITY,
+                            &version,
+                            config_version,
+                            u64::MAX,
+                        )
+                    } else {
+                        runtime(IDENTITY, &version, config_version, u64::MAX)
+                    },
                     build_ordinal: 1,
                     duration_ms: 0,
                     degraded: ends == Ends::Degraded,
@@ -3382,7 +3455,7 @@ pub(crate) mod tests {
                 *self.superseded_by.borrow_mut() =
                     BuildGuard::try_acquire(started_at + BUILD_HARD_LEASE_MS + 1);
             }
-            self.finish(self.dynamic.get(), version, None)
+            self.finish(self.dynamic.get(), version, None).await
         }
 
         async fn hydrate_prepared(
@@ -3400,6 +3473,7 @@ pub(crate) mod tests {
                 plan.plan_hash.clone(),
                 Some(plan.config_generation.clone()),
             )
+            .await
         }
     }
 
@@ -3410,11 +3484,26 @@ pub(crate) mod tests {
         config_version: Option<String>,
         probe_deadline_ms: u64,
     ) -> Rc<ReadyRuntime> {
+        runtime_of(
+            wafer_run::Wafer::new(std::sync::Arc::new(wafer_run::StaticConfigSource::default()))
+                .expect("a bare runtime"),
+            identity,
+            version,
+            config_version,
+            probe_deadline_ms,
+        )
+    }
+
+    /// A runtime of `wafer` for `identity`, tagged as given.
+    fn runtime_of(
+        wafer: wafer_run::Wafer,
+        identity: &str,
+        version: &str,
+        config_version: Option<String>,
+        probe_deadline_ms: u64,
+    ) -> Rc<ReadyRuntime> {
         Rc::new(ReadyRuntime {
-            wafer: wafer_run::Wafer::new(std::sync::Arc::new(
-                wafer_run::StaticConfigSource::default(),
-            ))
-            .expect("a bare runtime"),
+            wafer,
             variables_snapshot: std::sync::Arc::default(),
             version: version.to_string(),
             config_version,
@@ -3422,6 +3511,7 @@ pub(crate) mod tests {
             probe_deadline_ms: Cell::new(probe_deadline_ms),
             probe_failures: Cell::new(0),
             health: Cell::new(RuntimeHealth::default()),
+            retry_streaks: OnceCell::new(),
         })
     }
 
@@ -4023,6 +4113,7 @@ pub(crate) mod tests {
             probe_deadline_ms: Cell::new(u64::MAX),
             probe_failures: Cell::new(0),
             health: Cell::new(RuntimeHealth::default()),
+            retry_streaks: OnceCell::new(),
         });
         store(rt);
         assert_eq!(window(), None);
@@ -4030,6 +4121,174 @@ pub(crate) mod tests {
         let (rt, _) = get_or_build_with(&io, &timer).await.expect("served");
         assert!(rt.health.get().degraded_since_ms.is_some());
         assert_eq!(window().map(|w| w.cause), Some(WindowCause::Degraded));
+        reset_isolate();
+    }
+
+    // -----------------------------------------------------------------------
+    // `/health` (D1 outage plan I6): the system block's report, from a served
+    // runtime's real slots and this isolate's state, through the source the
+    // Cloudflare entry registers.
+    // -----------------------------------------------------------------------
+
+    /// D1's text for a reset its own query caused (plan I2g).
+    const RESET: &str = "D1_ERROR: D1 DB exceeded its CPU time limit and was reset.";
+
+    /// Answers nothing; its `Init` fails as D1 does after a reset, or not.
+    struct Resets(bool);
+
+    #[wafer_block::wafer_async_trait]
+    impl wafer_run::Block for Resets {
+        fn info(&self) -> wafer_run::BlockInfo {
+            wafer_run::BlockInfo::new("test/resets", "0.0.1", "http-handler@v1", "resets D1")
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            _msg: wafer_run::Message,
+            _input: wafer_run::InputStream,
+        ) -> wafer_run::OutputStream {
+            impresspress_core::http::err_not_found("nothing here")
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            event: wafer_run::LifecycleEvent,
+        ) -> Result<(), wafer_run::WaferError> {
+            if self.0 && matches!(event.event_type, wafer_run::LifecycleType::Init) {
+                return Err(wafer_run::WaferError::new(
+                    wafer_run::ErrorCode::Unavailable,
+                    RESET,
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    /// A sealed runtime of the system block and `test/resets`, both `Init`ed,
+    /// as a boot leaves them: `test/resets` retrying when `resets`.
+    async fn health_wafer(resets: bool) -> wafer_run::Wafer {
+        let mut wafer =
+            wafer_run::Wafer::new(std::sync::Arc::new(wafer_run::StaticConfigSource::default()))
+                .expect("Wafer::new");
+        wafer
+            .register_block(
+                "impresspress/system",
+                std::sync::Arc::new(impresspress_core::blocks::system::SystemBlock::new()),
+            )
+            .expect("register the system block");
+        wafer
+            .register_block("test/resets", std::sync::Arc::new(Resets(resets)))
+            .expect("register test/resets");
+        wafer.seal().await.expect("seal");
+        wafer
+            .init_block("impresspress/system")
+            .await
+            .expect("the system block initializes");
+        let resets_init = wafer.init_block("test/resets").await;
+        assert_eq!(resets_init.is_err(), resets, "{resets_init:?}");
+        wafer
+    }
+
+    /// `GET /health` on `rt`: status, `Retry-After`, body.
+    async fn health_of(rt: &ReadyRuntime) -> (u16, Option<String>, serde_json::Value) {
+        let mut msg = wafer_run::Message::new("retrieve:/health");
+        msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
+        msg.set_meta(wafer_run::META_REQ_RESOURCE, "/health");
+        let response = wafer_block::http_codec::collect_http_response(
+            rt.wafer
+                .run_block("impresspress/system", msg, wafer_run::InputStream::empty())
+                .await,
+        )
+        .await;
+        let retry_after = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+            .map(|(_, value)| value.clone());
+        let body = serde_json::from_slice(&response.body).expect("a JSON body");
+        (response.status, retry_after, body)
+    }
+
+    /// **`/health` reports each state the retry window moves an isolate
+    /// through** (plan §6 I6), from the served runtime's slots and the
+    /// isolate's state as `crate::init_isolate` registers them: degraded with
+    /// the retrying block, which carries its run across rebuilds (I2g); stale
+    /// when a rebuild fails transiently; failed when one fails permanently;
+    /// ok once a healthy runtime is published. Every 503 carries the window's
+    /// `Retry-After`.
+    #[wasm_bindgen_test]
+    async fn health_reports_each_state_of_the_retry_window() {
+        reset_isolate();
+        crate::init_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+
+        // A degraded publish: `test/resets` retries on the reset.
+        io.dynamic.set(Ends::Degraded);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("published");
+        let armed = window().expect("armed");
+        let (status, retry_after, body) = health_of(&rt).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["status"], "degraded", "{body}");
+        assert_eq!(body["rebuilds"], 1, "{body}");
+        assert_eq!(
+            retry_after.as_deref(),
+            Some(body["retry_in"].to_string().as_str()),
+            "Retry-After is the report's retry_in"
+        );
+        let entry = &body["unavailable"][0];
+        assert_eq!(entry["block"], "test/resets", "{body}");
+        assert_eq!(entry["class"], "retrying", "{body}");
+        assert_eq!(entry["runtimes"], 1, "{body}");
+        let since = entry["since"].clone();
+        assert!(since.is_string(), "{body}");
+        assert_eq!(body["unavailable"].as_array().map(Vec::len), Some(1));
+        assert!(!body.to_string().contains("CPU"), "no D1 text: {body}");
+
+        // After the window, rebuilt degraded the same way: the same run, one
+        // runtime longer; the episode keeps its start.
+        timer.now.set(armed.retry_at_ms);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("rebuilt");
+        assert_eq!(io.builds.get(), 2);
+        let (status, _, body) = health_of(&rt).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["unavailable"][0]["runtimes"], 2, "{body}");
+        assert_eq!(body["unavailable"][0]["since"], since, "{body}");
+        assert_eq!(body["rebuilds"], 2, "{body}");
+
+        // A transient rebuild failure keeps it serving, stale.
+        timer.now.set(window().expect("armed").retry_at_ms);
+        io.dynamic.set(Ends::Unavailable);
+        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("kept");
+        assert_eq!(outcome, CacheOutcome::Stale);
+        let (status, retry_after, body) = health_of(&rt).await;
+        assert_eq!(status, 503);
+        assert!(retry_after.is_some());
+        assert_eq!(body["status"], "stale", "{body}");
+        assert_eq!(body["unavailable"][0]["block"], "test/resets", "{body}");
+        assert_ne!(body["since"], serde_json::Value::Null, "{body}");
+
+        // A permanent one answers its own request 500; the runtime serves on
+        // and reports `failed`.
+        timer.now.set(window().expect("armed").retry_at_ms);
+        io.dynamic.set(Ends::Fault);
+        get_or_build_with(&io, &timer)
+            .await
+            .expect_err("the failed rebuild's request");
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("served inside");
+        let (status, retry_after, body) = health_of(&rt).await;
+        assert_eq!(status, 503);
+        assert!(retry_after.is_some());
+        assert_eq!(body["status"], "failed", "{body}");
+
+        // A healthy publish: 200, nothing else.
+        timer.now.set(window().expect("armed").retry_at_ms);
+        io.dynamic.set(Ends::Healthy);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("healthy");
+        let (status, retry_after, body) = health_of(&rt).await;
+        assert_eq!((status, retry_after), (200, None), "{body}");
+        assert_eq!(body, serde_json::json!({"status": "ok"}));
         reset_isolate();
     }
 }
