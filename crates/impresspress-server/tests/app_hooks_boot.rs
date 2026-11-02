@@ -54,7 +54,7 @@ async fn the_consumers_hooks_and_listener_flow_serve_requests() {
     let port = free_port();
     let infra = InfraConfig {
         listen: format!("127.0.0.1:{port}"),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: tmp
             .path()
             .join("hooks.sqlite3")
@@ -67,7 +67,7 @@ async fn the_consumers_hooks_and_listener_flow_serve_requests() {
         model_cache_dir: "data/models".to_string(),
         listener: ListenerEnv::default(),
     };
-    let database = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
 

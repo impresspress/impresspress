@@ -177,8 +177,8 @@ crate::impresspress_feature_block! {
             // database service; without this entry caller_requires denies
             // every db::* call and the admin list silently renders empty.
             "wafer-run/database".into(),
-            // `migration_helper::db_backend` reads the database backend through
-            // the config client when the block's migrations run at Init.
+            // The admin pages' shell (`ui::shell_page`) reads the site's
+            // branding through the config client.
             "wafer-run/config".into(),
         ])
         // Soft dependencies: on the call allowlist, not checked at seal, and a

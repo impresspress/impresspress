@@ -5,9 +5,9 @@
 //! an in-memory `SQLiteDatabaseService`. This exercises the same message
 //! contract (`exec_raw` / `query_raw`) the block uses at runtime.
 //!
-//! `config::get_default(ctx, "WAFER_RUN_SHARED__DATABASE__BACKEND", "sqlite")`
-//! falls back to `"sqlite"` because the fixture's config block holds no key —
-//! the unset default keeps the test self-contained.
+//! The migrations pick the SQLite list because the fixture names its
+//! database's dialect as every runtime does: `IMPRESSPRESS_DB_TYPE=sqlite`
+//! on the config snapshot (`TestContext`'s default).
 
 use impresspress_core::blocks::auth::migrations;
 use wafer_core::clients::database as db;

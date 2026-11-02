@@ -37,7 +37,7 @@ const NATIVE_GRANTS: GrantSource<'static> = GrantSource::PreInstalled(
 fn infra_for(db_path: &Path, storage_root: &Path) -> InfraConfig {
     InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: db_path
             .to_str()
             .expect("db path is valid utf-8")
@@ -73,7 +73,7 @@ async fn build_runtime_with_env(
     app_env: &HashMap<String, String>,
 ) -> (Wafer, Arc<dyn DatabaseService>) {
     let infra = infra_for(db_path, storage_root);
-    let database = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
 
@@ -348,7 +348,7 @@ async fn a_failed_shared_variable_seed_fails_a_reported_boot() {
     std::fs::create_dir_all(&storage_root).expect("create storage root");
 
     let infra = infra_for(&db_path, &storage_root);
-    let sqlite = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let sqlite = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
     let database: Arc<dyn DatabaseService> = Arc::new(RefusesOneSeedWrite { inner: sqlite });
@@ -426,27 +426,29 @@ async fn a_prepared_plans_grants_reach_the_sealed_runtime() {
     // Hydrate a real runtime from it, then boot it the way the prepared
     // Cloudflare path does.
     let infra = infra_for(&db_path, &storage_root);
-    let database = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
     let storage = impresspress_native::make_storage_service("local", &infra.storage_root)
         .await
         .expect("construct local storage service");
 
-    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new().install(
-        impresspress_core::builder::ImpresspressBuilder::new()
-            .database(database)
-            .storage(storage),
-        |map| {
-            (
-                impresspress_core::builder::fill_config_service(
-                    Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-                    map,
-                ),
-                (),
-            )
-        },
-    );
+    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new()
+        .install(
+            impresspress_core::builder::ImpresspressBuilder::new()
+                .database(database, wafer_sql_utils::Backend::Sqlite)
+                .storage(storage),
+            |map| {
+                (
+                    impresspress_core::builder::fill_config_service(
+                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                        map,
+                    ),
+                    (),
+                )
+            },
+        )
+        .expect("install the config surfaces");
     let builder = builder
         .crypto(
             impresspress_native::make_jwt_crypto_service(
@@ -492,26 +494,28 @@ async fn a_malformed_deployment_grant_fails_the_build() {
     std::fs::create_dir_all(&storage_root).expect("create storage root");
 
     let infra = infra_for(&db_path, &storage_root);
-    let database = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
     let storage = impresspress_native::make_storage_service("local", &infra.storage_root)
         .await
         .expect("construct local storage service");
-    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new().install(
-        impresspress_core::builder::ImpresspressBuilder::new()
-            .database(database)
-            .storage(storage),
-        |map| {
-            (
-                impresspress_core::builder::fill_config_service(
-                    Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-                    map,
-                ),
-                (),
-            )
-        },
-    );
+    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new()
+        .install(
+            impresspress_core::builder::ImpresspressBuilder::new()
+                .database(database, wafer_sql_utils::Backend::Sqlite)
+                .storage(storage),
+            |map| {
+                (
+                    impresspress_core::builder::fill_config_service(
+                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                        map,
+                    ),
+                    (),
+                )
+            },
+        )
+        .expect("install the config surfaces");
     let builder = builder
         .crypto(
             impresspress_native::make_jwt_crypto_service(

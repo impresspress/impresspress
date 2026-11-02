@@ -1,6 +1,5 @@
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
-use wafer_sql_utils::Backend;
 
 use super::contracts;
 use crate::{
@@ -103,7 +102,7 @@ pub(in crate::blocks::admin) async fn introspect_columns(
 
 /// `GET /b/admin/api/database/info`.
 pub(super) async fn handle_info(ctx: &dyn Context) -> OutputStream {
-    let backend = match crate::db_backend(ctx).await {
+    let backend = match crate::db_backend(ctx) {
         Ok(backend) => backend,
         Err(e) => return crud::db_error_internal(e, "Could not read the database backend"),
     };
@@ -113,19 +112,10 @@ pub(super) async fn handle_info(ctx: &dyn Context) -> OutputStream {
     };
 
     ok_json(&serde_json::json!({
-        "type": backend_name(backend),
+        "type": crate::migration_helper::backend_name(backend),
         "tables": table_names,
         "table_count": table_names.len()
     }))
-}
-
-/// Lowercase dialect name for the JSON `type` field, matching the
-/// `WAFER_RUN_SHARED__DATABASE__BACKEND` config var values.
-fn backend_name(backend: Backend) -> &'static str {
-    match backend {
-        Backend::Sqlite => "sqlite",
-        Backend::Postgres => "postgres",
-    }
 }
 
 /// `GET /b/admin/api/database/tables`.

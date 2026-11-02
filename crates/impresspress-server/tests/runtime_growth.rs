@@ -90,7 +90,7 @@ async fn build_boot_drop(dir: &std::path::Path) {
     std::fs::create_dir_all(&storage_root).expect("create storage root");
     let infra = InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: dir
             .join("growth.sqlite3")
             .to_str()
@@ -102,7 +102,7 @@ async fn build_boot_drop(dir: &std::path::Path) {
         model_cache_dir: "data/models".to_string(),
         listener: ListenerEnv::default(),
     };
-    let database = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
     let mut wafer = build_native_runtime(

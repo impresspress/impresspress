@@ -82,28 +82,33 @@ async fn builder(dir: &std::path::Path) -> ImpresspressBuilder {
     let db_path = dir.join("vector_services.sqlite3");
     let storage_root = dir.join("storage");
     std::fs::create_dir_all(&storage_root).expect("create storage root");
-    let database =
-        impresspress_native::make_database_service("sqlite", db_path.to_str().unwrap(), None)
-            .await
-            .expect("construct sqlite database service");
+    let database = impresspress_native::make_database_service(
+        wafer_sql_utils::Backend::Sqlite,
+        db_path.to_str().unwrap(),
+        None,
+    )
+    .await
+    .expect("construct sqlite database service");
     let storage =
         impresspress_native::make_storage_service("local", storage_root.to_str().unwrap())
             .await
             .expect("construct local storage service");
-    let (builder, ()) = RuntimeConfig::new().install(
-        ImpresspressBuilder::new()
-            .database(database)
-            .storage(storage),
-        |map| {
-            (
-                fill_config_service(
-                    Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-                    map,
-                ),
-                (),
-            )
-        },
-    );
+    let (builder, ()) = RuntimeConfig::new()
+        .install(
+            ImpresspressBuilder::new()
+                .database(database, wafer_sql_utils::Backend::Sqlite)
+                .storage(storage),
+            |map| {
+                (
+                    fill_config_service(
+                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                        map,
+                    ),
+                    (),
+                )
+            },
+        )
+        .expect("install the config surfaces");
     builder
         .crypto(
             impresspress_native::make_jwt_crypto_service(

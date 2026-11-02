@@ -19,6 +19,36 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### The SQL dialect is `IMPRESSPRESS_DB_TYPE`, set by the runtime; a stored `WAFER_RUN_SHARED__DATABASE__BACKEND` row is no longer read
+
+**What changes.** The dialect every block migrates in (and the admin
+Database page reports) was the shared config key
+`WAFER_RUN_SHARED__DATABASE__BACKEND`. Native set it from
+`IMPRESSPRESS_DB_TYPE`; Cloudflare and the browser read it from the
+`variables` table and fell back to `sqlite`. It is now the infrastructure key
+`IMPRESSPRESS_DB_TYPE` on every target, published by the runtime from the
+database it was built with (`ImpresspressBuilder::database(svc, backend)`):
+D1 and sql.js are `sqlite`, native is what `IMPRESSPRESS_DB_TYPE` names.
+
+- A `WAFER_RUN_SHARED__DATABASE__BACKEND` row is no longer read. Nothing
+  needs to be done with one; it is an inert, undeclared row (a seed bundle may
+  still carry it). The admin write path refuses `IMPRESSPRESS_DB_TYPE`, and a
+  consumer's request config cannot carry it — or any other runtime-owned key
+  (`IMPRESSPRESS_*` without `__`, or `__…__`).
+- Native: `IMPRESSPRESS_DB_TYPE` accepts exactly `sqlite` (the default when
+  unset) or `postgres`; any other value, a differently cased one included,
+  fails the start naming the variable. One place used to read every other
+  value as SQLite (the migration lock).
+- **For embedders:** `ImpresspressBuilder::database` takes the dialect as a
+  second argument, and is called **before** `RuntimeConfig::install`, which
+  now returns a `Result` and refuses a builder without a database. A runtime
+  without a dialect fails every migrating `Init` permanently.
+
+**Why.** The dialect chooses which `.sql` files create the `variables` table,
+so it cannot be table config; and admin's `Init` reading it from that table
+made every failed `variables` read look like a transient admin failure,
+hiding a real fault (D1 outage plan, IP-B0).
+
 ### Seeds and the bootstrap admin run on deploys and boots, not on every cold isolate; a failed seed fails the deploy
 
 **What changes.** Four `Init` steps that depend on config now run only on a

@@ -200,8 +200,9 @@ crate::impresspress_feature_block! {
         .instance_mode(InstanceMode::Singleton)
         .requires(vec![
             "wafer-run/database".into(),
-            // `migration_helper::db_backend` reads the database backend through
-            // the config client when the block's migrations run at Init.
+            // The rate limit (`check_rate_limit` → `RateLimit::resolve`)
+            // reads `WAFER_RUN_SHARED__RATE_LIMIT_SIGNAL` through the config
+            // client on every request.
             "wafer-run/config".into(),
         ])
         // No `grants(..)`: the block reads and writes only its own table

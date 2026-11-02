@@ -524,6 +524,17 @@ fn extend_with_request_config(
         if environment_owns_config_key(key) {
             continue;
         }
+        // Nor may a request carry a runtime-owned key (`IMPRESSPRESS_*`
+        // without `__`, or `__…__`): those are facts the runtime sets about
+        // itself — the database dialect, whether this build migrates — and
+        // a consumer's value would be a second one beside the runtime's, on
+        // the async surface the config block answers them from and in the
+        // overlay. The prepare-plan flag, the one runtime-named key a request
+        // legitimately sends, is read from the request config directly by
+        // the deploy funnel, not through here.
+        if crate::config_vars::is_runtime_owned_key(key) {
+            continue;
+        }
         config.insert(key.clone(), value.clone());
         overlay.insert(key.clone(), value.clone());
     }
@@ -638,6 +649,90 @@ pub fn request_config_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A consumer's request config carrying runtime-owned keys — the
+    /// database dialect, the migration switch, an internal `__…__` marker —
+    /// as a forwarding consumer could send them.
+    fn hostile_request_config() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                crate::migration_helper::DATABASE_TYPE_KEY.to_string(),
+                "postgres".to_string(),
+            ),
+            (
+                crate::migration_helper::RUN_MIGRATIONS_KEY.to_string(),
+                "1".to_string(),
+            ),
+            (
+                "__IMPRESSPRESS_RUNTIME_KIND__".to_string(),
+                "native".to_string(),
+            ),
+            ("APP_SECRET".to_string(), "kept".to_string()),
+        ])
+    }
+
+    /// The cold fill takes no runtime-owned key from a request, onto either
+    /// surface or into the overlay; consumer config still passes.
+    #[test]
+    fn the_cold_fill_takes_no_runtime_owned_key_from_a_request() {
+        let mut config = RuntimeConfig::new();
+        let mut overlay = HashMap::new();
+        add_request_config(&mut config, &mut overlay, &hostile_request_config());
+
+        for key in hostile_request_config()
+            .keys()
+            .filter(|k| *k != "APP_SECRET")
+        {
+            assert_eq!(
+                config.service_get(key),
+                None,
+                "{key} on the service surface"
+            );
+            assert!(!config.snapshot_contains(key), "{key} on the snapshot");
+            assert!(!overlay.contains_key(key), "{key} in the overlay");
+        }
+        assert_eq!(config.service_get("APP_SECRET"), Some("kept"));
+        assert_eq!(overlay.get("APP_SECRET").map(String::as_str), Some("kept"));
+    }
+
+    /// The warm fill keeps the cached runtime's structural values for
+    /// runtime-owned keys — a request cannot replace them on the warm
+    /// request's map, nor add them to its overlay.
+    #[test]
+    fn the_warm_fill_keeps_the_runtimes_own_keys() {
+        let structural = HashMap::from([
+            (
+                crate::migration_helper::DATABASE_TYPE_KEY.to_string(),
+                "sqlite".to_string(),
+            ),
+            (
+                crate::migration_helper::RUN_MIGRATIONS_KEY.to_string(),
+                "0".to_string(),
+            ),
+        ]);
+        let (map, overlay) =
+            warm_config_surfaces(&HashMap::new(), &structural, &hostile_request_config());
+
+        assert_eq!(
+            map.get(crate::migration_helper::DATABASE_TYPE_KEY)
+                .map(String::as_str),
+            Some("sqlite")
+        );
+        assert_eq!(
+            map.get(crate::migration_helper::RUN_MIGRATIONS_KEY)
+                .map(String::as_str),
+            Some("0")
+        );
+        assert!(!map.contains_key("__IMPRESSPRESS_RUNTIME_KIND__"));
+        for key in hostile_request_config()
+            .keys()
+            .filter(|k| *k != "APP_SECRET")
+        {
+            assert!(!overlay.contains_key(key), "{key} in the overlay");
+        }
+        assert_eq!(map.get("APP_SECRET").map(String::as_str), Some("kept"));
+        assert_eq!(overlay.get("APP_SECRET").map(String::as_str), Some("kept"));
+    }
 
     /// `/_deploy/prepare`'s closing grants read failing fails the prepare:
     /// sealing a plan over it would ship no admin-created grants to every
