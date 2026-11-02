@@ -458,7 +458,7 @@ fn render_sql_error(msg: &str) -> Markup {
 }
 
 pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let backend = match crate::db_backend(ctx).await {
+    let backend = match crate::db_backend(ctx) {
         Ok(backend) => backend,
         Err(e) => {
             return super::admin_error_page(

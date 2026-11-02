@@ -236,8 +236,8 @@ crate::impresspress_feature_block! {
         .instance_mode(InstanceMode::Singleton)
         .requires(vec![
             "wafer-run/database".into(),
-            // `migration_helper::db_backend` reads the database backend through
-            // the config client when the block's migrations run at Init.
+            // The admin pages' shell (`ui::shell_page`) reads the site's
+            // branding through the config client.
             "wafer-run/config".into(),
         ])
         // No `grants(..)`. The two `ResourceGrant::read("impresspress/llm", ..)`

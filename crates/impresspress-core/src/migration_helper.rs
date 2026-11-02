@@ -204,7 +204,7 @@
 use std::sync::Arc;
 
 use wafer_core::{
-    clients::{config, database as db},
+    clients::database as db,
     interfaces::database::service::{
         DatabaseError, DatabaseService, RawStatement, TransactionError,
     },
@@ -344,59 +344,90 @@ impl BlockMigrations {
     }
 }
 
-/// Shared config var that selects the SQL dialect. `"postgres"`
-/// (case-insensitive) picks the PostgreSQL dialect; anything else (including
-/// the unset default) picks SQLite. Read by both the migration dispatcher
-/// ([`apply_migrations`]) and the runtime query-builder helper
-/// ([`db_backend`]) so a deployment's migrations and its live queries always
-/// render against the same dialect.
-pub const DATABASE_BACKEND_KEY: &str = "WAFER_RUN_SHARED__DATABASE__BACKEND";
+/// Config key naming the SQL dialect of the runtime's database: exactly
+/// `"sqlite"` or `"postgres"` ([`parse_backend`]).
+///
+/// An infrastructure key ([`crate::config_vars::is_infrastructure_key`]), not
+/// table config: the dialect chooses which `.sql` files create the variables
+/// table, so it has to be known before that table can exist, and every target
+/// knows it from the database service it built. It has the name native's
+/// process environment already uses for the same fact, so the env var, both
+/// config surfaces and this reader agree with no translation between them.
+///
+/// Nothing writes it by hand: [`crate::builder::RuntimeConfig::install`]
+/// publishes it on both config surfaces from the `Backend` the builder was
+/// given with its database ([`crate::builder::ImpresspressBuilder::database`]).
+/// Being runtime-owned, the config block answers it only from the boot map,
+/// the admin write path refuses it and request config cannot carry it.
+pub const DATABASE_TYPE_KEY: &str = "IMPRESSPRESS_DB_TYPE";
 
-/// Resolve the active SQL [`Backend`] from the config snapshot.
-///
-/// Reads [`DATABASE_BACKEND_KEY`] (the same var [`apply_migrations`] uses to
-/// pick which `.sql` dialect files to run) and maps `"postgres"`
-/// (case-insensitive) to [`Backend::Postgres`], everything else to
-/// [`Backend::Sqlite`].
-///
-/// This is the single runtime source of truth for the query-builder dialect:
-/// every `wafer_sql_utils::{query,aggregate,introspect,upsert}` call site in
-/// a block passes the result of this helper rather than a hardcoded
-/// `Backend::Sqlite`, so a postgres deployment renders postgres-dialect SQL
-/// at runtime, matching the migrations it applied at boot.
-///
-/// Cheap to call per request: `config::get_default` answers from the runtime's
-/// variables snapshot (a memoized read, `Unavailable` while the table cannot
-/// be read) or the boot map, so call sites read it inline rather than
-/// threading a cached `Backend` through every signature.
-///
-/// A failed read is returned: rendering the other dialect's SQL against the
-/// database would fail anyway, further from the cause.
-pub async fn db_backend(ctx: &dyn Context) -> Result<Backend, WaferError> {
-    let backend = config::get_default(ctx, DATABASE_BACKEND_KEY, "sqlite").await?;
-    Ok(backend_named(&backend))
-}
-
-/// The [`Backend`] a dialect name selects: `"postgres"` (case-insensitive)
-/// is [`Backend::Postgres`], anything else [`Backend::Sqlite`] — the rule
-/// [`db_backend`] applies to [`DATABASE_BACKEND_KEY`], for a caller that holds
-/// the name itself (the native server's `IMPRESSPRESS_DB_TYPE`).
-pub fn backend_named(name: &str) -> Backend {
-    if name.eq_ignore_ascii_case("postgres") {
-        Backend::Postgres
-    } else {
-        Backend::Sqlite
+/// The dialect a [`DATABASE_TYPE_KEY`] value names: exactly `"sqlite"` or
+/// `"postgres"`. Any other value, a differently cased one included, is an
+/// error rather than a guess — rendering the other dialect's SQL would fail
+/// further from the cause, or not at all until it corrupted something.
+pub fn parse_backend(name: &str) -> Result<Backend, UnknownBackend> {
+    match name {
+        "sqlite" => Ok(Backend::Sqlite),
+        "postgres" => Ok(Backend::Postgres),
+        other => Err(UnknownBackend(other.to_string())),
     }
 }
 
-/// Pick the block's migration list and history for the active SQL dialect
-/// (`WAFER_RUN_SHARED__DATABASE__BACKEND`, read through [`db_backend`]) and
-/// forward them to [`apply_pending`].
+/// The [`DATABASE_TYPE_KEY`] value for `backend`; [`parse_backend`]'s inverse.
+pub fn backend_name(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Sqlite => "sqlite",
+        Backend::Postgres => "postgres",
+    }
+}
+
+/// A [`DATABASE_TYPE_KEY`] value that names no supported dialect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownBackend(pub String);
+
+impl std::fmt::Display for UnknownBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unsupported {DATABASE_TYPE_KEY} `{}` (expected `sqlite` or `postgres`)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnknownBackend {}
+
+/// The SQL [`Backend`] of this runtime's database, from [`DATABASE_TYPE_KEY`]
+/// on the synchronous config snapshot — the way [`is_provisioning_build`]
+/// reads [`RUN_MIGRATIONS_KEY`]. No dispatch and no database read, so it
+/// cannot fail with the database.
+///
+/// Read by the migration dispatcher ([`apply_migrations`]) and by the admin
+/// database API and page; live queries render through the database service,
+/// which knows its own dialect.
+///
+/// Absent, or a value [`parse_backend`] refuses, is `FailedPrecondition`: a
+/// runtime that does not name its dialect is misbuilt, which no retry cures,
+/// so a block `Init` that meets it fails permanently. Never a default.
+pub fn db_backend(ctx: &dyn Context) -> Result<Backend, WaferError> {
+    let Some(name) = ctx.config_get(DATABASE_TYPE_KEY) else {
+        return Err(WaferError::new(
+            ErrorCode::FailedPrecondition,
+            format!(
+                "this runtime does not name its database dialect ({DATABASE_TYPE_KEY} is not set)"
+            ),
+        ));
+    };
+    parse_backend(name).map_err(|e| WaferError::new(ErrorCode::FailedPrecondition, e.to_string()))
+}
+
+/// Pick the block's migration list and history for the runtime's SQL
+/// dialect ([`db_backend`]) and forward them to [`apply_pending`].
 pub async fn apply_migrations(
     ctx: &dyn Context,
     migrations: &BlockMigrations,
 ) -> Result<MigrationOutcome, MigrationError> {
-    let backend = db_backend(ctx).await.map_err(|e| {
+    let backend = db_backend(ctx).map_err(|e| {
         MigrationError::step(
             migrations.block,
             "read the database backend",
@@ -470,7 +501,7 @@ pub async fn apply_pending(
         return Ok(MigrationOutcome::Deferred);
     }
 
-    let backend = db_backend(ctx).await.map_err(|e| {
+    let backend = db_backend(ctx).map_err(|e| {
         MigrationError::step(block_name, "read the database backend", StepError::from(e))
     })?;
     let outcome = Ledger {
@@ -1689,6 +1720,58 @@ INSERT INTO fixture_t (id, name) VALUES ('1', 'x');
             content_hash(CONTENT_HASH_FIXTURE),
             "ee9565f9535941c3d254ac6e6e29cad3f18228ffce28541ad417e5c74ea2e203"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The runtime's dialect (`db_backend`)
+    // -----------------------------------------------------------------------
+
+    /// A runtime that does not name its dialect is misbuilt: `db_backend`
+    /// refuses with `FailedPrecondition`, which a block `Init` meeting it
+    /// turns into a **permanent** failure — never a `sqlite` default.
+    #[tokio::test]
+    async fn a_runtime_without_a_dialect_fails_permanently() {
+        let mut ctx = crate::test_support::TestContext::new().await;
+        ctx.unset_config(DATABASE_TYPE_KEY);
+        let error = db_backend(&ctx).expect_err("no dialect is not sqlite");
+        assert_eq!(error.code, ErrorCode::FailedPrecondition, "{error}");
+        assert!(error.message.contains(DATABASE_TYPE_KEY), "{error}");
+        assert!(matches!(
+            wafer_run::InitError::from_lifecycle_error(&error),
+            wafer_run::InitError::Permanent(_)
+        ));
+    }
+
+    /// Exactly the two names select their dialects; anything else, a
+    /// differently cased name included, is refused the same way as an absent
+    /// key — never read as SQLite.
+    #[tokio::test]
+    async fn the_dialect_is_exactly_sqlite_or_postgres() {
+        let mut ctx = crate::test_support::TestContext::new().await;
+        assert_eq!(
+            db_backend(&ctx).unwrap(),
+            Backend::Sqlite,
+            "the fixture's default"
+        );
+        ctx.set_config(DATABASE_TYPE_KEY, "postgres");
+        assert_eq!(db_backend(&ctx).unwrap(), Backend::Postgres);
+        for bad in ["Postgres", "SQLITE", "mysql", ""] {
+            ctx.set_config(DATABASE_TYPE_KEY, bad);
+            let error = db_backend(&ctx).expect_err(bad);
+            assert_eq!(error.code, ErrorCode::FailedPrecondition, "{bad}: {error}");
+        }
+        for backend in [Backend::Sqlite, Backend::Postgres] {
+            assert_eq!(parse_backend(backend_name(backend)), Ok(backend));
+        }
+    }
+
+    /// The key is runtime-owned, so the admin write path refuses it and the
+    /// config block answers it only from the boot map: no stored row can
+    /// choose a dialect.
+    #[test]
+    fn the_dialect_key_is_runtime_owned() {
+        assert!(crate::config_vars::is_runtime_owned_key(DATABASE_TYPE_KEY));
+        assert!(crate::config_vars::is_instance_owned_key(DATABASE_TYPE_KEY));
     }
 
     // -----------------------------------------------------------------------

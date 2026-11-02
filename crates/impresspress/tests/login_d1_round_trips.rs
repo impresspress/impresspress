@@ -46,7 +46,7 @@ const ADMIN_PASSWORD: &str = "correct-horse-battery-staple";
 fn infra_for(db_path: &Path, storage_root: &Path) -> InfraConfig {
     InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: db_path
             .to_str()
             .expect("db path is valid utf-8")

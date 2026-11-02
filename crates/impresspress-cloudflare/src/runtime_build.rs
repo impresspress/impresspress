@@ -25,7 +25,8 @@ use impresspress_core::{
     config_source::{RetryMode, VariablesSnapshot},
 };
 use wafer_core::interfaces::{
-    database::service::DatabaseService, storage::service::StorageService,
+    config::service::ConfigService, database::service::DatabaseService,
+    storage::service::StorageService,
 };
 
 use crate::{
@@ -244,10 +245,7 @@ where
     // Cloudflare, so it is in the types rather than in an `Option` captured by
     // the closure and unwrapped with an `expect` for a panic that could not
     // happen.
-    let (config_installed, cfg_svc) = runtime_config.install(ImpresspressBuilder::new(), |map| {
-        let concrete = make_config_service(map);
-        (request_services::config_proxy(), concrete)
-    });
+    let (config_installed, cfg_svc) = install_config_surfaces(runtime_config)?;
 
     // 5. ConfigSource: see `request_config_source`. Over the runtime's
     //    variables snapshot, created here because the source is consulted
@@ -274,7 +272,6 @@ where
     // The cached runtime receives only stateless forwarding proxies. Builder
     // construction is synchronous but reads ConfigService immediately, so it
     // runs under the same request scope as async dispatch.
-    let database_proxy = request_services::database_proxy();
     let storage_proxy = request_services::storage_proxy();
     let crypto_proxy = request_services::crypto_proxy();
     let network_proxy = request_services::network_proxy();
@@ -287,7 +284,6 @@ where
         services.clone(),
         || -> Result<_, Box<dyn std::error::Error>> {
             let builder = config_installed
-                .database(database_proxy)
                 .storage(storage_proxy.clone())
                 .crypto(crypto_proxy)
                 .network(network_proxy)
@@ -458,11 +454,37 @@ fn request_crypto_service(
     ))
 }
 
+/// Hand both config surfaces to a new builder, the database first: the step
+/// of [`build_runtime`] that decides what reaches the concrete
+/// `ConfigService` a request reads through.
+///
+/// The database goes in first, with its dialect, because `install` publishes
+/// `IMPRESSPRESS_DB_TYPE` from it onto the map `make_config_service` turns
+/// into the concrete service, whose `set` is a no-op — so this is the only
+/// point at which the key can reach the async surface. D1 speaks SQLite. The
+/// proxy is stateless (it resolves the request's database per call), so
+/// creating it outside the request scope is harmless. The builder gets the
+/// stateless config forwarder; the concrete service comes back beside it.
+fn install_config_surfaces(
+    runtime_config: RuntimeConfig,
+) -> Result<(ImpresspressBuilder, Arc<dyn ConfigService>), wafer_run::RuntimeError> {
+    runtime_config.install(
+        ImpresspressBuilder::new().database(
+            request_services::database_proxy(),
+            wafer_sql_utils::Backend::Sqlite,
+        ),
+        |map| {
+            let concrete = make_config_service(map);
+            (request_services::config_proxy(), concrete)
+        },
+    )
+}
+
 /// Promote the one non-secret request value lifecycle code must read from the
 /// synchronous config snapshot while preparing an isolated deploy candidate.
-/// Runs after `add_request_config`, which has already put it on the async
-/// surface as a service-only key; `both` moves it onto the snapshot as well
-/// and retracts the recorded divergence.
+/// It is runtime-named, so `add_request_config` never copies it (request
+/// config cannot carry a runtime-owned key); this reads it from the request
+/// config itself and puts it on both surfaces.
 fn retain_prepare_runtime_plan_flag(
     config: &mut RuntimeConfig,
     request_config: &HashMap<String, String>,
@@ -629,6 +651,28 @@ mod tests {
         );
     }
 
+    /// The database dialect reaches the **async** surface on this target,
+    /// whose concrete `ConfigService` is built from `install`'s map and whose
+    /// `set` is a no-op. This runs `build_runtime`'s own install step
+    /// ([`install_config_surfaces`]), so giving the database after `install`
+    /// there fails it; and a consumer's request value for the key reaches
+    /// neither the map nor the overlay.
+    #[wasm_bindgen_test]
+    fn the_database_dialect_reaches_the_concrete_config_service() {
+        let key = impresspress_core::migration_helper::DATABASE_TYPE_KEY;
+        let mut config = RuntimeConfig::new();
+        let mut overlay = HashMap::new();
+        let request = HashMap::from([(key.to_string(), "postgres".to_string())]);
+        add_request_config(&mut config, &mut overlay, &request);
+        assert!(
+            !overlay.contains_key(key),
+            "a request cannot put the dialect in the overlay"
+        );
+
+        let (_builder, concrete) = install_config_surfaces(config).expect("installs");
+        assert_eq!(concrete.get(key).as_deref(), Some("sqlite"));
+    }
+
     /// A consumer request key that collides with a framework structural key
     /// must not DELETE that key from the snapshot.
     ///
@@ -757,7 +801,8 @@ mod tests {
         assert_eq!(
             declared,
             vec!["APP_SECRET"],
-            "promoting the prepare flag to both surfaces retracts its divergence",
+            "the prepare flag is on both surfaces and never service-only: request \
+             config cannot carry a runtime-owned key, and the funnel promotes it itself",
         );
     }
 

@@ -256,12 +256,19 @@ impl BrowserServices {
         // through it, or the keys above would reach the snapshot and be
         // dropped from the async surface, silently.
         let config_svc = self.config_svc.clone();
-        let (with_config, ()) = initial_config.install(
-            ImpresspressBuilder::new()
-                .database(crate::make_database_service())
-                .storage(crate::make_storage_service()),
-            |map| (builder::fill_config_service(config_svc, map), ()),
-        );
+        // sql.js speaks SQLite; `install` publishes that as
+        // `IMPRESSPRESS_DB_TYPE` on both surfaces.
+        let (with_config, ()) = initial_config
+            .install(
+                ImpresspressBuilder::new()
+                    .database(
+                        crate::make_database_service(),
+                        wafer_sql_utils::Backend::Sqlite,
+                    )
+                    .storage(crate::make_storage_service()),
+                |map| (builder::fill_config_service(config_svc, map), ()),
+            )
+            .map_err(|e| JsValue::from_str(&format!("install the config surfaces: {e}")))?;
 
         Ok(with_config
             .crypto(crypto_svc)

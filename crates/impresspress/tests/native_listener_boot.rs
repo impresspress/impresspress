@@ -15,7 +15,7 @@ use impresspress_server::{boot_native, build_native_runtime, AppHooks};
 fn infra_for(db_path: &Path, storage_root: &Path, listener: ListenerEnv) -> InfraConfig {
     InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: db_path
             .to_str()
             .expect("db path is valid utf-8")
@@ -37,7 +37,7 @@ async fn boot_with(listener: ListenerEnv) -> anyhow::Result<()> {
     let storage_root = tmp.path().join("storage");
     std::fs::create_dir_all(&storage_root).expect("create storage root");
     let infra = infra_for(&db_path, &storage_root, listener);
-    let database = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
     let mut wafer = build_native_runtime(

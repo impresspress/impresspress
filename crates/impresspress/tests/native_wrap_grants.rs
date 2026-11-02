@@ -23,7 +23,7 @@ async fn wrap_grants_are_read_through_the_database_service() {
 
     let infra = InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: stray_path
             .to_str()
             .expect("db path is valid utf-8")
@@ -39,7 +39,7 @@ async fn wrap_grants_are_read_through_the_database_service() {
     };
 
     let database = impresspress_native::make_database_service(
-        "sqlite",
+        wafer_sql_utils::Backend::Sqlite,
         real_db.to_str().expect("db path is valid utf-8"),
         None,
     )

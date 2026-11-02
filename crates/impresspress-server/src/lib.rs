@@ -101,7 +101,8 @@ pub async fn run(
     tracing::info!("impresspress starting (Rust/WAFER runtime)");
 
     // 3. Read infrastructure config from IMPRESSPRESS_* env vars
-    let mut infra = InfraConfig::from_env();
+    let mut infra =
+        InfraConfig::from_env().context("read the IMPRESSPRESS_* infrastructure config")?;
     if let Some(port) = port {
         infra
             .override_port(port)
@@ -109,7 +110,7 @@ pub async fn run(
     }
     tracing::info!(
         listen = %infra.listen,
-        db = %infra.db_type,
+        db = impresspress_core::migration_helper::backend_name(infra.db_type),
         db_path = %infra.db_path,
         storage = %infra.storage_type,
         "infrastructure config loaded"
@@ -132,7 +133,7 @@ pub async fn run(
     //    seed hook is a no-op. The same `Arc` is handed to the builder, so
     //    seeding and the runtime share one connection/pool.
     let database = impresspress_native::make_database_service(
-        &infra.db_type,
+        infra.db_type,
         &infra.db_path,
         infra.db_url.as_deref(),
     )
@@ -287,7 +288,7 @@ pub async fn build_native_runtime(
     // `Init` uses, so `Init` finds it applied — and no applied file runs
     // again.
     let admin_migrations = &impresspress_core::blocks::admin::migrations::MIGRATIONS;
-    let backend = impresspress_core::migration_helper::backend_named(&infra.db_type);
+    let backend = infra.db_type;
     let (files, history) = admin_migrations.for_backend(backend);
     impresspress_core::migration_helper::apply_pending_via_service(
         &database,
@@ -410,16 +411,7 @@ pub async fn build_native_runtime(
         // A native boot is a build that applies pending migrations, as a
         // Cloudflare deploy and a browser boot are: every block's `Init`
         // applies its own pending list (`migration_helper`).
-        .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1")
-        // The SQL dialect every block renders and migrates in, from the one
-        // place native knows it: `IMPRESSPRESS_DB_TYPE`, which also chose
-        // the database service above and admin's pre-build list. Like the
-        // process-environment marker, a fact about this target rather than
-        // a setting.
-        .both(
-            impresspress_core::migration_helper::DATABASE_BACKEND_KEY,
-            infra.db_type.as_str(),
-        );
+        .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1");
     if let Some(v) = request_log {
         runtime_config.both(impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY, v);
     }
@@ -459,13 +451,13 @@ pub async fn build_native_runtime(
 
     let (with_config, ()) = runtime_config.install(
         ImpresspressBuilder::new()
-            .database(database)
+            .database(database, infra.db_type)
             .storage(storage.clone()),
         |map| {
             let svc = wafer_core::service_blocks::config::EnvConfigService::new();
             (builder::fill_config_service(Arc::new(svc), map), ())
         },
-    );
+    )?;
 
     // The blocks' declared keys resolve from the variables table, then from the
     // process environment. The table wins where it holds a row: the env loop in

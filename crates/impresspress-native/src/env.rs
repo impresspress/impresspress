@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use wafer_sql_utils::Backend;
 
 /// Names an env file to load in place of `<dir>/.env`.
 const ENV_FILE_VAR: &str = "IMPRESSPRESS_ENV_FILE";
@@ -479,7 +480,10 @@ impl ListenerEnv {
 /// shown only as [`crate::database::postgres_target`] describes it.
 pub struct InfraConfig {
     pub listen: String,
-    pub db_type: String,
+    /// The SQL dialect `IMPRESSPRESS_DB_TYPE` names, parsed once here: the
+    /// database service, the migration lock and the runtime's
+    /// `IMPRESSPRESS_DB_TYPE` config key all take this value, never the text.
+    pub db_type: Backend,
     pub db_path: String,
     pub db_url: Option<String>,
     pub storage_type: String,
@@ -493,17 +497,19 @@ pub struct InfraConfig {
 }
 
 impl InfraConfig {
-    pub fn from_env() -> Self {
-        Self {
+    /// Read the infrastructure config from the process environment. Fails
+    /// when `IMPRESSPRESS_DB_TYPE` names no supported dialect.
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
             listen: env_or(LISTEN_VAR, "0.0.0.0:8090"),
-            db_type: env_or(DB_TYPE_VAR, "sqlite"),
+            db_type: db_type_from(std::env::var(DB_TYPE_VAR).ok().as_deref())?,
             db_path: env_or(DB_PATH_VAR, "data/impresspress.db"),
             db_url: std::env::var(DB_URL_VAR).ok(),
             storage_type: env_or(STORAGE_TYPE_VAR, "local"),
             storage_root: env_or(STORAGE_ROOT_VAR, "data/storage"),
             model_cache_dir: env_or(MODEL_CACHE_DIR_VAR, "data/models"),
             listener: ListenerEnv::from_vars(|key| std::env::var(key).ok()),
-        }
+        })
     }
 
     /// Serve on `port` instead of the port `IMPRESSPRESS_LISTEN` (or its
@@ -512,6 +518,25 @@ impl InfraConfig {
     pub fn override_port(&mut self, port: u16) -> Result<()> {
         self.listen = listen_with_port(&self.listen, port)?;
         Ok(())
+    }
+}
+
+/// The dialect an `IMPRESSPRESS_DB_TYPE` value names: exactly `sqlite` or
+/// `postgres`; any other value, a differently cased one included, fails the
+/// env load. Unset is SQLite — native's documented default for its own env
+/// var. (The runtime config key of the same name has no default: every
+/// runtime is given its dialect with its database, and a runtime without one
+/// is misbuilt — `impresspress_core::migration_helper::db_backend`.)
+///
+/// Parsed here, once, and handed on as the enum: the database factory, the
+/// migration lock and the runtime's config key all take the `Backend`.
+fn db_type_from(value: Option<&str>) -> Result<Backend> {
+    match value {
+        None | Some("sqlite") => Ok(Backend::Sqlite),
+        Some("postgres") => Ok(Backend::Postgres),
+        Some(other) => Err(anyhow!(
+            "unsupported {DB_TYPE_VAR} `{other}` (expected `sqlite` or `postgres`)"
+        )),
     }
 }
 
@@ -548,11 +573,34 @@ impl std::fmt::Debug for InfraConfig {
 mod infra_config_tests {
     use super::InfraConfig;
 
+    /// `IMPRESSPRESS_DB_TYPE` is parsed once, strictly: unset is SQLite, the
+    /// two names are their dialects, anything else — a differently cased
+    /// name included — fails the env load naming the variable, instead of
+    /// one reader taking it for SQLite while another refuses it.
+    #[test]
+    fn the_db_type_is_parsed_once_and_strictly() {
+        use wafer_sql_utils::Backend;
+
+        assert_eq!(super::db_type_from(None).unwrap(), Backend::Sqlite);
+        assert_eq!(
+            super::db_type_from(Some("sqlite")).unwrap(),
+            Backend::Sqlite
+        );
+        assert_eq!(
+            super::db_type_from(Some("postgres")).unwrap(),
+            Backend::Postgres
+        );
+        for bad in ["mysql", "Postgres", "SQLITE", ""] {
+            let error = super::db_type_from(Some(bad)).expect_err(bad).to_string();
+            assert!(error.contains("IMPRESSPRESS_DB_TYPE"), "{bad}: {error}");
+        }
+    }
+
     #[test]
     fn debug_never_shows_the_db_password() {
         let infra = InfraConfig {
             listen: "0.0.0.0:8090".into(),
-            db_type: "postgres".into(),
+            db_type: wafer_sql_utils::Backend::Postgres,
             db_path: "data/impresspress.db".into(),
             db_url: Some("postgres://app:hunter2@db.internal:5432/prod".into()),
             storage_type: "local".into(),

@@ -68,9 +68,11 @@ impl MigrationLock {
     /// Wait until this process holds the lock on the migrations of the
     /// database `infra` names.
     pub async fn acquire(infra: &InfraConfig) -> Result<Self> {
-        match infra.db_type.as_str() {
-            "postgres" => acquire_postgres(infra.db_url.as_deref()).await,
-            _ => Self::acquire_file(sqlite_lock_path(&infra.db_path)).await,
+        match infra.db_type {
+            wafer_sql_utils::Backend::Postgres => acquire_postgres(infra.db_url.as_deref()).await,
+            wafer_sql_utils::Backend::Sqlite => {
+                Self::acquire_file(sqlite_lock_path(&infra.db_path)).await
+            }
         }
     }
 

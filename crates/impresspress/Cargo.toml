@@ -126,6 +126,9 @@ toml = "1"
 
 [dev-dependencies]
 tempfile = "3"
+# The SQL dialect the native-boot tests name (`InfraConfig::db_type`,
+# `ImpresspressBuilder::database`).
+wafer-sql-utils = { workspace = true }
 # `tests/native_sse_streams.rs`: the LLM backend it registers implements
 # `LlmService`, whose streams are `futures` `BoxStream`s and whose
 # cancellation is a `tokio-util` `CancellationToken`.

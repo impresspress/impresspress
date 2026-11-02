@@ -280,8 +280,7 @@ impl BootHooks for DeployBootHooks {
             &self.config,
             &self.block_settings_handle,
             block_settings,
-        );
-        Ok(())
+        )
     }
 }
 
@@ -369,8 +368,7 @@ impl BootHooks for RequestBootHooks {
             &self.config,
             &self.block_settings_handle,
             block_settings,
-        );
-        Ok(())
+        )
     }
 }
 
@@ -409,7 +407,7 @@ fn publish_block_settings(
     config: &Arc<dyn ConfigService>,
     handle: &Arc<RwLock<BlockSettings>>,
     block_settings: BlockSettings,
-) {
+) -> Result<(), String> {
     let published_json = block_settings.to_config_json();
     *handle
         .write()
@@ -417,7 +415,9 @@ fn publish_block_settings(
 
     let mut published = RuntimeConfig::new();
     published.both(crate::features::BLOCK_SETTINGS_CONFIG_KEY, published_json);
-    published.republish(wafer, config);
+    published
+        .republish(wafer, config)
+        .map_err(|e| format!("publish block_settings after admin init: {e}"))
 }
 
 /// The hosted target's bound secrets: Worker bindings (`wrangler secret put`)
@@ -524,6 +524,17 @@ fn extend_with_request_config(
         if environment_owns_config_key(key) {
             continue;
         }
+        // Nor may a request carry a runtime-owned key (`IMPRESSPRESS_*`
+        // without `__`, or `__…__`): those are facts the runtime sets about
+        // itself — the database dialect, whether this build migrates — and
+        // a consumer's value would be a second one beside the runtime's, on
+        // the async surface the config block answers them from and in the
+        // overlay. The prepare-plan flag, the one runtime-named key a request
+        // legitimately sends, is read from the request config directly by
+        // the deploy funnel, not through here.
+        if crate::config_vars::is_runtime_owned_key(key) {
+            continue;
+        }
         config.insert(key.clone(), value.clone());
         overlay.insert(key.clone(), value.clone());
     }
@@ -538,16 +549,20 @@ fn extend_with_request_config(
 /// divergence is stated where it is created rather than inferred from a
 /// missing line.
 ///
-/// A key the structural pass has already installed is skipped outright, and
-/// that rule is derived rather than listed: `service_only` REMOVES its key
-/// from the snapshot, so a collision does not shadow the structural value, it
-/// deletes it. The two name lists `extend_with_request_config` checks
-/// ([`PROTECTED_ENV_KEYS`], [`BUILDER_WORKER_VAR_KEYS`]) cover the
-/// environment-owned families but not the keys the structural pass installs
-/// itself — `IMPRESSPRESS_BLOCK_SETTINGS` and `IMPRESSPRESS_RUN_MIGRATIONS`.
-/// Asking the `RuntimeConfig` what it already holds covers all of them, and
-/// covers the next structural key without anyone remembering to add it to a
-/// list.
+/// Two rules keep a request from displacing what the runtime holds, both
+/// derived rather than listed:
+///
+/// - `extend_with_request_config` drops every **runtime-owned** key
+///   (`IMPRESSPRESS_*` without `__`, and `__…__`: the database dialect, the
+///   migration switch, the block-settings snapshot), and every
+///   environment-owned one ([`PROTECTED_ENV_KEYS`], [`BUILDER_WORKER_VAR_KEYS`]),
+///   whatever the snapshot holds.
+/// - A key the structural pass has already put on the snapshot is skipped
+///   here as well, whatever its name — a consumer-named structural key such as
+///   the CORS origins or the JWT secret. `service_only` REMOVES its key from
+///   the snapshot, so a collision would not shadow the structural value, it
+///   would delete it. Asking the `RuntimeConfig` what it already holds covers
+///   the next such key without anyone adding it to a list.
 pub fn add_request_config(
     config: &mut RuntimeConfig,
     overlay: &mut HashMap<String, String>,
@@ -579,9 +594,11 @@ pub fn add_request_config(
 /// [`BUILDER_WORKER_VAR_KEYS`]) bound at THIS request, at the value it sees.
 /// Those come from `bound` and from nowhere else; the cached runtime's
 /// structural snapshot contributes only the keys the environment does *not*
-/// own, which today is the table-derived `IMPRESSPRESS_BLOCK_SETTINGS`. A
-/// binding removed since the runtime was built is therefore absent by
-/// construction.
+/// own — the runtime's own: the table-derived block-settings snapshot and the
+/// database dialect `RuntimeConfig::install` published, which is how that key
+/// reaches a warm request's async map. A binding removed since the runtime
+/// was built is therefore absent by construction, and a request cannot
+/// replace a runtime-owned value (`extend_with_request_config`).
 ///
 /// There is no snapshot here: one request's values must never be baked into
 /// the cached runtime's, so this is a pair of maps rather than a
@@ -638,6 +655,90 @@ pub fn request_config_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A consumer's request config carrying runtime-owned keys — the
+    /// database dialect, the migration switch, an internal `__…__` marker —
+    /// as a forwarding consumer could send them.
+    fn hostile_request_config() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                crate::migration_helper::DATABASE_TYPE_KEY.to_string(),
+                "postgres".to_string(),
+            ),
+            (
+                crate::migration_helper::RUN_MIGRATIONS_KEY.to_string(),
+                "1".to_string(),
+            ),
+            (
+                "__IMPRESSPRESS_RUNTIME_KIND__".to_string(),
+                "native".to_string(),
+            ),
+            ("APP_SECRET".to_string(), "kept".to_string()),
+        ])
+    }
+
+    /// The cold fill takes no runtime-owned key from a request, onto either
+    /// surface or into the overlay; consumer config still passes.
+    #[test]
+    fn the_cold_fill_takes_no_runtime_owned_key_from_a_request() {
+        let mut config = RuntimeConfig::new();
+        let mut overlay = HashMap::new();
+        add_request_config(&mut config, &mut overlay, &hostile_request_config());
+
+        for key in hostile_request_config()
+            .keys()
+            .filter(|k| *k != "APP_SECRET")
+        {
+            assert_eq!(
+                config.service_get(key),
+                None,
+                "{key} on the service surface"
+            );
+            assert!(!config.snapshot_contains(key), "{key} on the snapshot");
+            assert!(!overlay.contains_key(key), "{key} in the overlay");
+        }
+        assert_eq!(config.service_get("APP_SECRET"), Some("kept"));
+        assert_eq!(overlay.get("APP_SECRET").map(String::as_str), Some("kept"));
+    }
+
+    /// The warm fill keeps the cached runtime's structural values for
+    /// runtime-owned keys — a request cannot replace them on the warm
+    /// request's map, nor add them to its overlay.
+    #[test]
+    fn the_warm_fill_keeps_the_runtimes_own_keys() {
+        let structural = HashMap::from([
+            (
+                crate::migration_helper::DATABASE_TYPE_KEY.to_string(),
+                "sqlite".to_string(),
+            ),
+            (
+                crate::migration_helper::RUN_MIGRATIONS_KEY.to_string(),
+                "0".to_string(),
+            ),
+        ]);
+        let (map, overlay) =
+            warm_config_surfaces(&HashMap::new(), &structural, &hostile_request_config());
+
+        assert_eq!(
+            map.get(crate::migration_helper::DATABASE_TYPE_KEY)
+                .map(String::as_str),
+            Some("sqlite")
+        );
+        assert_eq!(
+            map.get(crate::migration_helper::RUN_MIGRATIONS_KEY)
+                .map(String::as_str),
+            Some("0")
+        );
+        assert!(!map.contains_key("__IMPRESSPRESS_RUNTIME_KIND__"));
+        for key in hostile_request_config()
+            .keys()
+            .filter(|k| *k != "APP_SECRET")
+        {
+            assert!(!overlay.contains_key(key), "{key} in the overlay");
+        }
+        assert_eq!(map.get("APP_SECRET").map(String::as_str), Some("kept"));
+        assert_eq!(overlay.get("APP_SECRET").map(String::as_str), Some("kept"));
+    }
 
     /// `/_deploy/prepare`'s closing grants read failing fails the prepare:
     /// sealing a plan over it would ship no admin-created grants to every

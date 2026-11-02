@@ -158,7 +158,7 @@ async fn the_postgres_lock_is_held_by_its_session() {
         .expect("IMPRESSPRESS_TEST_POSTGRES_URL must name a PostgreSQL database");
     let infra = || InfraConfig {
         listen: String::new(),
-        db_type: "postgres".to_string(),
+        db_type: wafer_sql_utils::Backend::Postgres,
         db_path: String::new(),
         db_url: Some(url.clone()),
         storage_type: "local".to_string(),
@@ -166,9 +166,13 @@ async fn the_postgres_lock_is_held_by_its_session() {
         model_cache_dir: String::new(),
         listener: Default::default(),
     };
-    let db = impresspress_native::make_database_service("postgres", "", Some(&url))
-        .await
-        .expect("connect to PostgreSQL");
+    let db = impresspress_native::make_database_service(
+        wafer_sql_utils::Backend::Postgres,
+        "",
+        Some(&url),
+    )
+    .await
+    .expect("connect to PostgreSQL");
 
     let first = MigrationLock::acquire(&infra())
         .await
