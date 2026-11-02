@@ -2160,15 +2160,20 @@ async fn build_prepared_as_owner(
                 return Err(e);
             }
         };
-        if !healthy
+        if !dirty
+            && !healthy
             && rt.health.get().stale_since_ms.is_some()
             && matches!(probe, VersionProbe::Unavailable)
         {
             // This isolate knows the plan is older than the database's config
-            // (a failed rebuild kept it, or U-B1's hydrate served it), and an
-            // unavailable probe cannot say otherwise: keep serving it stale and
-            // retry after a doubled window — never re-hydrate and republish it
-            // as current (#275 review m1).
+            // (a failed rebuild kept it, or U-B1's hydrate served it), and with
+            // no local write pending an unavailable probe gives no reason to
+            // retry it now: keep serving it stale and retry after a doubled
+            // window — never re-hydrate and republish it as current (#275
+            // review m1). A local write (`dirty`) does give one: KV is not
+            // needed to know this isolate's config moved, so it falls through
+            // to the hand-off below, which rebuilds from D1 and keeps `DIRTY`
+            // set for it (#275 re-review m6).
             rt.note_probe_failure(now);
             if build_guard.is_current() {
                 arm_window(now, WindowCause::RebuildFailed);
@@ -3891,6 +3896,40 @@ pub(crate) mod tests {
         assert_eq!(io.hydrates.get(), 1, "not re-hydrated as current");
         let doubled = window().expect("the window is not cleared");
         assert_eq!(doubled.failures, armed.failures + 1);
+        reset_isolate();
+    }
+
+    /// **A local write is not lost behind a stale plan and a failed probe**
+    /// (#275 re-review m6): with the window over, KV down and an admin save
+    /// in this isolate (`DIRTY`), the request hands off to the dynamic path
+    /// and rebuilds from D1 rather than serving the stale plan until a probe
+    /// succeeds.
+    #[wasm_bindgen_test]
+    async fn a_dirty_isolate_with_a_stale_plan_rebuilds_despite_a_failed_probe() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let plan = packaged_plan();
+        let io = FakeIo::new(Some(plan.clone()));
+        *io.stamp.borrow_mut() = MOVED_GENERATION.to_string();
+        io.dynamic.set(Ends::Unavailable);
+        let _ = get_or_build_with(&io, &timer).await;
+        get_or_build_with(&io, &timer)
+            .await
+            .expect("the stale plan");
+        let armed = window().expect("armed");
+
+        timer.now.set(armed.retry_at_ms);
+        io.probe_unavailable.set(true);
+        io.dynamic.set(Ends::Healthy);
+        mark_dirty();
+        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("rebuilt");
+        assert!(
+            matches!(outcome, CacheOutcome::Rebuilt { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(rt.config_version, None, "the dynamic runtime, from D1");
+        assert_eq!(io.builds.get(), 2);
+        assert!(bypassed(&plan));
         reset_isolate();
     }
 
