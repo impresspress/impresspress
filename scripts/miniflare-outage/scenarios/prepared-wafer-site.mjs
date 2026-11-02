@@ -9,7 +9,8 @@
 //    each the failed variables read plus its `EXISTS` probe (two D1 calls,
 //    plan note 2026-11-01); a request that builds nothing sends D1 at most its
 //    audit row;
-// 6. toggle off: the D1 route recovers within the window it was given.
+// 6. toggle off: the D1 route recovers by the first rebuild after the
+//    window, and nothing is rebuilt inside it.
 //
 // Step 5 (a moved KV stamp under a warm prepared runtime, `/health` stale) and
 // every `/health` assertion belong to IP-C's `/health`.
@@ -18,7 +19,15 @@ import assert from "node:assert/strict";
 
 import { sleep } from "../harness.mjs";
 
-import { assertServed, assertUnavailable, attemptedBuild, pollUntil, staticAssetPath } from "./common.mjs";
+import {
+  assertServed,
+  assertUnavailable,
+  attemptedBuild,
+  pollUntil,
+  readsVariables,
+  RECOVERY_DEADLINE_MS,
+  staticAssetPath,
+} from "./common.mjs";
 
 const BURST = 50;
 /** Pacing, so the burst spans several retry windows (1 s, then 2 s, ...). */
@@ -84,15 +93,29 @@ export default {
         `${answers.reduce((n, a) => n + a.d1Calls.length, 0)} D1 calls in all`,
     );
 
-    // 6. Recovery within the window the last 503 named.
+    // 6. Recovery. D1 is back, so any build would succeed: the requests
+    //    before the recovering one are inside the window, answer 503 and
+    //    build nothing; the recovering one is the rebuild. The deadline only
+    //    stops a hung run; it is not what is asserted.
     const last = await d.fetch("/b/auth/login");
     assertUnavailable(last, "before recovery /b/auth/login");
     await d.setMode("ok");
-    const { answer, elapsedMs } = await pollUntil(d, "/b/auth/login", (a) => a.status === 200, {
-      withinMs: last.retryAfter * 1000 + 1500,
-    });
+    const { answer, answers: waiting, elapsedMs } = await pollUntil(
+      d,
+      "/b/auth/login",
+      (a) => a.status === 200,
+      { withinMs: RECOVERY_DEADLINE_MS },
+    );
+    for (const [i, a] of waiting.slice(0, -1).entries()) {
+      assertUnavailable(a, `inside the window, request ${i}`);
+      assert.ok(!readsVariables(a.d1Calls), `inside the window, request ${i} built: ${JSON.stringify(a.d1Calls)}`);
+    }
     assert.ok(answer.built, `the recovering request rebuilt (${answer.cacheOutcome})`);
-    console.log(`     recovered in ${(elapsedMs / 1000).toFixed(1)} s (Retry-After was ${last.retryAfter} s)`);
+    assert.ok(readsVariables(answer.d1Calls), "the rebuild read the variables table");
+    console.log(
+      `     recovered in ${(elapsedMs / 1000).toFixed(1)} s, after ${waiting.length - 1} ` +
+        `request(s) inside the window (Retry-After was ${last.retryAfter} s)`,
+    );
     const after = await d.fetchCounted("/b/auth/login");
     assertServed(after, "after recovery /b/auth/login");
     assert.equal(after.cacheOutcome, "hit", "after recovery the runtime is served from the cache");

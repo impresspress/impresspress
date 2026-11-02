@@ -10,16 +10,16 @@ name: CI shared
 # capability-grant security audit, which ran on pull requests only.
 #
 # The ONLY difference between the two callers is the `pull-request` input.
-# Three jobs skip themselves when a pull request did not touch their inputs,
+# Four jobs skip themselves when a pull request did not touch their inputs,
 # and the `git diff` that decides it reads
 # `github.event.pull_request.base.sha`, which does not exist on a `push`. On
 # the merge side that gate step does not run, its `skip` output is therefore
 # empty, and every step guarded by `steps.<gate>.outputs.skip != 'true'` runs —
 # which is the behaviour the merge gate has always had.
 #
-# The input is read SIX times, in those same three jobs and nowhere else:
-#   * three `if: inputs.pull-request` on the gate steps, as above;
-#   * three `fetch-depth: ${{ inputs.pull-request && '0' || '1' }}` on those
+# The input is read EIGHT times, in those same four jobs and nowhere else:
+#   * four `if: inputs.pull-request` on the gate steps, as above;
+#   * four `fetch-depth: ${{ inputs.pull-request && '0' || '1' }}` on those
 #     jobs' checkouts. Clone depth is a second, independent difference between
 #     the two callers: the gate's `git diff` needs the base commit, so the
 #     pull-request side clones in full, and the merge side clones SHALLOW.
@@ -60,9 +60,9 @@ on:
     inputs:
       pull-request:
         description: >-
-          True when the calling workflow's trigger is `pull_request`. Read six
-          times, all inside the three gated jobs: the three change-gate steps'
-          `if:`, and the `fetch-depth:` of the three checkouts those gates diff
+          True when the calling workflow's trigger is `pull_request`. Read eight
+          times, all inside the four gated jobs: the four change-gate steps'
+          `if:`, and the `fetch-depth:` of the four checkouts those gates diff
           against — full clone on the pull-request side, shallow on the merge
           side.
         required: true
@@ -804,14 +804,21 @@ jobs:
           # `cloudflare-wasm-test`'s checkout).
           fetch-depth: ${{ inputs.pull-request && '0' || '1' }}
 
-      # What the scenarios run: the Worker runtime and core it is built from,
-      # the CLI's build and packaging (and its manifest, which pins the
-      # example), the harness itself, the workspace pins, and this file.
+      # What the scenarios are built from, derived from the dependency graph
+      # rather than listed by hand: the fixture Worker builds
+      # impresspress-cloudflare (and through it core and password); the deploy
+      # driver is an example of the `impresspress` crate, whose workspace
+      # dependencies are bundle, core, native, password, server and wafer-guest
+      # (`cargo metadata`, following path dependencies), and whose build.rs
+      # embeds the impresspress-web pkg (web, and through it browser), built by
+      # `build-wasm.yml` with `scripts/wasm-pack-locked.sh`. Together that is
+      # every crate under `crates/`, so the gate names the directory. Then the
+      # harness itself, the toolchain and workspace pins, and this file.
       - name: Check for Worker runtime changes
         id: outage-changes
         if: inputs.pull-request
         run: |
-          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-cloudflare/ crates/impresspress-core/ crates/impresspress-password/ crates/impresspress/src/cli/helpers/cloudflare/ crates/impresspress/examples/miniflare_deploy.rs crates/impresspress/Cargo.toml scripts/miniflare-outage/ Cargo.toml Cargo.lock .github/workflows/ci-shared.yml)
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/ scripts/miniflare-outage/ scripts/wasm-pack-locked.sh rust-toolchain.toml Cargo.toml Cargo.lock .github/workflows/build-wasm.yml .github/workflows/ci-shared.yml)
           if [ -z "$CHANGED" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else

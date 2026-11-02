@@ -5,9 +5,9 @@
 // A scenario is a module under `scenarios/` exporting
 // `{ name, shape, run(deployment) }`, listed in `SCENARIOS` below; `run`
 // throws (node:assert) to fail. `MINIFLARE_OUTAGE_VERBOSE=1` echoes the
-// Worker's log.
+// Worker's log. Prerequisites and environment: README.md.
 
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,9 +23,16 @@ if (unknown.length > 0) {
 }
 const selected = wanted.length === 0 ? SCENARIOS : SCENARIOS.filter((s) => wanted.includes(s.name));
 
-const stateRoot = process.env.MINIFLARE_OUTAGE_STATE ?? join(tmpdir(), "impresspress-miniflare-outage");
-rmSync(stateRoot, { recursive: true, force: true });
-mkdirSync(stateRoot, { recursive: true });
+// Each run its own state (local D1, KV, R2, staged release), so runs from two
+// worktrees never share it: a fresh temporary directory, removed when every
+// scenario passed and kept for a look when one failed. A named directory
+// (`MINIFLARE_OUTAGE_STATE`) is emptied first and always kept.
+const named = process.env.MINIFLARE_OUTAGE_STATE;
+const stateRoot = named ?? mkdtempSync(join(tmpdir(), "impresspress-miniflare-outage-"));
+if (named) {
+  rmSync(stateRoot, { recursive: true, force: true });
+  mkdirSync(stateRoot, { recursive: true });
+}
 
 const candidate = buildCandidate(stateRoot);
 
@@ -53,6 +60,7 @@ for (const scenario of selected) {
 
 console.log(`\n${selected.length - failures.length}/${selected.length} scenarios passed`);
 if (failures.length > 0) {
-  console.log(`failed: ${failures.join(", ")}`);
+  console.log(`failed: ${failures.join(", ")}; state kept in ${stateRoot}`);
   process.exit(1);
 }
+if (!named) rmSync(stateRoot, { recursive: true, force: true });

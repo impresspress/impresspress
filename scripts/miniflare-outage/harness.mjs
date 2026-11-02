@@ -20,7 +20,9 @@
 // `DB` is Miniflare's real local D1 behind a wrapped binding
 // (`workers/d1-outage.mjs`) that asks a control Worker
 // (`workers/d1-control.mjs`) before each call: the outage toggle, and the
-// count of D1 calls a scenario asserts on.
+// count of D1 calls a scenario asserts on. `CONFIG_CACHE` is Miniflare's real
+// local KV behind a wrapper (`workers/kv-ledger.mjs`) that reports each call
+// to the same control Worker.
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync, statSync } from "node:fs";
@@ -151,6 +153,8 @@ function miniflareWorker(configPath, versionId, vars) {
   const configDir = dirname(configPath);
   const d1 = config.d1_databases ?? [];
   if (d1.length !== 1) throw new Error(`${configPath}: expected one D1 database`);
+  const kv = config.kv_namespaces ?? [];
+  if (kv.length !== 1) throw new Error(`${configPath}: expected one KV namespace`);
   return {
     worker: {
       name: "fixture",
@@ -177,15 +181,16 @@ function miniflareWorker(configPath, versionId, vars) {
           timestamp: "2026-11-03T00:00:00.000Z",
         },
       },
-      wrappedBindings: { [d1[0].binding]: { scriptName: "d1-outage" } },
+      wrappedBindings: {
+        [d1[0].binding]: { scriptName: "d1-outage" },
+        [kv[0].binding]: { scriptName: "kv-ledger" },
+      },
       r2Buckets: Object.fromEntries(
         (config.r2_buckets ?? []).map((b) => [b.binding, b.bucket_name]),
       ),
-      kvNamespaces: Object.fromEntries(
-        (config.kv_namespaces ?? []).map((ns) => [ns.binding, ns.id]),
-      ),
     },
     databaseId: d1[0].database_id,
+    kvNamespaceId: kv[0].id,
     bucket: (config.r2_buckets ?? [])[0],
   };
 }
@@ -201,10 +206,13 @@ function filesUnder(dir, prefix = "") {
 
 /** What one fetch answered. */
 export class Answer {
-  constructor(status, headers, body) {
+  constructor(status, headers, body, sentAt, doneAt) {
     this.status = status;
     this.headers = headers;
     this.body = body;
+    /** When the request was sent and its body read, `Date.now()` ms. */
+    this.sentAt = sentAt;
+    this.doneAt = doneAt;
   }
   get retryAfter() {
     const value = this.headers.get("retry-after");
@@ -251,12 +259,12 @@ export class Deployment {
    * Start `stage` ("candidate" or "final") on a fresh workerd process: every
    * isolate cold, D1, KV and R2 as the last process left them. The control
    * Worker starts in mode `ok`; `mode` sets it before any fixture request.
-   * `vars` are added to this start's Worker vars only (a Worker var change
-   * is a new environment identity, as a `wrangler deploy` of it would be).
+   * `vars` are added to this start's Worker vars only. Every start is a fresh
+   * process, so nothing an isolate cached survives it, whatever the vars.
    */
   async start(stage, { mode = "ok", vars = {} } = {}) {
     await this.stop();
-    const { worker, databaseId, bucket } = miniflareWorker(
+    const { worker, databaseId, kvNamespaceId, bucket } = miniflareWorker(
       this.configFor(stage),
       VERSION_IDS[stage],
       { ...this.vars, ...vars },
@@ -271,6 +279,13 @@ export class Deployment {
           modules: true,
           scriptPath: join(HERE, "workers/d1-outage.mjs"),
           d1Databases: { INNER: databaseId },
+          serviceBindings: { CONTROL: "d1-control" },
+        },
+        {
+          name: "kv-ledger",
+          modules: true,
+          scriptPath: join(HERE, "workers/kv-ledger.mjs"),
+          kvNamespaces: { INNER: kvNamespaceId },
           serviceBindings: { CONTROL: "d1-control" },
         },
         {
@@ -342,10 +357,7 @@ export class Deployment {
    */
   async deploy({ mode = "ok" } = {}) {
     await this.start("candidate");
-    const answer = await this.fetch("/_deploy/prepare", {
-      method: "POST",
-      headers: { "X-Deploy-Token": DEPLOY_TOKEN },
-    });
+    const answer = await this.prepare();
     if (answer.status !== 200) {
       throw new Error(`/_deploy/prepare answered ${answer.status}: ${answer.body}\n${this.tail()}`);
     }
@@ -353,6 +365,14 @@ export class Deployment {
     writeFileSync(response, answer.body);
     driver(["final", FIXTURE, this.dir, response]);
     await this.start("final", { mode });
+  }
+
+  /** The running version's `/_deploy/prepare`, authorized as a deploy is. */
+  async prepare() {
+    return this.fetch("/_deploy/prepare", {
+      method: "POST",
+      headers: { "X-Deploy-Token": DEPLOY_TOKEN },
+    });
   }
 
   async control(path, init) {
@@ -371,26 +391,36 @@ export class Deployment {
     return (await (await this.control("/calls")).json()).calls;
   }
 
+  /** Every KV call the fixture has made since this process started. */
+  async kvCalls() {
+    return (await (await this.control("/kv")).json()).kv;
+  }
+
   /** GET (or `init`) `path` on the fixture Worker. */
   async fetch(path, init = {}) {
+    const sentAt = Date.now();
     const response = await this.mf.dispatchFetch(`http://localhost${path}`, {
       redirect: "manual",
       ...init,
     });
-    return new Answer(response.status, response.headers, await response.text());
+    const body = await response.text();
+    return new Answer(response.status, response.headers, body, sentAt, Date.now());
   }
 
-  /** `fetch(path)`, and the D1 calls it made. */
+  /** `fetch(path)`, and the D1 and KV calls it made. */
   async fetchCounted(path, init) {
     const before = (await this.calls()).length;
+    const kvBefore = (await this.kvCalls()).length;
     const answer = await this.fetch(path, init);
     answer.d1Calls = (await this.calls()).slice(before);
+    answer.kvCalls = (await this.kvCalls()).slice(kvBefore);
     return answer;
   }
 
   /** Move the KV config stamp, as an admin settings save does. */
   async bumpConfigStamp() {
-    const kv = await this.mf.getKVNamespace("CONFIG_CACHE");
+    // The real namespace behind the fixture's `CONFIG_CACHE` wrapper.
+    const kv = await this.mf.getKVNamespace("INNER", "kv-ledger");
     await kv.put("cfg:v1:config_version", `miniflare-bump-${Date.now()}`);
   }
 

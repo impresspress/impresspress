@@ -9,12 +9,22 @@
 // 4. Request 3 is served with no build and no D1 call.
 // 6. After the window with D1 still down: one dynamic attempt, the stale
 //    runtime kept (200), still not bypassed, so the request after it is
-//    served too. With D1 back: the dynamic build publishes (the bypass), and
-//    every route serves from it.
+//    served too. With D1 back: the dynamic build publishes and commits the
+//    bypass, and every route serves from it. A committed bypass is what lets
+//    the next requests go straight to the cached dynamic runtime; an isolate
+//    whose plan is not bypassed takes the prepared route, finds no current
+//    prepared runtime and probes the KV config stamp on every request. So the
+//    requests after the recovery read neither D1 nor KV.
 
 import assert from "node:assert/strict";
 
-import { assertServed, assertUnavailable, attemptedBuild, pollUntil, WINDOW_CAP_MS } from "./common.mjs";
+import {
+  assertServed,
+  assertUnavailable,
+  attemptedBuild,
+  pollUntil,
+  RECOVERY_DEADLINE_MS,
+} from "./common.mjs";
 
 export default {
   name: "stale-plan",
@@ -49,9 +59,16 @@ export default {
     //    runtime is kept and the plan stays un-bypassed.
     const login = await d.fetch("/b/auth/login");
     assertUnavailable(login, "the stale runtime's D1 route");
-    const { answer: down } = await pollUntil(d, "/", (a) => attemptedBuild(a.d1Calls), {
-      withinMs: login.retryAfter * 1000 + 1500,
-    });
+    const { answer: down, answers: waiting } = await pollUntil(
+      d,
+      "/",
+      (a) => attemptedBuild(a.d1Calls),
+      { withinMs: RECOVERY_DEADLINE_MS },
+    );
+    for (const a of waiting.slice(0, -1)) {
+      assertServed(a, "inside the window /", "wafer-site-shaped fixture");
+      assert.deepEqual(a.d1Calls, [], "inside the window nothing is built");
+    }
     assertServed(down, "the failed post-window attempt /", "wafer-site-shaped fixture");
     const afterDown = await d.fetchCounted("/");
     assertServed(afterDown, "after the failed attempt /", "wafer-site-shaped fixture");
@@ -60,7 +77,9 @@ export default {
     // 6, D1 back: the next post-window build is dynamic and publishes.
     await d.setMode("ok");
     mark = d.mark();
-    const { answer: up } = await pollUntil(d, "/", (a) => a.built, { withinMs: WINDOW_CAP_MS });
+    const { answer: up } = await pollUntil(d, "/", (a) => a.built, {
+      withinMs: RECOVERY_DEADLINE_MS,
+    });
     assertServed(up, "the recovering build /", "wafer-site-shaped fixture");
     await d.settleLogs();
     assert.deepEqual(
@@ -69,8 +88,12 @@ export default {
       "the recovery is the dynamic build",
     );
     assertServed(await d.fetch("/b/auth/login"), "after recovery /b/auth/login");
-    const hit = await d.fetchCounted("/");
-    assertServed(hit, "after recovery /");
-    assert.equal(hit.cacheOutcome, "hit", "the dynamic runtime is served from the cache");
+    for (let i = 0; i < 3; i++) {
+      const hit = await d.fetchCounted("/");
+      assertServed(hit, `after recovery / (${i})`);
+      assert.equal(hit.cacheOutcome, "hit", "the dynamic runtime is served from the cache");
+      assert.deepEqual(hit.d1Calls, [], "after recovery / reads no D1");
+      assert.deepEqual(hit.kvCalls, [], "the plan is bypassed: no KV config-stamp probe");
+    }
   },
 };

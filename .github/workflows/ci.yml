@@ -8,7 +8,7 @@ name: CI
 # (the summary job at the end of `ci-shared.yml`) reports on every pull request
 # and can be a required status check. A filtered workflow never starts on a
 # pull request outside its paths, which leaves a required check waiting
-# forever. Three narrow jobs skip their work on a pull request that does not
+# forever. Four narrow jobs skip their work on a pull request that does not
 # touch their inputs; see `ci-shared.yml`.
 on:
   pull_request:
@@ -27,7 +27,7 @@ jobs:
   build-wasm:
     uses: ./.github/workflows/build-wasm.yml
 
-  # `needs: build-wasm` orders the six jobs inside `ci-shared.yml` that
+  # `needs: build-wasm` orders the seven jobs inside `ci-shared.yml` that
   # download the `impresspress-web-pkg` artifact after it. A job cannot depend
   # on a job inside a called workflow, only on the call, so the edge is on the
   # whole call, and every job in `ci-shared.yml` waits for `build-wasm`.
