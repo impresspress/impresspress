@@ -142,16 +142,18 @@ thread_local! {
 /// One-time isolate initialization: selects [`DeferMode::Queued`] (work a
 /// handler defers until after its response drains into `ctx.wait_until` — see
 /// `dispatch`; spawned any other way it would be cancelled with the
-/// response), and installs the spawn wrapper that runs a producer spawned
-/// during a request inside that request's service scope
-/// (`request_services::wrap_spawned`). Audit rows need no isolate setting:
+/// response), registers the runtime cache as the source of what `/health`
+/// reports beyond a runtime's slots (`runtime_cache::platform_health`), and
+/// installs the spawn wrapper that runs a producer spawned during a request
+/// inside that request's service scope (`request_services::wrap_spawned`).
+/// Audit rows need no isolate setting:
 /// `dispatch` queues each request's rows in that request's own queue.
 ///
 /// [`run_with_config`] (and so [`run`]) calls it first, before any request
 /// is routed — the `/_deploy/*` endpoints included, which boot a runtime and
 /// run every block's Init on a cold isolate — and [`run_scheduled_with_config`]
-/// calls it before its sweep. So every request an isolate serves sees both
-/// settings, whatever it served first. A consumer's `#[event(start)]` handler
+/// calls it before its sweep. So every request an isolate serves sees all
+/// three settings, whatever it served first. A consumer's `#[event(start)]` handler
 /// may call it too; repeat calls are no-ops.
 ///
 /// [`DeferMode::Queued`]: impresspress_core::deferred::DeferMode::Queued
@@ -159,6 +161,11 @@ pub fn init_isolate() {
     ISOLATE_INITIALIZED.with(|done| {
         if !done.get() {
             impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Queued);
+            // `/health` reports the cached runtime's health and the retry
+            // window, which live in this isolate's runtime cache.
+            impresspress_core::runtime_health::set_platform_health_source(Some(
+                runtime_cache::platform_health,
+            ));
             // A producer spawned during a request runs in that request's
             // service scope; see `request_services::wrap_spawned`.
             #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
