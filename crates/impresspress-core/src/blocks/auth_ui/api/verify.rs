@@ -327,7 +327,9 @@ mod verify_tests {
             .await
             .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         seed_unverified(&ctx, token).await;
-        let failing = ctx.break_reads();
+        // Warm: auth's stored config was read before the outage, so the read
+        // that fails is the token lookup under test.
+        let failing = ctx.with_warm_config().await.break_reads();
 
         let out = handle(
             &failing,

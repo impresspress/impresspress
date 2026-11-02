@@ -950,7 +950,9 @@ async fn seller_stats_orders_and_refunds_are_tenant_isolated() {
 /// `unwrap_or(0)` / `unwrap_or(0.0)` used to do exactly that.
 #[tokio::test]
 async fn admin_stats_repository_failure_surfaces_as_internal_error() {
-    let ctx = ctx().await.break_reads();
+    // Warm: stored config was read before the outage, so the reads that fail
+    // are the stat queries under test.
+    let ctx = ctx().await.with_warm_config().await.break_reads();
 
     let (msg, input) = admin_get_msg("/b/products/api/admin/stats");
     let out = dispatch(&ctx, msg, input).await;

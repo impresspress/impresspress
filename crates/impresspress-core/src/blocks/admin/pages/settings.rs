@@ -276,7 +276,8 @@ mod tests {
     use crate::test_support::{admin_msg, output_html, TestContext};
 
     /// The email tab is a form whose Save posts every field. When the stored
-    /// values cannot be read the page is a 500, never that form filled from
+    /// values cannot be read the page is the 503 (stored config fails closed
+    /// as unavailable; the outage plan's I4b), never that form filled from
     /// the boot map and the declared defaults — saving it would write those
     /// over the stored settings.
     ///
@@ -298,7 +299,7 @@ mod tests {
         .await;
 
         let html = String::from_utf8(parts.body).expect("UTF-8 body");
-        assert_eq!(parts.status, 500, "{html}");
+        assert_eq!(parts.status, 503, "{html}");
         assert!(!html.contains("settings-form"), "{html}");
         assert!(html.contains(r#"class="status-page""#), "{html}");
         assert!(!html.contains(r#"class="shell""#), "{html}");

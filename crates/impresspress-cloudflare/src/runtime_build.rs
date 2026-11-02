@@ -928,9 +928,8 @@ mod tests {
                 kv_cached_db::CacheMode::default(),
             )
             .await;
-            let error = match built {
-                Ok(_) => panic!("{text}: the read failed, so the build must"),
-                Err(error) => error,
+            let Err(error) = built else {
+                panic!("{text}: the read failed, so the build must");
             };
             assert_eq!(error.is_unavailable(), unavailable, "{text}: {error}");
             assert!(error.to_string().contains("block_settings"), "{error}");
