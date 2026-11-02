@@ -1198,6 +1198,8 @@ async fn a_remembered_failure_is_visible_without_a_query() {
 /// generation `read` judges a remembered failure by.
 #[tokio::test]
 async fn a_remembered_failure_is_judged_on_the_snapshots_own_generation() {
+    // It bumps the process generation, which every other test here reads.
+    let _generation = GENERATION.lock().await;
     let (_counting, shaped, db) = shaped().await;
     seed(&db, "WAFER_RUN__AUTH__K", "stored").await;
     let fixture = impresspress_core::config_generation::FixtureGeneration::default();

@@ -3933,6 +3933,37 @@ pub(crate) mod tests {
         reset_isolate();
     }
 
+    /// The same with D1 still down (#275 final check n9): the dirty rebuild
+    /// fails, so the stale plan keeps serving, un-bypassed, and `DIRTY`
+    /// survives the failed attempt for the rebuild after the next window.
+    #[wasm_bindgen_test]
+    async fn a_dirty_rebuild_that_fails_keeps_dirty_and_the_plan() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let plan = packaged_plan();
+        let io = FakeIo::new(Some(plan.clone()));
+        *io.stamp.borrow_mut() = MOVED_GENERATION.to_string();
+        io.dynamic.set(Ends::Unavailable);
+        let _ = get_or_build_with(&io, &timer).await;
+        get_or_build_with(&io, &timer)
+            .await
+            .expect("the stale plan");
+        let armed = window().expect("armed");
+
+        timer.now.set(armed.retry_at_ms);
+        io.probe_unavailable.set(true);
+        mark_dirty();
+        let (rt, outcome) = get_or_build_with(&io, &timer)
+            .await
+            .expect("the stale plan keeps serving");
+        assert_eq!(outcome, CacheOutcome::Stale);
+        assert_eq!(rt.config_version.as_deref(), Some(PLAN_GENERATION));
+        assert_eq!(io.builds.get(), 2, "the dirty rebuild was attempted");
+        assert!(DIRTY.with(Cell::get), "DIRTY survives the failed attempt");
+        assert!(!bypassed(&plan), "nothing dynamic was stored");
+        reset_isolate();
+    }
+
     /// A D1 binding that rejects every statement as an outage would.
     fn d1_that_is_down() -> worker::D1Database {
         let d1 = js_sys::Function::new_no_args(
