@@ -475,7 +475,7 @@ fn publish_block_settings(
     config: &Arc<dyn ConfigService>,
     handle: &Arc<RwLock<BlockSettings>>,
     block_settings: BlockSettings,
-) -> Result<(), String> {
+) -> Result<(), SeedError> {
     let published_json = block_settings.to_config_json();
     *handle
         .write()
@@ -485,7 +485,8 @@ fn publish_block_settings(
     published.both(crate::features::BLOCK_SETTINGS_CONFIG_KEY, published_json);
     published
         .republish(wafer, config)
-        .map_err(|e| format!("publish block_settings after admin init: {e}"))
+        // Refused only for a key `install` alone writes; a bug, not an outage.
+        .map_err(|e| SeedError::Fault(format!("publish block_settings after admin init: {e}")))
 }
 
 /// The hosted target's bound secrets: Worker bindings (`wrangler secret put`)

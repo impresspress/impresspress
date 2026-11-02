@@ -93,7 +93,7 @@ pub(crate) async fn boot_deploy_runtime(built: &mut BuiltRuntime) -> Result<Boot
 pub(crate) async fn boot_request_runtime(
     built: &mut BuiltRuntime,
     build: RequestBuild,
-) -> Result<BootReport, String> {
+) -> Result<BootReport, impresspress_core::builder::BootError> {
     let db = built.db.clone();
     let block_settings = built.block_settings_handle.clone();
     request_services::scope(built.services.clone(), async {
@@ -105,7 +105,6 @@ pub(crate) async fn boot_request_runtime(
             build,
         )
         .await
-        .map_err(|error| format!("boot: {error}"))
     })
     .await
 }
@@ -155,7 +154,7 @@ pub(crate) async fn build_runtime<F, G>(
     register_post_build: G,
     force_run_migrations: bool,
     cache_mode: kv_cached_db::CacheMode,
-) -> Result<BuiltRuntime, Box<dyn std::error::Error>>
+) -> Result<BuiltRuntime, crate::runtime_cache::RuntimeBuildError>
 where
     F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
     G: FnOnce(
@@ -163,6 +162,8 @@ where
         Arc<dyn StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
+    use crate::runtime_cache::RuntimeBuildError;
+
     // 1. Construct D1 service (with KV cache) first — env vars live in D1.
     let (db, _kv, _batch_db) = make_kv_cached_database_service_with_backend(
         env,
@@ -173,11 +174,11 @@ where
         calls,
     )
     .map_err(|e| {
-        format!(
+        RuntimeBuildError::Fault(format!(
             "DB/KV bindings (D1={:?}, KV={:?}): {e}",
             runner::D1_BINDING,
             runner::KV_BINDING
-        )
+        ))
     })?;
 
     // 2. Load block settings (enablement + migration state) eagerly —
@@ -192,7 +193,10 @@ where
     // — never the missing-table cold-start case, which `block_settings::load`
     // answers with no rows (see its doc). Propagate rather than fabricate
     // "every block enabled": the runtime build fails, so no requests are
-    // served with a fabricated all-enabled snapshot.
+    // served with a fabricated all-enabled snapshot. Classified like every
+    // other failed read on the request path (the shared transient rule): an
+    // outage is a 503 the retry window retries, anything else a 500. Usually
+    // answered from the KV row cache, so it reaches D1 only on a miss.
     let block_settings = if let Some(plan) = prepared_plan {
         impresspress_core::features::BlockSettings::from_blocks(
             plan.structure
@@ -202,9 +206,56 @@ where
                 .collect(),
         )
     } else {
-        impresspress_core::platform_state::block_settings::load(&db).await?
+        impresspress_core::platform_state::block_settings::load(&db)
+            .await
+            .map_err(|e| {
+                RuntimeBuildError::classified(
+                    wafer_run::init_failure_is_transient(e.code(), e.detail_code()),
+                    format!("read block_settings: {e}"),
+                )
+            })?
     };
 
+    // The rest is assembly over bindings and config this request already
+    // holds: nothing in it reaches a backend, so whatever fails is a fault.
+    assemble_runtime(
+        env,
+        environment,
+        request_config,
+        prepared_plan,
+        register_blocks,
+        register_post_build,
+        force_run_migrations,
+        db,
+        block_settings,
+    )
+    .map_err(|e| RuntimeBuildError::Fault(e.to_string()))
+}
+
+/// [`build_runtime`] after its one database read: the config surfaces, the
+/// services, the consumer's registrations and `build()`. Synchronous.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "build_runtime's own arguments, passed on; see its note"
+)]
+fn assemble_runtime<F, G>(
+    env: &worker::Env,
+    environment: &CfEnvironment,
+    request_config: &HashMap<String, String>,
+    prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
+    register_blocks: F,
+    register_post_build: G,
+    force_run_migrations: bool,
+    db: Arc<dyn DatabaseService>,
+    block_settings: impresspress_core::features::BlockSettings,
+) -> Result<BuiltRuntime, Box<dyn std::error::Error>>
+where
+    F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
+    G: FnOnce(
+        &mut wafer_run::Wafer,
+        Arc<dyn StorageService>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
     // 3. The structural half of both config surfaces — see
     //    `structural_runtime_config`, which is where every key and its reason
     //    now lives.
@@ -816,6 +867,74 @@ mod tests {
     /// as SQLite answers it. Every statement it runs is pushed onto `log` as
     /// `[sql, params]` JSON, in order. A write, a batch or a `raw()` read
     /// rejects: the config source sends none.
+    /// A Worker `Env` whose D1 binding rejects every statement with `error`
+    /// (a D1 error text) and whose KV row cache misses, so a dynamic build's
+    /// one database read — `block_settings` — reaches D1 and fails.
+    fn env_whose_d1_answers(error: &str) -> worker::Env {
+        let env = js_sys::Function::new_with_args(
+            "message",
+            &format!(
+                "class D1Database {{
+                    prepare(sql) {{
+                        const fail = () => Promise.reject(new Error(message));
+                        const stmt = {{ bind() {{ return stmt; }}, all: fail, run: fail,
+                                        raw: fail, first: fail }};
+                        return stmt;
+                    }}
+                    batch() {{ return Promise.reject(new Error(message)); }}
+                }}
+                const miss = () => Promise.resolve(null);
+                return {{
+                    {d1}: new D1Database(),
+                    {kv}: {{ get: miss, getWithMetadata: () => Promise.resolve({{ value: null,
+                             metadata: null }}), put: () => Promise.resolve(),
+                             list: () => Promise.resolve({{ keys: [], list_complete: true }}),
+                             delete: () => Promise.resolve() }},
+                }};",
+                d1 = crate::runner::D1_BINDING,
+                kv = crate::runner::KV_BINDING,
+            ),
+        )
+        .call1(&wasm_bindgen::JsValue::NULL, &error.into())
+        .expect("the fake env builds");
+        wasm_bindgen::JsCast::unchecked_into::<worker::Env>(env)
+    }
+
+    /// **`build_runtime`'s one database read is classified** (D1 outage plan
+    /// I4, addendum m1): a dynamic build whose `block_settings` read meets a
+    /// D1 outage is `Unavailable` — a 503 the retry window retries — and one
+    /// meeting a fault is the 500, by the shared transient rule. It used to
+    /// be `?`-boxed into the opaque 500 either way.
+    #[wasm_bindgen_test]
+    async fn the_block_settings_read_is_classified() {
+        for (text, unavailable) in [
+            ("D1_ERROR: Network connection lost.", true),
+            ("D1_ERROR: no such column: enabled: SQLITE_ERROR", false),
+        ] {
+            let env = env_whose_d1_answers(text);
+            let environment = CfEnvironment::capture(&env);
+            let calls = crate::database::D1CallCount::new();
+            let built = build_runtime(
+                &env,
+                &environment,
+                &calls,
+                &HashMap::new(),
+                None,
+                Ok,
+                |_, _| Ok(()),
+                false,
+                kv_cached_db::CacheMode::default(),
+            )
+            .await;
+            let error = match built {
+                Ok(_) => panic!("{text}: the read failed, so the build must"),
+                Err(error) => error,
+            };
+            assert_eq!(error.is_unavailable(), unavailable, "{text}: {error}");
+            assert!(error.to_string().contains("block_settings"), "{error}");
+        }
+    }
+
     fn variables_d1(log: &js_sys::Array, rows: &str) -> worker::D1Database {
         let handle = js_sys::Function::new_with_args(
             "log",

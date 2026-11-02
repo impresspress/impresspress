@@ -265,6 +265,18 @@ impl VariablesSnapshot {
         self.retry
     }
 
+    /// Whether the snapshot is remembering a failed read for the current
+    /// config-write generation: every reader is being answered that failure
+    /// (fail-closed), until its retry or a write. Reads the state only — it
+    /// never queries. For a runtime owner that retries by rebuilding
+    /// ([`RetryMode::Rebuild`]): this is the signal to schedule the rebuild.
+    pub fn remembers_a_failure(&self) -> bool {
+        matches!(
+            self.load(),
+            State::Failed(failure) if failure.generation == config_write_generation()
+        )
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn load(&self) -> State {
         self.state.get().unwrap_or_default()

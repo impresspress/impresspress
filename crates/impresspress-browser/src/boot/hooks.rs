@@ -169,7 +169,7 @@ impl BootHooks for BrowserBootHooks<'_> {
         }
         published
             .republish(wafer, &self.config_svc)
-            .map_err(|e| format!("publish the seeded config: {e}"))?;
+            .map_err(|e| builder::SeedError::Fault(format!("publish the seeded config: {e}")))?;
 
         *self
             .block_settings_handle

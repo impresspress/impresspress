@@ -1262,7 +1262,10 @@ mod tests {
         let html = String::from_utf8_lossy(&page.body);
         assert_eq!(page.status, 503, "{html}");
         assert!(html.contains("Temporarily unavailable"), "{html}");
-        assert!(!html.contains("D1_ERROR"), "the backend's text leaked: {html}");
+        assert!(
+            !html.contains("D1_ERROR"),
+            "the backend's text leaked: {html}"
+        );
 
         let api = wafer_block::http_codec::collect_http_response(
             crate::blocks::crud::db_error_page(&request("application/json"), outage(), "test page"),
@@ -1276,12 +1279,13 @@ mod tests {
             "{json}"
         );
 
-        let fault = wafer_block::http_codec::collect_http_response(crate::blocks::crud::db_error_page(
-            &request("text/html"),
-            wafer_run::WaferError::new(wafer_run::ErrorCode::Internal, "corrupt row"),
-            "test page",
-        ))
-        .await;
+        let fault =
+            wafer_block::http_codec::collect_http_response(crate::blocks::crud::db_error_page(
+                &request("text/html"),
+                wafer_run::WaferError::new(wafer_run::ErrorCode::Internal, "corrupt row"),
+                "test page",
+            ))
+            .await;
         assert_eq!(fault.status, 500);
     }
 

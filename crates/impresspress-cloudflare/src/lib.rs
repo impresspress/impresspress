@@ -445,14 +445,18 @@ where
     .await;
 
     match result {
-        Ok(response) => Ok(response),
-        Err(ref e) if let Some(&busy) = e.downcast_ref::<runtime_cache::RuntimeBuildBusy>() => {
-            worker::console_log!("impresspress-cloudflare {busy}; retrying is safe");
-            let mut response = worker::Response::error("service temporarily unavailable", 503)?;
-            response
-                .headers_mut()
-                .set("Retry-After", &busy.retry_after_secs().to_string())?;
-            Ok(response)
+        // Every 503 the Worker returns carries `Retry-After`: a block that
+        // answered `Unavailable` (degraded, or a stored-config read failing
+        // closed) sets none of its own under `InitWait::Refuse`, so it gets
+        // the isolate's retry window, or one second.
+        Ok(response) => with_retry_after(response),
+        Err(ref e)
+            if let Some(runtime_cache::RuntimeBuildError::Unavailable {
+                cause,
+                retry_after_secs,
+            }) = e.downcast_ref::<runtime_cache::RuntimeBuildError>() =>
+        {
+            unavailable_response(cause, *retry_after_secs)
         }
         Err(e) => {
             // Never return the real cause to the client — `e` can carry
@@ -564,6 +568,47 @@ mod invocation_log {
         }
         worker::console_warn!("{line}");
     }
+}
+
+/// The 503 for a request the runtime cache could not serve because a backend
+/// it needs is not responding (D1 outage plan I4): `Retry-After`, never
+/// cached, and a plain-text body that says so and gives a reference. The
+/// cause — which can quote a D1 error — goes only to the log, under that
+/// reference, beside a `metric=runtime_unavailable` line.
+fn unavailable_response(cause: &str, retry_after_secs: u32) -> worker::Result<worker::Response> {
+    let reference = uuid::Uuid::new_v4();
+    worker::console_log!("impresspress-cloudflare runtime unavailable [{reference}]: {cause}");
+    worker::console_log!("{}", runtime_unavailable_line(retry_after_secs));
+    let mut response = worker::Response::error(unavailable_body(retry_after_secs, reference), 503)?;
+    let headers = response.headers_mut();
+    headers.set("Retry-After", &retry_after_secs.to_string())?;
+    headers.set("Cache-Control", "no-store")?;
+    Ok(response)
+}
+
+/// The body of [`unavailable_response`].
+fn unavailable_body(retry_after_secs: u32, reference: uuid::Uuid) -> String {
+    format!(
+        "Service temporarily unavailable: a backend this site depends on is not responding. \
+         Retry in {retry_after_secs} s. (reference: {reference})"
+    )
+}
+
+/// The `metric=runtime_unavailable` log line, beside `d1_cost`'s.
+fn runtime_unavailable_line(retry_after_secs: u32) -> String {
+    format!("metric=runtime_unavailable retry_after_secs={retry_after_secs}")
+}
+
+/// `response`, with a `Retry-After` if it is a 503 that has none: the
+/// remaining retry window, or one second.
+fn with_retry_after(mut response: worker::Response) -> worker::Result<worker::Response> {
+    if response.status_code() == 503 && response.headers().get("Retry-After")?.is_none() {
+        let seconds = runtime_cache::retry_after_secs(impresspress_core::util::now_millis());
+        response
+            .headers_mut()
+            .set("Retry-After", &seconds.to_string())?;
+    }
+    Ok(response)
 }
 
 /// The `d1_cost` metric line for an invocation that cost `cost`, or `None`
@@ -919,7 +964,17 @@ where
         register_blocks,
         register_post_build,
     )
-    .await?;
+    .await
+    .inspect_err(|error| {
+        // The class a fetch would have answered with: an outage (the sweep
+        // runs on the next schedule once the backend is back) or a fault.
+        let class = if error.is_unavailable() {
+            "unavailable"
+        } else {
+            "fault"
+        };
+        tracing::error!(class, error = %error, "scheduled sweep has no runtime");
+    })?;
     let services = warm_request_services(
         env,
         environment,
@@ -1423,6 +1478,54 @@ mod deferred_drain_tests {
     /// sums, and `unmetered` the statements D1 did not report rows for. The
     /// fixture's calls are not its statements, so a line printing one for
     /// the other fails.
+    /// **A runtime the cache could not build for an outage is a 503 the
+    /// client can retry** (D1 outage plan I4): `Retry-After` as the cache
+    /// computed it, never cached, and a body that says what happened and
+    /// gives a reference — not the cause, which can quote a D1 error.
+    #[wasm_bindgen_test]
+    async fn an_unavailable_runtime_is_a_503_with_retry_after() {
+        let response =
+            unavailable_response("D1_ERROR: Network connection lost.", 7).expect("a response");
+        assert_eq!(response.status_code(), 503);
+        let headers = response.headers();
+        assert_eq!(headers.get("Retry-After").unwrap().as_deref(), Some("7"));
+        assert_eq!(
+            headers.get("Cache-Control").unwrap().as_deref(),
+            Some("no-store")
+        );
+        let body = unavailable_body(7, uuid::Uuid::nil());
+        assert!(body.contains("Retry in 7 s"), "{body}");
+        assert!(body.contains("reference: "), "{body}");
+        assert!(!body.contains("D1_ERROR"), "{body}");
+        assert_eq!(
+            runtime_unavailable_line(7),
+            "metric=runtime_unavailable retry_after_secs=7"
+        );
+    }
+
+    /// **Every 503 the Worker returns carries `Retry-After`**: a block's
+    /// `Unavailable` sets none of its own under `InitWait::Refuse`, so the
+    /// edge adds one; a 503 that has one keeps it, and other statuses are
+    /// left alone.
+    #[wasm_bindgen_test]
+    fn every_503_carries_retry_after() {
+        let bare = with_retry_after(worker::Response::error("unavailable", 503).unwrap())
+            .expect("a response");
+        assert!(bare.headers().get("Retry-After").unwrap().is_some());
+
+        let mut own = worker::Response::error("unavailable", 503).unwrap();
+        own.headers_mut().set("Retry-After", "30").unwrap();
+        let own = with_retry_after(own).expect("a response");
+        assert_eq!(
+            own.headers().get("Retry-After").unwrap().as_deref(),
+            Some("30")
+        );
+
+        let fault =
+            with_retry_after(worker::Response::error("fault", 500).unwrap()).expect("a response");
+        assert!(fault.headers().get("Retry-After").unwrap().is_none());
+    }
+
     #[wasm_bindgen_test]
     fn the_d1_cost_line_is_logged_for_a_build_or_past_the_threshold() {
         let cost = |built, rows_read| database::D1Cost {
