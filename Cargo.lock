@@ -2658,6 +2658,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "impresspress-miniflare-fixture"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "impresspress-cloudflare",
+ "serde_json",
+ "wafer-block",
+ "wafer-core",
+ "wafer-run",
+ "wasm-bindgen",
+ "worker",
+]
+
+[[package]]
 name = "impresspress-native"
 version = "0.1.0"
 dependencies = [

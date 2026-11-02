@@ -1,0 +1,5 @@
+# worker-build output, and the CLI's staging under target/.
+/build/
+# The wafer-site-shaped release folder the content block serves; the root
+# .gitignore drops every `dist/`.
+!/dist/

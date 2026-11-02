@@ -1,0 +1,6 @@
+# Deep-merged into the generated wrangler configs (see `wrangler_overrides_path`
+# in impresspress.toml). The id is a placeholder: the harness maps every KV
+# namespace onto a local Miniflare one.
+[[kv_namespaces]]
+binding = "CONFIG_CACHE"
+id      = "miniflare-fixture-config-cache"

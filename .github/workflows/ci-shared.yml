@@ -616,6 +616,12 @@ jobs:
       - name: Clippy the webmcp demo Worker (wasm32)
         run: cargo clippy --locked -p impresspress-webmcp-demo --target wasm32-unknown-unknown --no-default-features --features target-cloudflare --all-targets -- -D warnings
 
+      # The Miniflare outage harness's fixture Worker, the same way: its code
+      # is behind `target-cloudflare` and wasm32-only. The `miniflare-outage`
+      # job builds it too, but only when its change gate lets it run.
+      - name: Clippy the Miniflare outage fixture Worker (wasm32)
+        run: cargo clippy --locked -p impresspress-miniflare-fixture --target wasm32-unknown-unknown --no-default-features --features target-cloudflare --all-targets -- -D warnings
+
       # Compile-time DatabaseService conformance assertions (wafer-run #319
       # shared suite) for the D1 + KV-cached adapters. Off-by-default feature so
       # the ~1.3k-line suite never enters the production Worker wasm; this step
@@ -778,6 +784,91 @@ jobs:
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
         run: cargo test --locked -p impresspress-password --features durable-object --target wasm32-unknown-unknown --lib
+
+  # The D1 outage scenarios end to end on the real `worker::Env` path
+  # (`scripts/miniflare-outage/`): the fixture Worker built and packaged by
+  # the CLI's own deploy code (worker-build, the entry module, the release
+  # upload, `/_deploy/prepare`, the prepared shim), served by Miniflare over a
+  # real local D1 behind a binding that can be put into an outage. It gates
+  # every deploy of the Worker runtime. Ordered after `build-wasm.yml`: the
+  # deploy driver is an example of the `impresspress` crate, whose build.rs
+  # embeds the impresspress-web pkg.
+  miniflare-outage:
+    name: Miniflare D1 outage scenarios
+    if: inputs.build-wasm-result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history only where the change gate below runs (see
+          # `cloudflare-wasm-test`'s checkout).
+          fetch-depth: ${{ inputs.pull-request && '0' || '1' }}
+
+      # What the scenarios run: the Worker runtime and core it is built from,
+      # the CLI's build and packaging (and its manifest, which pins the
+      # example), the harness itself, the workspace pins, and this file.
+      - name: Check for Worker runtime changes
+        id: outage-changes
+        if: inputs.pull-request
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-cloudflare/ crates/impresspress-core/ crates/impresspress-password/ crates/impresspress/src/cli/helpers/cloudflare/ crates/impresspress/examples/miniflare_deploy.rs crates/impresspress/Cargo.toml scripts/miniflare-outage/ Cargo.toml Cargo.lock .github/workflows/ci-shared.yml)
+          if [ -z "$CHANGED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.outage-changes.outputs.skip != 'true'
+        run: rustup toolchain install
+
+      - name: Rust cache
+        if: steps.outage-changes.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: miniflare-outage
+
+      # worker-build at the CLI's pin (`WORKER_BUILD_VERSION` in
+      # `crates/impresspress/src/cli/helpers/cloudflare/build.rs`); the harness
+      # refuses any other version on `PATH`. Cached by that version.
+      - name: Cache worker-build
+        if: steps.outage-changes.outputs.skip != 'true'
+        id: worker-build-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}
+
+      - name: Install worker-build
+        if: steps.outage-changes.outputs.skip != 'true' && steps.worker-build-cache.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version =0.8.7 --locked --root ~/worker-build
+
+      - name: Download impresspress-web pkg/
+        if: steps.outage-changes.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      - name: Set up Node
+        if: steps.outage-changes.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the harness (Miniflare, from the committed lockfile)
+        if: steps.outage-changes.outputs.skip != 'true'
+        working-directory: scripts/miniflare-outage
+        run: npm ci
+
+      - name: Run the D1 outage scenarios
+        if: steps.outage-changes.outputs.skip != 'true'
+        working-directory: scripts/miniflare-outage
+        env:
+          CARGO_TERM_COLOR: never
+        run: |
+          export PATH="$HOME/worker-build/bin:$PATH"
+          node run.mjs
 
   browser-wasm-test:
     name: Browser WASM tests (impresspress-browser)
@@ -2222,6 +2313,7 @@ jobs:
       - test-postgres
       - cloudflare
       - cloudflare-wasm-test
+      - miniflare-outage
       - browser-wasm-test
       - e2e-build
       - e2e-smoke
