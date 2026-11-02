@@ -16,7 +16,7 @@
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-use impresspress_core::builder::{boot, BootHooks, GrantSource, InitPolicy};
+use impresspress_core::builder::{boot, BootHooks, GrantSource, InitPolicy, SeedError};
 use impresspress_native::InfraConfig;
 use impresspress_server::{build_native_runtime, AppHooks, NativeBootHooks};
 use wafer_core::interfaces::database::service::DatabaseService;
@@ -193,8 +193,8 @@ struct FailingBootHooks;
 
 #[wafer_block::wafer_async_trait]
 impl BootHooks for FailingBootHooks {
-    async fn seed_after_admin_init(&self, _wafer: &mut Wafer) -> Result<(), String> {
-        Err("boom".to_string())
+    async fn seed_after_admin_init(&self, _wafer: &mut Wafer) -> Result<(), SeedError> {
+        Err(SeedError::Fault("boom".to_string()))
     }
 }
 
@@ -240,23 +240,28 @@ async fn reported_boot_captures_a_seed_failure_without_aborting() {
     );
 }
 
-/// The same seed failure under the policies the long-lived and the
-/// request-isolated targets use is fatal instead: only `/_deploy/init`, whose
-/// product is the report, keeps going.
+/// The same seed failure under the browser's `Tolerant` policy is fatal
+/// instead: only `/_deploy/init`, whose product is the report, keeps going.
+/// (`Serving`, the request path's, needs an `InitWait::Refuse` runtime, which
+/// a native build is not; its seed-failure case is
+/// `builder::boot::tests::seed_failure_is_fatal_except_under_reported`.)
 #[tokio::test]
-async fn a_seed_failure_aborts_a_tolerant_or_strict_boot() {
-    for policy in [InitPolicy::Tolerant, InitPolicy::Strict] {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("boot_seed_fatal_test.sqlite3");
-        let storage_root = tmp.path().join("storage");
-        std::fs::create_dir_all(&storage_root).expect("create storage root");
+async fn a_seed_failure_aborts_a_tolerant_boot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("boot_seed_fatal_test.sqlite3");
+    let storage_root = tmp.path().join("storage");
+    std::fs::create_dir_all(&storage_root).expect("create storage root");
 
-        let (mut wafer, _db) = build_runtime(&db_path, &storage_root).await;
-        let error = boot(&mut wafer, &FailingBootHooks, NATIVE_GRANTS, policy)
-            .await
-            .expect_err(&format!("a seed failure must abort under {policy:?}"));
-        assert!(error.to_string().contains("boom"), "{policy:?}: {error}");
-    }
+    let (mut wafer, _db) = build_runtime(&db_path, &storage_root).await;
+    let error = boot(
+        &mut wafer,
+        &FailingBootHooks,
+        NATIVE_GRANTS,
+        InitPolicy::Tolerant,
+    )
+    .await
+    .expect_err("a seed failure must abort a Tolerant boot");
+    assert!(error.to_string().contains("boom"), "{error}");
 }
 
 /// The real SQLite service, refusing one typed write: the `variables` row

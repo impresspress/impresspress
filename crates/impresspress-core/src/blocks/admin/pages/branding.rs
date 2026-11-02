@@ -98,8 +98,10 @@ mod tests {
     }
 
     /// The form's Save posts every field. When the stored branding cannot
-    /// be read the page is an error page, never the form filled from the boot
-    /// map and the declared defaults.
+    /// be read the page is the 503 (stored config fails closed as
+    /// unavailable, and an unreachable backend is a 503 — the outage plan's
+    /// I4b), never the form filled from the boot map and the declared
+    /// defaults.
     ///
     /// On a cold runtime it is the bare status page, not one inside the shell:
     /// the shell's own branding is stored config read from the same variables
@@ -116,7 +118,7 @@ mod tests {
         )
         .await;
         let html = String::from_utf8(parts.body).expect("utf-8");
-        assert_eq!(parts.status, 500, "{html}");
+        assert_eq!(parts.status, 503, "{html}");
         assert!(!html.contains("settings-form"), "{html}");
         assert!(html.contains(r#"class="status-page""#), "{html}");
         assert!(!html.contains(r#"class="shell""#), "{html}");

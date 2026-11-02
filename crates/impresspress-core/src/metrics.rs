@@ -74,6 +74,15 @@ pub enum CacheOutcome {
     /// `waited_ms` is how long it waited. Concurrent cold requests in one
     /// isolate share one build this way instead of building one each.
     Waited { waited_ms: u64 },
+    /// A runtime this isolate knows is not current — degraded, or stale — was
+    /// served, and this request published no runtime (the D1 outage plan's
+    /// I5): inside the retry window, with no probe and no build; or after this
+    /// request's own rebuild attempt failed (a probe, and a build that
+    /// published nothing); or after an unavailable probe could not confirm a
+    /// plan already known to be stale. A request that did publish a runtime,
+    /// a stale plan hydrated during an outage included, reports `ColdBuilt` or
+    /// `Rebuilt` instead, so `Server-Timing` carries its build.
+    Stale,
 }
 
 impl CacheOutcome {
@@ -86,6 +95,7 @@ impl CacheOutcome {
             Self::Rebuilt { .. } => "rebuilt",
             Self::ColdBuilt { .. } => "cold-built",
             Self::Waited { .. } => "waited",
+            Self::Stale => "stale",
         }
     }
 
@@ -93,7 +103,11 @@ impl CacheOutcome {
     /// for a build; `None` for every outcome that did not, `Waited` included.
     pub fn build_ordinal(self) -> Option<u32> {
         match self {
-            Self::Hit | Self::ProbedFresh | Self::ProbeFailed | Self::Waited { .. } => None,
+            Self::Hit
+            | Self::ProbedFresh
+            | Self::ProbeFailed
+            | Self::Waited { .. }
+            | Self::Stale => None,
             Self::Rebuilt { build_ordinal, .. } | Self::ColdBuilt { build_ordinal, .. } => {
                 Some(build_ordinal)
             }
@@ -103,7 +117,11 @@ impl CacheOutcome {
     /// Runtime-cache resolution duration when this request built a Wafer.
     pub fn build_duration_ms(self) -> Option<u64> {
         match self {
-            Self::Hit | Self::ProbedFresh | Self::ProbeFailed | Self::Waited { .. } => None,
+            Self::Hit
+            | Self::ProbedFresh
+            | Self::ProbeFailed
+            | Self::Waited { .. }
+            | Self::Stale => None,
             Self::Rebuilt { duration_ms, .. } | Self::ColdBuilt { duration_ms, .. } => {
                 Some(duration_ms)
             }

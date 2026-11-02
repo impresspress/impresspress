@@ -110,16 +110,23 @@ where
                 bump_on_write: false,
             },
         )
-        .await?;
-        let report = boot_deploy_runtime(&mut built).await?;
+        .await
+        .map_err(|e| FunnelFailure::new(e.is_unavailable(), e))?;
+        let report = boot_deploy_runtime(&mut built)
+            .await
+            .map_err(|e| FunnelFailure::new(false, e))?;
         let plan_draft = if prepare_plan && report.ok {
-            impresspress_core::builder::seal_prepared_plan(&built.db, &built.plan_exporter).await?;
-            let identity = environment.prepared_runtime_identity()?;
+            impresspress_core::builder::seal_prepared_plan(&built.db, &built.plan_exporter)
+                .await
+                .map_err(|e| FunnelFailure::new(e.is_transient(), e))?;
+            let identity = environment
+                .prepared_runtime_identity()
+                .map_err(|e| FunnelFailure::new(false, e))?;
             Some((built.plan_exporter.clone(), identity))
         } else {
             None
         };
-        Ok::<_, Box<dyn std::error::Error>>((report, plan_draft))
+        Ok::<_, FunnelFailure>((report, plan_draft))
     }
     .await;
 
@@ -195,8 +202,33 @@ where
                     worker::console_log!("failed-funnel bump skipped (KV binding): {error}")
                 }
             }
-            worker::console_log!("deploy_init failed: {e}");
-            worker::Response::error(format!("deploy_init: {e}"), 500)
+            worker::console_log!("deploy_init failed: {}", e.message);
+            // An outage (D1 unreachable for the build's read or the seal's) is
+            // a 503 the operator retries; anything else the 500 it was.
+            if e.transient {
+                let mut response =
+                    worker::Response::error(format!("deploy_init: {}", e.message), 503)?;
+                response.headers_mut().set("Retry-After", "1")?;
+                Ok(response)
+            } else {
+                worker::Response::error(format!("deploy_init: {}", e.message), 500)
+            }
+        }
+    }
+}
+
+/// Why the deploy funnel failed, and whether a retry may cure it, kept from
+/// each step's typed error rather than read back from its text.
+struct FunnelFailure {
+    transient: bool,
+    message: String,
+}
+
+impl FunnelFailure {
+    fn new(transient: bool, error: impl std::fmt::Display) -> Self {
+        Self {
+            transient,
+            message: error.to_string(),
         }
     }
 }

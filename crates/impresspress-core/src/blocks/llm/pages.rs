@@ -1838,7 +1838,14 @@ mod settings_outage_tests {
     /// what an untouched deployment renders. A failed read must not say it.
     #[tokio::test]
     async fn a_failing_override_read_renders_the_error_page_not_no_overrides() {
-        let ctx = TestContext::with_llm().await.break_reads();
+        // Warm: the page chrome's stored config was read before the outage,
+        // so the read that fails is the override list under test (a
+        // stored-config read failing closed would be the 503 first).
+        let ctx = TestContext::with_llm()
+            .await
+            .with_warm_config()
+            .await
+            .break_reads();
         let msg = admin_msg("retrieve", "/b/llm/settings");
         assert_eq!(
             output_http_status(settings_page(&ctx, &msg).await).await,

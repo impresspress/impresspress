@@ -299,6 +299,8 @@ async fn build(
         ImpresspressBuilder::new().database(db.clone(), Backend::Sqlite),
     );
     let builder = builder
+        // As `build_runtime` does: the request path's `Serving` boot requires it.
+        .init_wait(wafer_run::InitWait::Refuse)
         .storage(Arc::new(InMemoryStorageService::new()))
         .crypto(Arc::new(
             wafer_block_crypto::service::Argon2JwtCryptoService::new(JWT_SECRET.to_string())
@@ -331,10 +333,10 @@ async fn build(
     }
 }
 
-/// The variables snapshot `build_runtime` creates: retrying a failed read on
-/// its own, on the wall clock.
+/// The variables snapshot `build_runtime` creates: a failed read is retried
+/// only by rebuilding the runtime, never on its own.
 fn workers_snapshot() -> Arc<VariablesSnapshot> {
-    Arc::new(VariablesSnapshot::new(RetryMode::Backoff))
+    Arc::new(VariablesSnapshot::new(RetryMode::Rebuild))
 }
 
 /// `build_runtime`'s order: the database (D1 speaks SQLite) goes into the
@@ -1869,7 +1871,10 @@ impl HandClock {
         self.0.store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// `build_runtime`'s snapshot (`Backoff`), on this clock.
+    /// A snapshot that retries on its own (`Backoff`), on this clock — not
+    /// `build_runtime`'s `Rebuild`, deliberately: moving the clock past the
+    /// retry is how a test makes a remembered failure read again, so any
+    /// stored-config read a request makes reaches D1 and is seen.
     fn snapshot(&self) -> Arc<VariablesSnapshot> {
         let now = Arc::clone(&self.0);
         Arc::new(VariablesSnapshot::with_clock(
@@ -1917,7 +1922,8 @@ fn reads_variables(trips: &[RoundTrip]) -> bool {
 /// declared default; its request runs before the retry, so the remembered
 /// failure answers with no query. The snapshots' clock is the test's
 /// ([`HandClock`]), so neither half depends on how fast the test runs.
-/// (Today's 500 becomes the outage plan's 503 in its I4b.)
+/// It answers 503 (the outage plan's I4b: `Unavailable` is a 503 at the
+/// classifier), never the 500 a fault is.
 #[tokio::test]
 async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     let _generation = GENERATION.lock().await;
@@ -1962,8 +1968,8 @@ async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     ledger.take();
     assert_eq!(
         request(&wafer, &db, "/", None).await,
-        500,
-        "the landing switch fails closed: an error, not the redirect its default decides"
+        503,
+        "the landing switch fails closed: a 503 (I4b), not the redirect its default decides"
     );
     assert!(
         !reads_variables(&ledger.take()),
@@ -2038,6 +2044,192 @@ async fn admin_init_reads_no_stored_config_and_a_config_declaring_block_reads_fi
         "the first stored-config read came from `{first_reader}`, which declares no config \
          keys, so its Init read through the config block (a fault there is `Unavailable`, \
          transient) before any source load could classify it; declaring: {declaring:?}"
+    );
+}
+
+/// A prepared request-path build booted while its database refuses the
+/// variables table with `fault` from the first read: the incident shape, an
+/// outage during a cold boot. The snapshot is `RetryMode::Rebuild`, as
+/// Cloudflare's is, so a failure is remembered for the whole build.
+async fn boot_prepared_while_variables_fail(
+    path: &Path,
+    ledger: &Arc<Ledger>,
+    plan: &PreparedRuntimePlan,
+    fault: Fault,
+) -> (
+    Result<impresspress_core::builder::BootReport, impresspress_core::builder::BootError>,
+    Wafer,
+    Arc<dyn DatabaseService>,
+) {
+    let shaped = Arc::new(D1Shaped::open(path, Arc::clone(ledger)));
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let mut built = build(
+        &db,
+        Some(plan),
+        false,
+        &HashMap::new(),
+        Arc::new(VariablesSnapshot::new(RetryMode::Rebuild)),
+    )
+    .await;
+    shaped.fail_table(variables::TABLE, fault);
+    let booted = boot_request_runtime(
+        &mut built.wafer,
+        &db,
+        &built.block_settings,
+        built.config.clone(),
+        RequestBuild::Prepared,
+    )
+    .await;
+    (booted, built.wafer, db)
+}
+
+/// The blocks of `wafer` that declare config keys, by registered name.
+fn config_declaring(wafer: &Wafer) -> Vec<String> {
+    let declaring: Vec<String> = wafer
+        .block_infos()
+        .into_iter()
+        .filter(|info| !info.config_keys.is_empty())
+        .map(|info| info.name)
+        .collect();
+    wafer
+        .block_names()
+        .into_iter()
+        .filter(|name| declaring.contains(name))
+        .collect()
+}
+
+/// **A variables fault a retry cannot fix fails a `Serving` boot
+/// permanently** (#272 review M1; addendum §2.5 test 5). Admin reads no
+/// stored config (IP-B0), so the boot reaches the first config-declaring
+/// block, whose source load classifies the remembered failure as a
+/// `SourceFault`: a permanent `Init` failure, which `Serving` does not
+/// degrade. Before IP-B0 admin's dialect read turned every variables
+/// failure into its own transient failure.
+#[tokio::test]
+async fn a_serving_boot_over_a_variables_fault_fails_permanently() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    let (booted, wafer, _db) = boot_prepared_while_variables_fail(
+        &path,
+        &ledger,
+        &plan,
+        Fault::Internal("D1_ERROR: some unclassified fault: SQLITE_ERROR".to_string()),
+    )
+    .await;
+    let error = booted.expect_err("a fault a retry cannot fix fails the boot");
+    let first = config_declaring(&wafer)
+        .into_iter()
+        .find(|name| name != impresspress_core::blocks::admin::ADMIN_BLOCK_ID)
+        .expect("a config-declaring block");
+    match &error {
+        impresspress_core::builder::BootError::BlockInit {
+            block,
+            error: wafer_run::InitError::Permanent(_),
+        } => assert_eq!(block, &first, "{error}"),
+        other => panic!("expected the first config-declaring block's permanent failure: {other}"),
+    }
+    assert!(!error.is_transient());
+}
+
+/// The blocks that read **shared** stored config at `Init` without declaring
+/// it — shared keys are never declared by a block (`config_vars`) — each with
+/// why. Together with the config-declaring blocks, they are exactly what a
+/// variables outage degrades; a block that starts reading stored config at
+/// `Init` belongs here, with its reason, or must stop.
+const SHARED_CONFIG_INIT_READERS: &[(&str, &str)] = &[(
+    impresspress_core::blocks::auth::AUTH_BLOCK_ID,
+    "`AuthConfig::from_ctx` reads the WAFER_RUN_SHARED__AUTH__* settings and the \
+     bootstrap credentials to decide whether to bootstrap an admin",
+)];
+
+/// **A variables outage publishes a degraded runtime** (addendum §2.5 test
+/// 6): exactly the blocks that read stored config at `Init` are degraded —
+/// the config-declaring ones and [`SHARED_CONFIG_INIT_READERS`] — while admin
+/// and every `site-main` step block are `Ready`. A degraded block answers
+/// `Unavailable` and is not initialized by the request.
+#[tokio::test]
+async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    let (booted, wafer, db) =
+        boot_prepared_while_variables_fail(&path, &ledger, &plan, Fault::Unavailable).await;
+    let report = booted.expect("an outage publishes degraded");
+
+    let mut degraded: Vec<String> = report.degraded.iter().map(|d| d.block.clone()).collect();
+    degraded.sort();
+    let declaring = config_declaring(&wafer);
+    let mut readers: Vec<String> = declaring
+        .iter()
+        .cloned()
+        .chain(
+            SHARED_CONFIG_INIT_READERS
+                .iter()
+                .map(|(block, _why)| (*block).to_string()),
+        )
+        .collect();
+    readers.sort();
+    assert_eq!(
+        degraded, readers,
+        "exactly the blocks that read stored config at Init are degraded"
+    );
+
+    let states = wafer.init_states();
+    let ready = |name: &str| matches!(states.get(name), Some(wafer_run::BlockInitState::Ready));
+    assert!(ready(impresspress_core::blocks::admin::ADMIN_BLOCK_ID));
+    let flow: Value = serde_json::from_str(impresspress_core::flows::site_main::JSON)
+        .expect("the site-main flow parses");
+    for step in flow["steps"].as_array().expect("steps") {
+        let block = step["block"].as_str().expect("a step block");
+        assert!(
+            ready(block),
+            "site-main step `{block}` is {:?}",
+            states.get(block)
+        );
+    }
+
+    // A route that needs no stored config still serves, over the database
+    // that is still refusing the variables table.
+    assert_eq!(
+        request(&wafer, &db, "/health", None).await,
+        200,
+        "a block with no D1 dependency serves"
+    );
+
+    let degraded_block = declaring.first().expect("a degraded block").clone();
+    ledger.take();
+    let refused = wafer
+        .run_block(
+            &degraded_block,
+            wafer_run::Message::new("probe"),
+            InputStream::empty(),
+        )
+        .await
+        .collect_buffered()
+        .await
+        .expect_err("a degraded block answers an error");
+    assert!(
+        matches!(&refused, wafer_block::TerminalNotResponse::Error(e) if e.code == wafer_run::ErrorCode::Unavailable),
+        "{refused:?}"
+    );
+    assert!(
+        matches!(
+            wafer.init_states().get(&degraded_block),
+            Some(wafer_run::BlockInitState::Retrying { .. })
+        ),
+        "`{degraded_block}` is still unsettled"
+    );
+    let sent = ledger.take();
+    assert!(
+        sent.is_empty(),
+        "the dispatch ran no Init on `{degraded_block}` — an Init would read its config: {sent:#?}"
     );
 }
 

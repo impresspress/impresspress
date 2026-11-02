@@ -1159,6 +1159,73 @@ async fn a_spent_call_budget_is_transient_fresh_and_remembered() {
     }
 }
 
+/// **A remembered failure is visible without a query** (D1 outage plan I5:
+/// a `RetryMode::Rebuild` owner rebuilds when its runtime's snapshot fails):
+/// `remembers_a_failure` is true from the failed read until a config write,
+/// even with the fault gone, and asking sends nothing.
+#[tokio::test]
+async fn a_remembered_failure_is_visible_without_a_query() {
+    let _generation = GENERATION.lock().await;
+    let (counting, shaped, db) = shaped().await;
+    seed(&db, "WAFER_RUN__AUTH__K", "stored").await;
+    let snapshot = Clock::default().snapshot(RetryMode::Rebuild);
+    assert!(!snapshot.remembers_a_failure(), "nothing read yet");
+
+    snapshot.read(&db).await.expect("a healthy read");
+    assert!(!snapshot.remembers_a_failure());
+
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    impresspress_core::config_generation::note_config_write();
+    snapshot
+        .read(&db)
+        .await
+        .expect_err("the outage fails the read");
+    shaped.clear_fault();
+    let lists = counting.lists();
+    assert!(snapshot.remembers_a_failure());
+    assert_eq!(counting.lists(), lists, "asking sends no query");
+
+    impresspress_core::config_generation::note_config_write();
+    assert!(
+        !snapshot.remembers_a_failure(),
+        "a config write invalidates the remembered failure"
+    );
+}
+
+/// **The remembered failure is judged on the snapshot's own generation**
+/// (#274): a snapshot hosting one deployment among the many a test process
+/// runs sees its deployment's config writes and no one else's — the same
+/// generation `read` judges a remembered failure by.
+#[tokio::test]
+async fn a_remembered_failure_is_judged_on_the_snapshots_own_generation() {
+    // It bumps the process generation, which every other test here reads.
+    let _generation = GENERATION.lock().await;
+    let (_counting, shaped, db) = shaped().await;
+    seed(&db, "WAFER_RUN__AUTH__K", "stored").await;
+    let fixture = impresspress_core::config_generation::FixtureGeneration::default();
+    let snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Rebuild).with_generation(
+        impresspress_core::config_generation::GenerationSource::Fixture(fixture.clone()),
+    ));
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    snapshot
+        .read(&db)
+        .await
+        .expect_err("the outage fails the read");
+    shaped.clear_fault();
+    assert!(snapshot.remembers_a_failure());
+
+    impresspress_core::config_generation::note_config_write();
+    assert!(
+        snapshot.remembers_a_failure(),
+        "another deployment's write does not invalidate this one's failure"
+    );
+    fixture.note_write();
+    assert!(
+        !snapshot.remembers_a_failure(),
+        "this deployment's own write does"
+    );
+}
+
 /// A block declaring one config key, counting its `Init`s.
 struct Configured {
     inits: AtomicUsize,
