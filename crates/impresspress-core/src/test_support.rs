@@ -125,6 +125,17 @@ pub struct TestContext {
     /// database (an outage, [`Self::break_reads`]) re-installs the block over
     /// the wrapper but keeps the snapshot, as an outage keeps a warm
     /// runtime's. [`Self::with_warm_config`] fills it.
+    ///
+    /// It compares against the fixture's own config-write generation, not
+    /// the process's, unless [`Self::with_process_config_generation`] said
+    /// so. That generation is moved by every write that reaches this
+    /// fixture's variables table ([`ConfigWritesDb`], innermost around its
+    /// database, so a fault-injecting wrapper outside it that refuses a write
+    /// moves nothing). Its own because a test binary runs every fixture in one
+    /// process: on the process's generation, another test's config write
+    /// invalidates this fixture's warm snapshot, which then reads again —
+    /// through a database this test may have broken on purpose. See
+    /// [`crate::config_generation::GenerationSource`].
     variables_snapshot: Arc<crate::config_source::VariablesSnapshot>,
     /// The blocks [`Self::register_block`] registered, by name.
     pub blocks: Arc<Mutex<HashMap<String, Arc<dyn Block>>>>,
@@ -331,6 +342,18 @@ impl TestContext {
         svc: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
         db_file: Option<Arc<TempDbFile>>,
     ) -> Self {
+        let config_generation = crate::config_generation::FixtureGeneration::default();
+        let svc: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            Arc::new(ConfigWritesDb {
+                inner: svc,
+                generation: config_generation.clone(),
+            });
+        // The same generation, so this fixture's writes reach its snapshot.
+        let variables_snapshot = Arc::new(
+            crate::config_source::VariablesSnapshot::default().with_generation(
+                crate::config_generation::GenerationSource::Fixture(config_generation),
+            ),
+        );
         let database_block: Arc<dyn Block> = Arc::new(
             wafer_core::service_blocks::database::DatabaseBlock::new(svc.clone()),
         );
@@ -340,7 +363,7 @@ impl TestContext {
             database_block,
             config: Arc::new(HashMap::new()),
             config_store: false,
-            variables_snapshot: Arc::default(),
+            variables_snapshot,
             blocks: Arc::new(Mutex::new(HashMap::new())),
             block_infos: Vec::new(),
             frame: dispatch::Frame::Unframed,
@@ -1799,6 +1822,31 @@ impl TestContext {
         self
     }
 
+    /// Put the fixture's variables snapshot on the process-wide config-write
+    /// generation, the one every production runtime reads, in place of the
+    /// fixture's own.
+    ///
+    /// For a test of native's invalidation path itself: there nothing
+    /// observes the database, and each `variables` repo writer bumps the
+    /// process's generation by hand (`config_generation::note_config_write`).
+    /// On the fixture's own generation such a test would pass with a writer's
+    /// bump deleted, because the fixture's database sees the write anyway.
+    ///
+    /// The price is the one the fixture's own generation exists to avoid:
+    /// every other test's config write moves this one too. Each costs a
+    /// re-read, which on a healthy database answers the same rows, so a test
+    /// asserting what a read returns is unaffected. One that counts reads, or
+    /// that breaks the database once the snapshot is warm, must not use this.
+    ///
+    /// Call it before anything reads config: it starts a new, empty snapshot.
+    pub fn with_process_config_generation(mut self) -> Self {
+        self.variables_snapshot = Arc::default();
+        if self.config_store {
+            self.install_config_block();
+        }
+        self
+    }
+
     /// Read the `variables` table into the fixture's snapshot now, as a warm
     /// runtime already has it.
     ///
@@ -2087,6 +2135,251 @@ wafer_core::forward_database_service! {
         > {
             self.note(|log| log.batch_ops.push(ops.len()));
             self.inner.batch(ops).await
+        }
+    }
+}
+
+/// The decorator behind [`TestContext`]'s own config-write generation: moves
+/// it after every write to a table the variables snapshot is built from
+/// ([`crate::config_generation::writes_invalidate_config_snapshot`]) succeeds,
+/// and forwards every call to `inner` unchanged.
+///
+/// Every write that names a collection is observed, whichever operation
+/// carries it; a refused write moves nothing, as production bumps only after a
+/// write has committed. Raw SQL (`exec_raw`, `exec_raw_transaction`) is not
+/// observed: it names no collection, and production records no config write
+/// for it either — the migration that reshapes the table is what the
+/// snapshot's pre-migration-002 rule covers.
+///
+/// Cloudflare's `kv_cached_db` observes writes at the same layer. Native has
+/// no such layer, so each `variables` repo writer bumps the process's
+/// generation by hand; a test of those bumps runs on
+/// [`TestContext::with_process_config_generation`].
+struct ConfigWritesDb {
+    inner: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+    generation: crate::config_generation::FixtureGeneration,
+}
+
+impl ConfigWritesDb {
+    fn inner_service(&self) -> &dyn wafer_core::interfaces::database::service::DatabaseService {
+        self.inner.as_ref()
+    }
+
+    /// `result`, after moving the generation when it is a successful write to
+    /// `collection` that the snapshot reads.
+    fn noted<T>(
+        &self,
+        collection: &str,
+        result: Result<T, wafer_core::interfaces::database::service::DatabaseError>,
+    ) -> Result<T, wafer_core::interfaces::database::service::DatabaseError> {
+        if result.is_ok() && crate::config_generation::writes_invalidate_config_snapshot(collection)
+        {
+            self.generation.note_write();
+        }
+        result
+    }
+}
+
+wafer_core::forward_database_service! {
+    impl DatabaseService for ConfigWritesDb {
+        forward_to inner_service();
+
+        ops {
+            get: forward,
+            list: forward,
+            create: custom,
+            create_many: custom,
+            update: custom,
+            delete: custom,
+            count: forward,
+            sum: forward,
+            query_raw: forward,
+            exec_raw: forward,
+            exec_raw_transaction: forward,
+            delete_where: custom,
+            delete_where_count: custom,
+            take_where: custom,
+            update_where: custom,
+            update_where_count: custom,
+            increment_field_where: custom,
+            upsert: custom,
+            aggregate: forward,
+            batch: custom,
+            insert_guarded: custom,
+            update_guarded: custom,
+            ensure_schema_table: forward,
+            ensure_schema_tables: forward,
+            schema_table_exists: forward,
+            schema_columns: forward,
+            schema_drop_table: forward,
+            schema_add_column: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
+        }
+
+        async fn create(
+            &self,
+            collection: &str,
+            data: HashMap<String, serde_json::Value>,
+        ) -> Result<
+            wafer_core::interfaces::database::service::Record,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            self.noted(collection, self.inner.create(collection, data).await)
+        }
+
+        async fn create_many(
+            &self,
+            collection: &str,
+            rows: Vec<HashMap<String, serde_json::Value>>,
+        ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+            self.noted(collection, self.inner.create_many(collection, rows).await)
+        }
+
+        async fn update(
+            &self,
+            collection: &str,
+            id: &str,
+            data: HashMap<String, serde_json::Value>,
+        ) -> Result<
+            wafer_core::interfaces::database::service::Record,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            self.noted(collection, self.inner.update(collection, id, data).await)
+        }
+
+        async fn delete(
+            &self,
+            collection: &str,
+            id: &str,
+        ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
+            self.noted(collection, self.inner.delete(collection, id).await)
+        }
+
+        async fn delete_where(
+            &self,
+            collection: &str,
+            filters: &[wafer_block::db::Filter],
+        ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
+            self.noted(collection, self.inner.delete_where(collection, filters).await)
+        }
+
+        async fn delete_where_count(
+            &self,
+            collection: &str,
+            filters: &[wafer_block::db::Filter],
+        ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+            self.noted(collection, self.inner.delete_where_count(collection, filters).await)
+        }
+
+        async fn take_where(
+            &self,
+            collection: &str,
+            filters: &[wafer_block::db::Filter],
+        ) -> Result<
+            Vec<wafer_core::interfaces::database::service::Record>,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            self.noted(collection, self.inner.take_where(collection, filters).await)
+        }
+
+        async fn update_where(
+            &self,
+            collection: &str,
+            filters: &[wafer_block::db::Filter],
+            data: HashMap<String, serde_json::Value>,
+        ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
+            self.noted(collection, self.inner.update_where(collection, filters, data).await)
+        }
+
+        async fn update_where_count(
+            &self,
+            collection: &str,
+            filters: &[wafer_block::db::Filter],
+            data: HashMap<String, serde_json::Value>,
+        ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+            self.noted(
+                collection,
+                self.inner.update_where_count(collection, filters, data).await,
+            )
+        }
+
+        async fn increment_field_where(
+            &self,
+            collection: &str,
+            col: &str,
+            delta: i64,
+            filters: &[wafer_block::db::Filter],
+        ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+            self.noted(
+                collection,
+                self.inner
+                    .increment_field_where(collection, col, delta, filters)
+                    .await,
+            )
+        }
+
+        async fn upsert(
+            &self,
+            collection: &str,
+            spec: wafer_core::interfaces::database::service::UpsertSpec,
+        ) -> Result<
+            Option<wafer_core::interfaces::database::service::Record>,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            self.noted(collection, self.inner.upsert(collection, spec).await)
+        }
+
+        async fn batch(
+            &self,
+            ops: Vec<wafer_core::interfaces::database::service::WriteOp>,
+        ) -> Result<
+            Vec<wafer_core::interfaces::database::service::WriteOutcome>,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            // One transaction: every op or none, so one move covers it.
+            let observed = ops.iter().any(|op| {
+                crate::config_generation::writes_invalidate_config_snapshot(op.collection())
+            });
+            let result = self.inner.batch(ops).await;
+            if observed && result.is_ok() {
+                self.generation.note_write();
+            }
+            result
+        }
+
+        async fn insert_guarded(
+            &self,
+            collection: &str,
+            data: HashMap<String, serde_json::Value>,
+            guards: &[wafer_core::interfaces::database::service::CapGuard],
+        ) -> Result<
+            wafer_core::interfaces::database::service::GuardedInsert,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            self.noted(
+                collection,
+                self.inner.insert_guarded(collection, data, guards).await,
+            )
+        }
+
+        async fn update_guarded(
+            &self,
+            collection: &str,
+            filters: &[wafer_block::db::Filter],
+            data: HashMap<String, serde_json::Value>,
+            guards: &[wafer_core::interfaces::database::service::CapGuard],
+        ) -> Result<
+            wafer_core::interfaces::database::service::GuardedUpdate,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            self.noted(
+                collection,
+                self.inner
+                    .update_guarded(collection, filters, data, guards)
+                    .await,
+            )
         }
     }
 }

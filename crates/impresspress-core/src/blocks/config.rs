@@ -828,8 +828,10 @@ mod tests {
     async fn an_admin_write_invalidates_an_already_warm_snapshot() {
         const KEY: &str = crate::config_vars::PRIMARY_COLOR_KEY;
 
+        // Native's generation: what is under test is the repo's own bump.
         let mut ctx = TestContext::new()
             .await
+            .with_process_config_generation()
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx.fixture())
             .await
@@ -912,8 +914,10 @@ mod tests {
     async fn an_admin_write_on_another_worker_reaches_a_warm_snapshot() {
         const KEY: &str = crate::config_vars::PRIMARY_COLOR_KEY;
 
+        // Native's generation: what is under test is the repo's own bump.
         let mut ctx = TestContext::new()
             .await
+            .with_process_config_generation()
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx.fixture())
             .await
@@ -971,6 +975,77 @@ mod tests {
             "a config write on one thread must invalidate the snapshot every \
              other thread reads, or native serves the pre-write value until it \
              restarts"
+        );
+    }
+
+    /// A fixture's own config write reaches its warm snapshot, on the
+    /// fixture's own generation: its database observes the write.
+    ///
+    /// Every fixture test that writes config and reads it back rests on this;
+    /// the two tests above pin the same property on native's generation.
+    #[tokio::test]
+    async fn a_fixture_write_reaches_its_own_warm_snapshot() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        wafer_core::clients::config::set(&ctx.fixture(), APP_NAME_KEY, "first")
+            .await
+            .expect("store a row");
+        let ctx = ctx.with_warm_config().await;
+
+        variables::upsert_by_key(
+            &ctx.fixture(),
+            APP_NAME_KEY,
+            VariablePatch {
+                value: Some("second".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the admin write lands in the table");
+
+        assert_eq!(
+            wafer_core::clients::config::get_default(&ctx, APP_NAME_KEY, "unset")
+                .await
+                .expect("config read"),
+            "second",
+            "a write through the fixture's database must invalidate its warm snapshot"
+        );
+    }
+
+    /// Another fixture's config write leaves this one's warm snapshot warm.
+    ///
+    /// A test binary runs every fixture in one process. On the process's
+    /// generation, a write in any other test made this snapshot read again,
+    /// so an outage test that warmed it and then broke the database saw its
+    /// stored-config read fail too, whenever a parallel test happened to
+    /// write config in between: the admin dashboard's outage test failed two
+    /// runs in four that way. Both writes are made here: one through another
+    /// fixture's database, and one bump of the process's generation, which
+    /// is what every native writer makes.
+    #[tokio::test]
+    async fn another_fixtures_config_write_leaves_a_warm_snapshot_warm() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        wafer_core::clients::config::set(&ctx.fixture(), APP_NAME_KEY, "stored")
+            .await
+            .expect("store a row");
+        let ctx = ctx.with_warm_config().await.break_reads();
+
+        let other = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        wafer_core::clients::config::set(&other.fixture(), APP_NAME_KEY, "elsewhere")
+            .await
+            .expect("store a row in the other fixture");
+        crate::config_generation::note_config_write();
+
+        assert_eq!(
+            wafer_core::clients::config::get_default(&ctx, APP_NAME_KEY, "unset")
+                .await
+                .expect("a warm snapshot answers without reading the broken database"),
+            "stored"
         );
     }
 
