@@ -56,11 +56,11 @@ fn backend_error(error: WaferError, context: &str) -> AuthError {
         return AuthError::Backend(ended);
     }
     match classify_db_error(error, None, context) {
-        DbFailure::Refused(refusal) => AuthError::Backend(refusal.into_error()),
-        DbFailure::Internal(fault) if fault.code() == ErrorCode::Unavailable => {
-            tracing::warn!(context = %context, error = %fault, "auth backend unavailable");
+        // Logged by the classifier, which replaced the backend's text.
+        DbFailure::Refused(refusal) if refusal.code() == ErrorCode::Unavailable => {
             AuthError::ProviderDown("Authentication is temporarily unavailable".to_string())
         }
+        DbFailure::Refused(refusal) => AuthError::Backend(refusal.into_error()),
         DbFailure::Internal(fault) => {
             tracing::error!(context = %context, error = %fault, "auth backend call failed");
             AuthError::Backend(WaferError::new(

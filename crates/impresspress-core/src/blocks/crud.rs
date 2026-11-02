@@ -58,6 +58,12 @@ use crate::{
 ///   auto-retry it. Its message gives the numbers, and its detail code —
 ///   `database.call_budget_exhausted`, the body's `code` — is kept, because
 ///   it is the only thing that tells a client this 429 from a rate limit's.
+/// - [`ErrorCode::Unavailable`] is a backend that is not responding — a D1
+///   outage, or a stored-config read that fails closed while one lasts — so
+///   it is a **503**, the status a client retries, never the 500 a fault is.
+///   Its message can quote the backend (a D1 error text), so it is logged
+///   here and the client is told only [`UNAVAILABLE`]; the Cloudflare edge
+///   adds the `Retry-After`.
 /// - Any `InvalidArgument` from the database is a statement this repo built
 ///   wrong, and stays internal (see below).
 /// - [`ErrorCode::AlreadyExists`] is a write that duplicates a primary or
@@ -136,6 +142,9 @@ pub fn db_error_notice(error: wafer_run::WaferError, context: &str) -> &'static 
         DbFailure::Refused(refusal) if refusal.code() == ErrorCode::AlreadyExists => {
             "it duplicates an entry that already exists"
         }
+        DbFailure::Refused(refusal) if refusal.code() == ErrorCode::Unavailable => {
+            "it is temporarily unavailable"
+        }
         DbFailure::Refused(_) => "access to it was denied",
         DbFailure::Internal(fault) => {
             tracing::error!(context = %context, error = %fault, "fragment read failed");
@@ -201,7 +210,7 @@ pub struct Refusal(wafer_run::WaferError);
 
 impl Refusal {
     /// The refusal's code: `NotFound`, `PermissionDenied`,
-    /// `ResourceExhausted` or `AlreadyExists`.
+    /// `ResourceExhausted`, `AlreadyExists` or `Unavailable`.
     pub fn code(&self) -> ErrorCode {
         self.0.code
     }
@@ -277,6 +286,14 @@ pub fn classify_db_error(
             refused(ErrorCode::PermissionDenied, "Access denied")
         }
         (ErrorCode::ResourceExhausted, _) => refused(ErrorCode::ResourceExhausted, &error.message),
+        (ErrorCode::Unavailable, _) => {
+            tracing::warn!(
+                context = %context,
+                error = %error,
+                "a backend this call needs is not responding",
+            );
+            refused(ErrorCode::Unavailable, UNAVAILABLE)
+        }
         (ErrorCode::AlreadyExists, _) => {
             tracing::info!(
                 context = %context,
@@ -296,6 +313,13 @@ fn is_call_budget_refusal(error: &wafer_run::WaferError) -> bool {
     use wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
     error.code == ErrorCode::ResourceExhausted && error.detail_code() == Some(CALL_BUDGET_EXHAUSTED)
 }
+
+/// What a client is told when a backend a call needs is not responding
+/// ([`classify_db_error`]'s `Unavailable` arm): that it is temporary, and
+/// nothing of the backend's own text.
+pub const UNAVAILABLE: &str =
+    "Temporarily unavailable: a service this request depends on is not responding. \
+     Please try again shortly.";
 
 /// What a client is told when its write duplicated a unique key and the route
 /// did not name the key (see [`classify_db_error`] and [`TakenKey`]).
@@ -790,6 +814,27 @@ mod db_error_tests {
     }
 
     /// `db_error_internal` is the same classification MINUS the 404: a
+    /// An unreachable backend is a 503 on the plain helpers and a
+    /// "temporarily unavailable" notice behind a swap; the backend's text is
+    /// never passed on (D1 outage plan I4b).
+    #[tokio::test]
+    async fn an_unavailable_backend_is_a_503_not_the_500() {
+        let out = db_error_internal(
+            wafer_err(ErrorCode::Unavailable, "D1_ERROR: Network connection lost."),
+            "Database error",
+        );
+        assert_eq!(output_http_status(out).await, 503);
+        assert_eq!(
+            db_error_notice(
+                wafer_err(ErrorCode::Unavailable, "D1_ERROR: Network connection lost."),
+                "fragment"
+            ),
+            "it is temporarily unavailable"
+        );
+        let out = db_error_internal(wafer_err(ErrorCode::Internal, "corrupt"), "Database error");
+        assert_eq!(output_http_status(out).await, 500);
+    }
+
     /// `NotFound` from a call the block addressed names no row of the
     /// caller's, so it is a 500, not their missing row.
     #[tokio::test]

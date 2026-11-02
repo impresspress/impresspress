@@ -781,9 +781,9 @@ pub fn server_error_response(msg: &wafer_run::Message) -> wafer_run::OutputStrea
 
 /// A refusal a page's read met, as [`crate::blocks::crud::db_error_page`]
 /// classified it: the 403 a WRAP denial becomes, the 429 a quota keeps, the
-/// database call budget's refusal (which says reloading will not help)
-/// and the 409 a duplicate key is, as a styled page for a browser and as the
-/// refusal itself for an API caller.
+/// database call budget's refusal (which says reloading will not help), the
+/// 409 a duplicate key is and the 503 an unreachable backend is, as a styled
+/// page for a browser and as the refusal itself for an API caller.
 ///
 /// It takes a [`crate::blocks::crud::Refusal`], which only
 /// [`crate::blocks::crud::classify_db_error`] builds, because the API branch
@@ -854,6 +854,13 @@ fn refusal_copy(error: &wafer_run::WaferError) -> Option<StatusCopy> {
             code: "429",
             title: "Too many requests",
             body: "This page is over its usage limit right now. Please try again later.",
+        }),
+        wafer_run::ErrorCode::Unavailable => Some(StatusCopy {
+            status: 503,
+            code: "503",
+            title: "Temporarily unavailable",
+            body: "A service this page depends on is not responding. Please try again in a \
+                   minute.",
         }),
         wafer_run::ErrorCode::AlreadyExists => Some(StatusCopy {
             status: 409,
@@ -1228,6 +1235,54 @@ mod tests {
             serde_json::json!(crate::blocks::crud::DUPLICATE_KEY),
             "{json}"
         );
+    }
+
+    /// An unreachable backend on a page is the styled 503 for a browser and
+    /// the sanitized 503 JSON for an API caller — the status a client
+    /// retries — and neither carries the backend's text (a D1 error). An
+    /// `Internal` failure stays the 500 (D1 outage plan I4b).
+    #[tokio::test]
+    async fn an_unavailable_backend_on_a_page_is_the_503_and_a_fault_the_500() {
+        let request = |accept: &str| {
+            let mut msg = Message::new("http.request");
+            msg.set_meta("http.header.accept", accept);
+            msg
+        };
+        let outage = || {
+            wafer_run::WaferError::new(
+                wafer_run::ErrorCode::Unavailable,
+                "the variables table could not be read: D1_ERROR: Network connection lost.",
+            )
+        };
+
+        let page = wafer_block::http_codec::collect_http_response(
+            crate::blocks::crud::db_error_page(&request("text/html"), outage(), "test page"),
+        )
+        .await;
+        let html = String::from_utf8_lossy(&page.body);
+        assert_eq!(page.status, 503, "{html}");
+        assert!(html.contains("Temporarily unavailable"), "{html}");
+        assert!(!html.contains("D1_ERROR"), "the backend's text leaked: {html}");
+
+        let api = wafer_block::http_codec::collect_http_response(
+            crate::blocks::crud::db_error_page(&request("application/json"), outage(), "test page"),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_slice(&api.body).unwrap_or_default();
+        assert_eq!(api.status, 503, "{json}");
+        assert_eq!(
+            json["message"],
+            serde_json::json!(crate::blocks::crud::UNAVAILABLE),
+            "{json}"
+        );
+
+        let fault = wafer_block::http_codec::collect_http_response(crate::blocks::crud::db_error_page(
+            &request("text/html"),
+            wafer_run::WaferError::new(wafer_run::ErrorCode::Internal, "corrupt row"),
+            "test page",
+        ))
+        .await;
+        assert_eq!(fault.status, 500);
     }
 
     /// A toast travels in the `HX-Trigger` header, and the HTTP codec answers

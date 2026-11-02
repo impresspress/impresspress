@@ -1919,7 +1919,8 @@ fn reads_variables(trips: &[RoundTrip]) -> bool {
 /// declared default; its request runs before the retry, so the remembered
 /// failure answers with no query. The snapshots' clock is the test's
 /// ([`HandClock`]), so neither half depends on how fast the test runs.
-/// (Today's 500 becomes the outage plan's 503 in its I4b.)
+/// It answers 503 (the outage plan's I4b: `Unavailable` is a 503 at the
+/// classifier), never the 500 a fault is.
 #[tokio::test]
 async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     let _generation = GENERATION.lock().await;
@@ -1964,8 +1965,8 @@ async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     ledger.take();
     assert_eq!(
         request(&wafer, &db, "/", None).await,
-        500,
-        "the landing switch fails closed: an error, not the redirect its default decides"
+        503,
+        "the landing switch fails closed: a 503 (I4b), not the redirect its default decides"
     );
     assert!(
         !reads_variables(&ledger.take()),
