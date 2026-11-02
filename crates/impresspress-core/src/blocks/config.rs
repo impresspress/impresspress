@@ -1013,8 +1013,8 @@ mod tests {
     /// generation, a write in any other test made this snapshot read again,
     /// so an outage test that warmed it and then broke the database saw its
     /// stored-config read fail too, whenever a parallel test happened to
-    /// write config in between: the admin dashboard's outage test failed two
-    /// runs in four that way. Both writes are made here: one through another
+    /// write config in between: the admin dashboard's outage test failed
+    /// intermittently that way. Both writes are made here: one through another
     /// fixture's database, and one bump of the process's generation, which
     /// is what every native writer makes.
     #[tokio::test]

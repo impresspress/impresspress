@@ -142,7 +142,7 @@ impl GenerationSource {
 /// Cloning shares it. Who moves it is the fixture's business:
 /// `test_support::TestContext` moves it from its database, on every write that
 /// reaches the variables table, at the layer Cloudflare's `kv_cached_db`
-/// observes writes at; a harness modelling a write by hand calls
+/// observes writes at and on a superset of its operations; a harness modelling a write by hand calls
 /// [`Self::note_write`].
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, Default)]

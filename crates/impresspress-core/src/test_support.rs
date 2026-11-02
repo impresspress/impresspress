@@ -2166,16 +2166,20 @@ wafer_core::forward_database_service! {
 /// ([`crate::config_generation::writes_invalidate_config_snapshot`]) succeeds,
 /// and forwards every call to `inner` unchanged.
 ///
-/// Every write that names a collection is observed, whichever operation
-/// carries it; a refused write moves nothing, as production bumps only after a
-/// write has committed. Raw SQL (`exec_raw`, `exec_raw_transaction`) is not
-/// observed: it names no collection, and production records no config write
-/// for it either — the migration that reshapes the table is what the
-/// snapshot's pre-migration-002 rule covers.
+/// Every row write is observed, whichever operation carries it; schema
+/// operations are forwarded unobserved, and a refused write moves nothing, as
+/// production bumps only after a write has committed. Raw SQL (`exec_raw`,
+/// `exec_raw_transaction`) is not observed: it names no collection, and
+/// production records no config write for it either — the migration that
+/// reshapes the table is what the snapshot's pre-migration-002 rule covers.
 ///
-/// Cloudflare's `kv_cached_db` observes writes at the same layer. Native has
-/// no such layer, so each `variables` repo writer bumps the process's
-/// generation by hand; a test of those bumps runs on
+/// Cloudflare's `kv_cached_db` observes writes at the same layer, on fewer of
+/// these operations (on the variables table it refuses the bulk writes and
+/// `upsert`, and forwards `increment_field_where` unobserved), so this only
+/// ever moves more often. Native has no such layer, so each `variables` repo
+/// writer bumps the process's generation by hand, and this decorator hides a
+/// missing bump. Those bumps are held per writer by per-thread counts in
+/// `platform_state::variables`' tests, and end to end by tests on
 /// [`TestContext::with_process_config_generation`].
 struct ConfigWritesDb {
     inner: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,

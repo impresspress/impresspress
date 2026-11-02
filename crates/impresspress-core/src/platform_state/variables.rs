@@ -2782,6 +2782,88 @@ mod boot_tests {
         );
     }
 
+    /// Every other native writer records its config write, once.
+    ///
+    /// On native nothing observes the database, so a writer that forgets its
+    /// `note_config_write()` leaves every warm snapshot serving the old value
+    /// until the process restarts. A fixture test cannot catch that: a
+    /// `TestContext` moves its own generation from its database, whether the
+    /// writer bumps or not. So each writer is held to its bump here, counted
+    /// per thread like the seeding test above. `set` and `set_with_row` are
+    /// held to theirs by `tests/database_config_source.rs`, and
+    /// `upsert_by_key`'s update branch by `blocks::config`'s tests on the
+    /// process generation.
+    #[tokio::test]
+    async fn every_native_writer_records_its_config_write() {
+        fn one_write(label: &str, before: u64) {
+            assert_eq!(
+                crate::config_generation::writes_noted_on_this_thread(),
+                before + 1,
+                "{label} must record exactly one config write, or a warm native \
+                 snapshot never sees it"
+            );
+        }
+        let noted = crate::config_generation::writes_noted_on_this_thread;
+
+        let ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+
+        let before = noted();
+        let inserted = insert(
+            &ctx,
+            NewVariable {
+                key: "SITE__BUMP_INSERT".into(),
+                value: "v".into(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: false,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("insert");
+        one_write("insert", before);
+
+        let before = noted();
+        upsert_by_key(
+            &ctx,
+            "SITE__BUMP_UPSERT",
+            VariablePatch {
+                value: Some("v".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("upsert_by_key creates");
+        one_write("upsert_by_key's create branch", before);
+
+        let before = noted();
+        delete(&ctx, &inserted.id).await.expect("delete");
+        one_write("delete", before);
+
+        let before = noted();
+        delete_by_key(&ctx, "SITE__BUMP_UPSERT")
+            .await
+            .expect("delete_by_key");
+        one_write("delete_by_key", before);
+
+        let db = migrated_db().await;
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY;
+        raw_insert_unflagged(&db, key, "hunter2").await;
+
+        let before = noted();
+        repair_sensitive_flags(&db).await;
+        one_write("repair_sensitive_flags_in", before);
+
+        let row = find_by_key(&db, key).await.expect("list").expect("row");
+        let before = noted();
+        assert!(pin_at_upgrade(&db, &row).await, "the pin write lands");
+        one_write("pin_at_upgrade", before);
+    }
+
     /// An operator's edit to the *description* survives a forced value write:
     /// only `value` and `updated_at` are touched.
     #[tokio::test]
