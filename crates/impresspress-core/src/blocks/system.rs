@@ -1,13 +1,9 @@
 use wafer_run::{BlockInfo, HttpMethod, InstanceMode, OutputStream};
 
-// `ResponseBuilder` serves an asset's bytes, which only exist when the
-// assets are compiled in; without the feature the block still declares and
-// routes `/b/static/{filename}` and answers 404.
-#[cfg(feature = "embed-assets")]
-use crate::http::ResponseBuilder;
 use crate::{
     endpoint_match::{self, EndpointRoute},
-    http::{err_not_found, ok_json},
+    http::{err_not_found, ResponseBuilder},
+    runtime_health::HealthReport,
 };
 
 /// Resolve a hashed filename (the part after `/b/static/`) to its bytes and
@@ -41,6 +37,20 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         .summary("Embedded static asset (content-hashed filename)"),
 ];
 
+/// `GET /health`: the runtime's [`HealthReport`] — 200 `{"status":"ok"}`, or
+/// a 503 with `Retry-After` naming what does not serve. Reads no backend.
+/// Never cached: it describes this moment.
+fn health(ctx: &dyn wafer_run::context::Context) -> OutputStream {
+    let report = HealthReport::for_context(ctx, crate::util::now_millis());
+    let mut response = ResponseBuilder::new()
+        .status(report.http_status())
+        .set_header("Cache-Control", "no-store");
+    if let Some(seconds) = report.retry_in {
+        response = response.set_header("Retry-After", &seconds.to_string());
+    }
+    response.json(&report)
+}
+
 /// Serve the manifest entry named `filename`, or 404.
 fn serve_asset(filename: &str) -> OutputStream {
     #[cfg(feature = "embed-assets")]
@@ -69,13 +79,13 @@ crate::impresspress_feature_block! {
             .description("Core system services including health checks and embedded static assets (CSS, JavaScript).")
             .endpoints(endpoint_match::declare(ROUTES))
     },
-    handle: |_this, _ctx, mut msg, _input| {
+    handle: |_this, ctx, mut msg, _input| {
         let route = match endpoint_match::resolve(&mut msg, ROUTES) {
             Ok(route) => route,
             Err(not_found) => return not_found,
         };
         match route {
-            Route::Health => ok_json(&serde_json::json!({"status": "ok"})),
+            Route::Health => health(ctx),
             Route::Asset => serve_asset(msg.var("filename")),
         }
     },
