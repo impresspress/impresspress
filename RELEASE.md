@@ -34,9 +34,12 @@ reads no database. It answers:
 - 200 `{"status":"ok"}` when every block serves;
 - 503 `degraded` when a block does not serve (its `Init` is retrying), or
   the runtime's stored-config read failed after it was published;
-- 503 `stale` when the runtime serves config older than the database's (a
-  rebuild failed during an outage, or the deploy's packaged plan was
-  served after an admin change);
+- 503 `stale` when the runtime serves config older than the database's.
+  That happens only during an outage: a rebuild failed and the runtime it
+  was replacing serves on, or, after an admin change since the deploy, a
+  new isolate serves the deploy's packaged plan because it cannot build
+  from the database. Without an outage, an admin change after a deploy
+  leads to a fresh build and `ok`;
 - 503 `failed` when a block's `Init` failed for good, or the last rebuild
   did.
 
@@ -46,8 +49,9 @@ reads no database. It answers:
 serve, each with its state (`retrying`, `failed`, `initializing`,
 `not_initialized`). A block that has been retrying on the same failure
 across rebuilds has `since` and `runtimes`, so one whose own `Init` keeps
-resetting D1 shows as the lasting failure it is. The body never carries the
-failure's text.
+resetting D1 shows as the lasting failure it is; after 8 runtimes in a row
+it is also logged at `error`. These runs are counted per isolate. The body
+never carries the failure's text.
 
 A block that hides its database errors at `Init` still shows as serving;
 only a failing `Init` is reported.

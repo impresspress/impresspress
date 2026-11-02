@@ -37,8 +37,24 @@
 //! `runtimes`, so it reads as the persistent failure it is rather than a
 //! blip ([`RetryStreaks`]).
 //!
-//! Limitation: a block that swallows its database errors at `Init` reports
-//! `ready`. Only a block whose `Init` fails loudly is listed.
+//! Limitations:
+//!
+//! - A block that swallows its database errors at `Init` reports `ready`.
+//!   Only a block whose `Init` fails loudly is listed.
+//! - A run ([`RetryStreak`]) and the episode's `rebuilds` live in one
+//!   isolate. Cloudflare evicts isolates often, and a new one starts its
+//!   runs again at `runtimes: 1`, so a monitor polling across isolates sees
+//!   several short runs where the failure is one long one. The `error!` log a
+//!   run writes when it reaches [`PERSISTENT_RUNTIMES`] is what outlives the
+//!   isolate (Workers Logs).
+//! - A failure is identified by the **first** transient text its message
+//!   contains ([`transient_text`](crate::sqlite_text_error::transient_text)).
+//!   So two different texts can share one identity and extend one run (`D1_ERROR:
+//!   Internal error in D1 DB storage caused object to be reset` and `D1_ERROR:
+//!   internal error; reference = …` are both `D1_ERROR: internal error`), and
+//!   one cause that surfaces as alternating texts (a self-inflicted reset
+//!   seen by one attempt as the reset, by the next as `Network connection
+//!   lost`) restarts its run on each change.
 
 use std::{cell::Cell, collections::BTreeMap};
 
@@ -73,7 +89,8 @@ impl RetryStreaks {
     /// `states`, given the streaks of the runtime it replaces (`self`): a
     /// block retrying on the failure it was retrying on before extends its
     /// run, a block retrying on another failure starts one, and every other
-    /// block has none.
+    /// block has none. A run that reaches [`PERSISTENT_RUNTIMES`] is logged at
+    /// `error!`, once.
     #[must_use]
     pub fn carried(&self, states: &BTreeMap<String, BlockInitState>, now_ms: u64) -> Self {
         Self(
@@ -96,6 +113,17 @@ impl RetryStreaks {
                             runtimes: 1,
                         },
                     };
+                    if streak.is_newly_persistent() {
+                        tracing::error!(
+                            block = %block,
+                            failure = %streak.failure,
+                            runtimes = streak.runtimes,
+                            since_ms = streak.since_ms,
+                            "a block's Init has failed the same way in every runtime built \
+                             for minutes: a lasting failure, possibly caused by the block \
+                             itself (a query that makes D1 reset), not a passing outage"
+                        );
+                    }
                     Some((block.clone(), streak))
                 })
                 .collect(),
@@ -106,6 +134,27 @@ impl RetryStreaks {
     #[must_use]
     pub fn get(&self, block: &str) -> Option<&RetryStreak> {
         self.0.get(block)
+    }
+}
+
+/// How many consecutive published runtimes a block must retry on the same
+/// failure in before its run is logged at `error!` ([`RetryStreaks::carried`]).
+///
+/// 8: the retry window doubles from 1 s and is capped at 60 s, so the 8th
+/// runtime is published about 1+2+4+8+16+32+60 ≈ 2 minutes after the first.
+/// D1's resets, overloads and lost connections clear within seconds, so a run
+/// that long is not a blip: it is a lasting outage (worth an `error!` anyway)
+/// or a block causing its own failure (plan I2g), which `warn!` alone hid.
+/// Lower, and an ordinary reset storm would log errors; much higher, and a
+/// self-inflicted reset goes unflagged for most of an isolate's life.
+pub const PERSISTENT_RUNTIMES: u32 = 8;
+
+impl RetryStreak {
+    /// Whether this run has just reached [`PERSISTENT_RUNTIMES`] — true for
+    /// exactly one runtime of the run.
+    #[must_use]
+    pub const fn is_newly_persistent(&self) -> bool {
+        self.runtimes == PERSISTENT_RUNTIMES
     }
 }
 
@@ -124,7 +173,8 @@ pub struct RetryEpisode {
     pub since_ms: u64,
     /// When the next rebuild may run.
     pub retry_at_ms: u64,
-    /// Consecutive builds that armed it, at least 1.
+    /// Consecutive builds that armed it, the first included (a cold build or
+    /// a hydrate as well as a rebuild): at least 1.
     pub rebuilds: u32,
     /// The last of them failed permanently: the runtime serving was built
     /// before it, and the next rebuild is likely to fail the same way.
@@ -211,13 +261,17 @@ pub struct UnavailableBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HealthReport {
     pub status: HealthStatus,
-    /// When the reported state began, RFC 3339.
+    /// RFC 3339. For `degraded` and `failed`, the start of the outage
+    /// episode (when the retry window was first armed), which can be before
+    /// this status: a `failed` after ten minutes of `degraded` reports the
+    /// `degraded` start. For `stale`, when the runtime became stale.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
     /// The `Retry-After` seconds, at least 1; `None` when `ok`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_in: Option<u32>,
-    /// [`RetryEpisode::rebuilds`].
+    /// [`RetryEpisode::rebuilds`]: the builds that armed the window, the
+    /// first included.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rebuilds: Option<u32>,
     /// The blocks that do not serve, by name; `None` when `ok`.
@@ -589,6 +643,60 @@ mod tests {
                 "runtimes": 3,
             }])
         );
+    }
+
+    /// The window has ended and the rebuild it allows has not run yet (the
+    /// first request after it owns the rebuild; others are served the cached
+    /// runtime meanwhile): `retry_in` falls back to the slots' backoff, or 1,
+    /// never `retry_at - now` underflowed; `since` and `rebuilds` stay.
+    #[test]
+    fn an_elapsed_window_awaiting_its_rebuild_times_nothing() {
+        let platform = PlatformHealth {
+            episode: Some(RetryEpisode {
+                since_ms: NOW - 90_000,
+                retry_at_ms: NOW - 2_000,
+                rebuilds: 4,
+                failed: false,
+            }),
+            degraded_since_ms: Some(NOW - 30_000),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(
+            &states(&[("b", retrying(QUOTA, 0)), ("c", retrying(QUOTA, 2_500))]),
+            &platform,
+            NOW,
+        );
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "degraded",
+                "since": "2027-01-15T07:58:30.000Z",
+                "retry_in": 3,
+                "rebuilds": 4,
+                "unavailable": [
+                    {"block": "b", "class": "retrying", "retry_in": 1},
+                    {"block": "c", "class": "retrying", "retry_in": 3},
+                ],
+            })
+        );
+    }
+
+    /// A run is newly persistent in exactly one runtime: the
+    /// [`PERSISTENT_RUNTIMES`]th, when `carried` logs it.
+    #[test]
+    fn a_run_becomes_persistent_once_at_the_threshold() {
+        let slots = states(&[("b", retrying(RESET, 0))]);
+        let mut streaks = RetryStreaks::default();
+        let mut flagged = Vec::new();
+        for n in 1..=PERSISTENT_RUNTIMES + 3 {
+            streaks = streaks.carried(&slots, NOW + u64::from(n));
+            let run = streaks.get("b").expect("b's run");
+            assert_eq!(run.runtimes, n);
+            if run.is_newly_persistent() {
+                flagged.push(n);
+            }
+        }
+        assert_eq!(flagged, vec![PERSISTENT_RUNTIMES]);
     }
 
     /// A block mid-`Init` or not yet initialized does not serve either.

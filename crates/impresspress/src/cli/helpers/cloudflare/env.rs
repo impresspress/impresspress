@@ -33,10 +33,10 @@ const R2_BUCKET_NAME_VAR: &str = "IMPRESSPRESS_CLOUDFLARE_R2_BUCKET_NAME";
 const HEAD_SAMPLING_RATE_VAR: &str = "IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE";
 
 /// Safe application-agnostic deploy smoke path for consumers that have not
-/// opted into representative dynamic routes. `/health` answers 503 while a
-/// block of the candidate does not serve (`impresspress_core::runtime_health`),
-/// so a deploy made during a D1 outage stops here, before promotion, by
-/// design.
+/// opted into representative dynamic routes. `/health` answers 503 while the
+/// candidate is not healthy — a block that does not serve, a runtime that is
+/// degraded, stale or failed (`impresspress_core::runtime_health`) — so a
+/// deploy made during a D1 outage stops here, before promotion, by design.
 const DEFAULT_DEPLOY_SMOKE_PATH: &str = "/health";
 
 /// Toml-shaped, pre-resolution. Every field that can be supplied via env

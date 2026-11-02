@@ -252,9 +252,6 @@ mod tests {
         }
     }
 
-    /// Every other failure is a fault, exactly as on the native backends —
-    /// a full database or account included (only an operator can cure those),
-    /// and a result over D1's size limit (only a different query can).
     /// Two occurrences of one failure name the same text, whatever their
     /// wrappers and references; another failure names another, and a
     /// non-transient message none.
@@ -273,6 +270,9 @@ mod tests {
         assert_eq!(transient_text("NOT NULL constraint failed: t.name"), None);
     }
 
+    /// Every other failure is a fault, exactly as on the native backends —
+    /// a full database or account included (only an operator can cure those),
+    /// and a result over D1's size limit (only a different query can).
     #[test]
     fn any_other_failure_stays_internal() {
         for text in [
