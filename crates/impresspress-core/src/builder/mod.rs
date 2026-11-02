@@ -195,7 +195,9 @@ impl ImpresspressBuilder {
     ///
     /// The dialect is what [`RuntimeConfig::install`] publishes as
     /// [`crate::migration_helper::DATABASE_TYPE_KEY`] on both config
-    /// surfaces, so this is called **before** `install`.
+    /// surfaces, so this is called **once, before** `install`; `build()`
+    /// refuses a builder whose database's dialect is not the published one
+    /// (a database given after `install`, or swapped for another).
     pub fn database(mut self, svc: Arc<dyn DatabaseService>, backend: Backend) -> Self {
         self.database = Some(svc);
         self.database_backend = Some(backend);

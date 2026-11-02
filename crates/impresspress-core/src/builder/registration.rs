@@ -76,6 +76,34 @@ impl ImpresspressBuilder {
         let database = self
             .database
             .ok_or_else(|| RuntimeError::Config("database service required".into()))?;
+        // The dialect the runtime renders and migrates in is the one
+        // `RuntimeConfig::install` published from the database it was given.
+        // A database given — or swapped — after `install` (a consumer hook
+        // receives the builder afterwards) would leave both config surfaces
+        // naming another dialect than the one the runtime queries, and every
+        // migrating `Init` would run the wrong `.sql` files, far from the
+        // cause. Refused here, where both are known.
+        let backend = self
+            .database_backend
+            .expect("`database_backend` is set with `database`, never alone");
+        let published = self
+            .config_snapshot
+            .get(crate::migration_helper::DATABASE_TYPE_KEY)
+            .map(|name| crate::migration_helper::parse_backend(name));
+        if published != Some(Ok(backend)) {
+            return Err(RuntimeError::Config(format!(
+                "the database was given as {} but {} publishes {}: call \
+                 ImpresspressBuilder::database once, before RuntimeConfig::install",
+                crate::migration_helper::backend_name(backend),
+                crate::migration_helper::DATABASE_TYPE_KEY,
+                self.config_snapshot
+                    .get(crate::migration_helper::DATABASE_TYPE_KEY)
+                    .map_or(
+                        "nothing (RuntimeConfig::install did not run)",
+                        String::as_str
+                    ),
+            )));
+        }
         let storage = self
             .storage
             .ok_or_else(|| RuntimeError::Config("storage service required".into()))?;

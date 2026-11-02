@@ -40,9 +40,21 @@ D1 and sql.js are `sqlite`, native is what `IMPRESSPRESS_DB_TYPE` names.
   fails the start naming the variable. One place used to read every other
   value as SQLite (the migration lock).
 - **For embedders:** `ImpresspressBuilder::database` takes the dialect as a
-  second argument, and is called **before** `RuntimeConfig::install`, which
-  now returns a `Result` and refuses a builder without a database. A runtime
-  without a dialect fails every migrating `Init` permanently.
+  second argument, and is called **once, before** `RuntimeConfig::install`,
+  which now returns a `Result` and refuses a builder without a database;
+  `build()` refuses a database whose dialect is not the one `install`
+  published (given or swapped afterwards). `RuntimeConfig::republish` returns
+  a `Result` and refuses `IMPRESSPRESS_DB_TYPE`. A runtime without a dialect
+  fails every migrating `Init` permanently.
+- **API removed or changed:** `impresspress_core::db_backend`
+  (`migration_helper::db_backend`) is now synchronous (no `.await`);
+  `migration_helper::DATABASE_BACKEND_KEY` and `backend_named` are gone,
+  replaced by `DATABASE_TYPE_KEY`, the strict `parse_backend` and
+  `backend_name`. `impresspress_native::make_database_service` takes a
+  `Backend`, and `InfraConfig::from_env` returns a `Result`.
+- **Operators:** a `WAFER_RUN_SHARED__DATABASE__BACKEND` row someone saved by
+  hand on an existing deployment is harmless — nothing reads it — and can be
+  deleted on the admin Variables page if wanted.
 
 **Why.** The dialect chooses which `.sql` files create the `variables` table,
 so it cannot be table config; and admin's `Init` reading it from that table

@@ -208,13 +208,33 @@ impl RuntimeConfig {
     /// to the async surface is then a no-op and only the snapshot moves. That
     /// is a property of the service, not of this call — writing both is still
     /// the correct intent to express here.
-    pub fn republish(self, wafer: &mut Wafer, service: &Arc<dyn ConfigService>) {
+    ///
+    /// Refuses [`DATABASE_TYPE_KEY`](crate::migration_helper::DATABASE_TYPE_KEY),
+    /// with nothing written: [`Self::install`] is that key's one writer, and a
+    /// second value here would reach the snapshot only on a target whose
+    /// `set` is a no-op (Cloudflare) — the two surfaces disagreeing.
+    pub fn republish(
+        self,
+        wafer: &mut Wafer,
+        service: &Arc<dyn ConfigService>,
+    ) -> Result<(), RuntimeError> {
+        use crate::migration_helper::DATABASE_TYPE_KEY;
+
+        if self.snapshot_contains(DATABASE_TYPE_KEY)
+            || self.service_get(DATABASE_TYPE_KEY).is_some()
+        {
+            return Err(RuntimeError::Config(format!(
+                "RuntimeConfig::republish: {DATABASE_TYPE_KEY} is published only by \
+                 RuntimeConfig::install, from the dialect given with the database"
+            )));
+        }
         for (key, value) in &self.service {
             service.set(key, value);
         }
         let mut snapshot = (**wafer.config_snapshot()).clone();
         snapshot.extend(self.snapshot);
         write_snapshot(wafer, snapshot);
+        Ok(())
     }
 }
 
@@ -301,6 +321,116 @@ mod tests {
                 Some(name)
             );
         }
+    }
+
+    /// The first required-service refusal `build()` gives a builder that has
+    /// only a database and config surfaces — so a test that expects the
+    /// dialect check sees whether it ran before the service checks.
+    fn build_error(builder: ImpresspressBuilder) -> String {
+        match builder.build() {
+            Ok(_) => panic!("a builder with no storage must not build"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// A database swapped in after `install` — a consumer hook gets the
+    /// builder afterwards — would leave both surfaces naming the dialect
+    /// `install` published while the runtime queries another: refused at
+    /// `build()`, either way round.
+    #[test]
+    fn build_refuses_a_database_whose_dialect_is_not_the_published_one() {
+        for (published, swapped) in [
+            (
+                wafer_sql_utils::Backend::Sqlite,
+                wafer_sql_utils::Backend::Postgres,
+            ),
+            (
+                wafer_sql_utils::Backend::Postgres,
+                wafer_sql_utils::Backend::Sqlite,
+            ),
+        ] {
+            let (builder, _service) = RuntimeConfig::new()
+                .install(
+                    ImpresspressBuilder::new().database(sqlite_db(), published),
+                    |map| {
+                        let service: Arc<dyn ConfigService> =
+                            Arc::new(wafer_core::service_blocks::config::EnvConfigService::new());
+                        (service, map)
+                    },
+                )
+                .expect("installs");
+            let error = build_error(builder.database(sqlite_db(), swapped));
+            assert!(
+                error.contains(DATABASE_TYPE_KEY),
+                "{published:?} → {swapped:?}: {error}"
+            );
+        }
+    }
+
+    /// The same database given again after `install` is not a second value:
+    /// `build()` goes on to its other checks.
+    #[test]
+    fn build_accepts_the_published_dialect() {
+        let (builder, _service) = RuntimeConfig::new()
+            .install(
+                ImpresspressBuilder::new().database(sqlite_db(), wafer_sql_utils::Backend::Sqlite),
+                |map| {
+                    let service: Arc<dyn ConfigService> =
+                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new());
+                    (service, map)
+                },
+            )
+            .expect("installs");
+        let error = build_error(builder);
+        assert!(!error.contains(DATABASE_TYPE_KEY), "{error}");
+    }
+
+    /// `republish` is not a second writer of the dialect: it refuses the key
+    /// and writes nothing, so the runtime's published value stands.
+    #[tokio::test]
+    async fn republish_refuses_the_database_dialect() {
+        let mut wafer = Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("a bare runtime");
+        write_snapshot(
+            &mut wafer,
+            HashMap::from([(DATABASE_TYPE_KEY.to_string(), "sqlite".to_string())]),
+        );
+        let service: Arc<dyn ConfigService> =
+            Arc::new(wafer_core::service_blocks::config::EnvConfigService::new());
+
+        let mut config = RuntimeConfig::new();
+        config
+            .both(DATABASE_TYPE_KEY, "postgres")
+            .both("OTHER", "1");
+        let error = config
+            .republish(&mut wafer, &service)
+            .expect_err("the dialect is install's alone");
+        assert!(error.to_string().contains(DATABASE_TYPE_KEY), "{error}");
+        assert_eq!(
+            wafer
+                .config_snapshot()
+                .get(DATABASE_TYPE_KEY)
+                .map(String::as_str),
+            Some("sqlite")
+        );
+        assert!(
+            !wafer.config_snapshot().contains_key("OTHER"),
+            "nothing was written"
+        );
+        assert_eq!(service.get(DATABASE_TYPE_KEY), None);
+
+        let mut ordinary = RuntimeConfig::new();
+        ordinary.both("OTHER", "1");
+        ordinary
+            .republish(&mut wafer, &service)
+            .expect("an ordinary key republishes");
+        assert_eq!(
+            wafer.config_snapshot().get("OTHER").map(String::as_str),
+            Some("1")
+        );
     }
 
     /// No database, no dialect: refused at `install`, not left for every

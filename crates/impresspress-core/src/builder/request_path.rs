@@ -338,8 +338,7 @@ impl BootHooks for DeployBootHooks {
             &self.config,
             &self.block_settings_handle,
             block_settings,
-        );
-        Ok(())
+        )
     }
 }
 
@@ -428,8 +427,7 @@ impl BootHooks for RequestBootHooks {
             &self.config,
             &self.block_settings_handle,
             block_settings,
-        );
-        Ok(())
+        )
     }
 }
 
@@ -477,7 +475,7 @@ fn publish_block_settings(
     config: &Arc<dyn ConfigService>,
     handle: &Arc<RwLock<BlockSettings>>,
     block_settings: BlockSettings,
-) {
+) -> Result<(), String> {
     let published_json = block_settings.to_config_json();
     *handle
         .write()
@@ -485,7 +483,9 @@ fn publish_block_settings(
 
     let mut published = RuntimeConfig::new();
     published.both(crate::features::BLOCK_SETTINGS_CONFIG_KEY, published_json);
-    published.republish(wafer, config);
+    published
+        .republish(wafer, config)
+        .map_err(|e| format!("publish block_settings after admin init: {e}"))
 }
 
 /// The hosted target's bound secrets: Worker bindings (`wrangler secret put`)
@@ -617,16 +617,20 @@ fn extend_with_request_config(
 /// divergence is stated where it is created rather than inferred from a
 /// missing line.
 ///
-/// A key the structural pass has already installed is skipped outright, and
-/// that rule is derived rather than listed: `service_only` REMOVES its key
-/// from the snapshot, so a collision does not shadow the structural value, it
-/// deletes it. The two name lists `extend_with_request_config` checks
-/// ([`PROTECTED_ENV_KEYS`], [`BUILDER_WORKER_VAR_KEYS`]) cover the
-/// environment-owned families but not the keys the structural pass installs
-/// itself — `IMPRESSPRESS_BLOCK_SETTINGS` and `IMPRESSPRESS_RUN_MIGRATIONS`.
-/// Asking the `RuntimeConfig` what it already holds covers all of them, and
-/// covers the next structural key without anyone remembering to add it to a
-/// list.
+/// Two rules keep a request from displacing what the runtime holds, both
+/// derived rather than listed:
+///
+/// - `extend_with_request_config` drops every **runtime-owned** key
+///   (`IMPRESSPRESS_*` without `__`, and `__…__`: the database dialect, the
+///   migration switch, the block-settings snapshot), and every
+///   environment-owned one ([`PROTECTED_ENV_KEYS`], [`BUILDER_WORKER_VAR_KEYS`]),
+///   whatever the snapshot holds.
+/// - A key the structural pass has already put on the snapshot is skipped
+///   here as well, whatever its name — a consumer-named structural key such as
+///   the CORS origins or the JWT secret. `service_only` REMOVES its key from
+///   the snapshot, so a collision would not shadow the structural value, it
+///   would delete it. Asking the `RuntimeConfig` what it already holds covers
+///   the next such key without anyone adding it to a list.
 pub fn add_request_config(
     config: &mut RuntimeConfig,
     overlay: &mut HashMap<String, String>,
@@ -658,9 +662,11 @@ pub fn add_request_config(
 /// [`BUILDER_WORKER_VAR_KEYS`]) bound at THIS request, at the value it sees.
 /// Those come from `bound` and from nowhere else; the cached runtime's
 /// structural snapshot contributes only the keys the environment does *not*
-/// own, which today is the table-derived `IMPRESSPRESS_BLOCK_SETTINGS`. A
-/// binding removed since the runtime was built is therefore absent by
-/// construction.
+/// own — the runtime's own: the table-derived block-settings snapshot and the
+/// database dialect `RuntimeConfig::install` published, which is how that key
+/// reaches a warm request's async map. A binding removed since the runtime
+/// was built is therefore absent by construction, and a request cannot
+/// replace a runtime-owned value (`extend_with_request_config`).
 ///
 /// There is no snapshot here: one request's values must never be baked into
 /// the cached runtime's, so this is a pair of maps rather than a

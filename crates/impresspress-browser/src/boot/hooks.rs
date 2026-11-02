@@ -167,7 +167,9 @@ impl BootHooks for BrowserBootHooks<'_> {
                 secret.clone(),
             );
         }
-        published.republish(wafer, &self.config_svc);
+        published
+            .republish(wafer, &self.config_svc)
+            .map_err(|e| format!("publish the seeded config: {e}"))?;
 
         *self
             .block_settings_handle
