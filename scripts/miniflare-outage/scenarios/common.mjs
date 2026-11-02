@@ -41,8 +41,8 @@ export function assertServed(answer, what, contains) {
  * Whether a request's D1 calls include a runtime-build attempt. A build over
  * a failing D1 reads the variables table (its first touch introspects it),
  * and after the failed read probes whether the table exists, to tell a fresh
- * database from an outage (READ-COST PR 6; plan note 2026-11-01): that probe
- * is the build's mark.
+ * database from an outage (`impresspress-core`'s variables snapshot,
+ * `read_unfiltered`): that probe is the build's mark.
  */
 export function attemptedBuild(calls) {
   return calls.some((call) =>
