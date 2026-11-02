@@ -2210,9 +2210,6 @@ mod tests {
         .await
         .expect("store the credential");
         variables::seed_row_with_flag(&ctx, SESSION_LIFETIME_DAYS_KEY, "100000000", 0).await;
-        // The raw fixture insert skips the repo's generation bump; without it
-        // a config snapshot warmed earlier would keep serving the default.
-        crate::config_generation::note_config_write();
 
         let body = serde_json::json!({"email": EMAIL, "password": PASSWORD}).to_string();
         let status = crate::test_support::output_http_status(
@@ -2286,8 +2283,6 @@ mod tests {
         };
 
         variables::seed_row_with_flag(&ctx, SESSION_LIFETIME_DAYS_KEY, "100000000", 0).await;
-        // The raw fixture insert skips the repo's generation bump.
-        crate::config_generation::note_config_write();
         assert_eq!(
             refresh().await,
             500,

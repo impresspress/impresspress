@@ -50,6 +50,16 @@
 //! wasm32 an isolate is single-threaded, so the atomic is never contended and
 //! the shared counter is simply the same counter every reader in that isolate
 //! already compared against.
+//!
+//! ## One process, one deployment — except in a test binary
+//!
+//! Process-wide is right because every production process or isolate serves
+//! one deployment. A test binary serves one per fixture, in one process, so a
+//! fixture on this counter treats every other test's config write as its own.
+//! A reader therefore takes its generation from a [`GenerationSource`]:
+//! production's is always [`GenerationSource::Process`], and a test fixture
+//! that must not see other tests' writes owns a `FixtureGeneration`
+//! (`test` and `test-support` only).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -92,6 +102,63 @@ pub fn note_config_write() {
 /// value must re-read when this differs.
 pub fn config_write_generation() -> u64 {
     CONFIG_WRITE_GENERATION.load(Ordering::Acquire)
+}
+
+/// Which config-write generation a config reader compares against.
+///
+/// A generation belongs to a deployment: it moves when that deployment's
+/// config is written. Production's is always [`Self::Process`] (see the
+/// module docs), and deliberately not one tied to a database handle: a
+/// Cloudflare request builds its own handle around the isolate's D1 binding,
+/// and a write through any of them has to reach the runtime the isolate
+/// caches. A test fixture whose snapshot must not see other tests' writes —
+/// one that warms it and then breaks the database, or counts its reads —
+/// owns its generation instead (`Self::Fixture`, under `test-support`).
+#[derive(Clone, Debug, Default)]
+pub enum GenerationSource {
+    /// The process-wide counter every production writer bumps
+    /// ([`note_config_write`]).
+    #[default]
+    Process,
+    /// The generation one test fixture's deployment owns.
+    #[cfg(any(test, feature = "test-support"))]
+    Fixture(FixtureGeneration),
+}
+
+impl GenerationSource {
+    /// The generation now.
+    pub fn current(&self) -> u64 {
+        match self {
+            Self::Process => config_write_generation(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Fixture(generation) => generation.current(),
+        }
+    }
+}
+
+/// The config-write generation of the one deployment a test fixture hosts,
+/// moved by that deployment's own config writes and by nothing else.
+///
+/// Cloning shares it. Who moves it is the fixture's business:
+/// `test_support::TestContext` moves it from its database, on every write that
+/// reaches the variables table, at the layer Cloudflare's `kv_cached_db`
+/// observes writes at and on a superset of its operations; a harness modelling a write by hand calls
+/// [`Self::note_write`].
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Debug, Default)]
+pub struct FixtureGeneration(std::sync::Arc<AtomicU64>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl FixtureGeneration {
+    /// Record that this deployment's config was just written.
+    pub fn note_write(&self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+
+    /// The generation now.
+    pub fn current(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 /// How many writes [`note_config_write`] has recorded on the calling thread.
@@ -178,6 +245,29 @@ mod tests {
             "a write on another thread must move the generation this thread reads, \
              or a cache warmed here never learns the config store moved"
         );
+    }
+
+    /// A fixture's generation moves with its own writes and with nothing
+    /// else; the process's moves with every production writer's bump.
+    #[test]
+    fn a_fixture_generation_moves_only_with_its_own_writes() {
+        let fixture = FixtureGeneration::default();
+        let source = GenerationSource::Fixture(fixture.clone());
+        let before = source.current();
+
+        note_config_write();
+        assert_eq!(
+            source.current(),
+            before,
+            "another deployment's write must not move this fixture's generation"
+        );
+
+        fixture.note_write();
+        assert_ne!(source.current(), before, "its own write moves it");
+
+        let process = GenerationSource::Process.current();
+        note_config_write();
+        assert_ne!(GenerationSource::Process.current(), process);
     }
 
     /// Only the table the snapshot is BUILT from may invalidate it.

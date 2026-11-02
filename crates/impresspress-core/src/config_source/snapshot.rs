@@ -41,7 +41,9 @@
 //!
 //! - **A config write.** A snapshot (loaded or failed) carries the config-write
 //!   generation ([`crate::config_generation`]) captured BEFORE its read, and
-//!   any other generation invalidates it.
+//!   any other generation invalidates it. Every runtime reads the process's
+//!   generation; a test fixture may give its snapshot its own
+//!   (`VariablesSnapshot::with_generation`, under `test-support`).
 //! - **A failed read's retry time,** under [`RetryMode::Backoff`]: 1 s after the
 //!   first consecutive failure, doubling to 60 s.
 //! - **The pre-migration-002 shape, or no table yet,** every time: see
@@ -70,7 +72,7 @@ use std::{
 use wafer_core::interfaces::database::service::DatabaseService;
 
 use crate::{
-    config_generation::config_write_generation,
+    config_generation::GenerationSource,
     platform_state::variables::{self, UnfilteredReadError, VariableRow},
 };
 
@@ -209,6 +211,10 @@ pub struct VariablesSnapshot {
     state: StateCell,
     retry: RetryMode,
     clock: Clock,
+    /// Where the config-write generation is read from: the process's in every
+    /// runtime, a fixture's own in a test that hosts one deployment of many
+    /// in its process ([`GenerationSource`]).
+    generation: GenerationSource,
     /// The newest config-write generation the pre-migration-002 shape has been
     /// warned about, plus one (0: never — only the 2^64th config write would
     /// wrap onto it). Its own atomic rather than a [`State`]: the check and the
@@ -245,6 +251,7 @@ impl VariablesSnapshot {
             state: StateCell::default(),
             retry,
             clock: Arc::new(crate::util::now_millis),
+            generation: GenerationSource::Process,
             pre_002_warned: AtomicU64::new(0),
         }
     }
@@ -256,8 +263,19 @@ impl VariablesSnapshot {
             state: StateCell::default(),
             retry,
             clock: Arc::new(clock),
+            generation: GenerationSource::Process,
             pre_002_warned: AtomicU64::new(0),
         }
+    }
+
+    /// This snapshot, comparing against `generation` instead of the process's:
+    /// for a test fixture hosting one deployment among the many a test binary
+    /// runs in one process. See [`GenerationSource`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_generation(mut self, generation: GenerationSource) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// How a failed read is retried.
@@ -321,7 +339,7 @@ impl VariablesSnapshot {
         &self,
         db: &Arc<dyn DatabaseService>,
     ) -> Result<Arc<VariablesRows>, UnfilteredReadError> {
-        let generation = config_write_generation();
+        let generation = self.generation.current();
         let failures_before = match self.load() {
             State::Loaded {
                 generation: loaded_at,
