@@ -290,7 +290,7 @@ impl VariablesSnapshot {
     pub fn remembers_a_failure(&self) -> bool {
         matches!(
             self.load(),
-            State::Failed(failure) if failure.generation == config_write_generation()
+            State::Failed(failure) if failure.generation == self.generation.current()
         )
     }
 
