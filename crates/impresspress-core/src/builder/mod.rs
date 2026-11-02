@@ -26,6 +26,7 @@ use wafer_core::interfaces::{
     storage::service::StorageService,
 };
 use wafer_run::Block;
+use wafer_sql_utils::Backend;
 
 use crate::{features::BlockSettings, ExtraRoute, RouteAccess};
 
@@ -63,6 +64,8 @@ pub use request_path::{
 
 pub struct ImpresspressBuilder {
     database: Option<Arc<dyn DatabaseService>>,
+    /// The SQL dialect of [`Self::database`]; set with it, never alone.
+    database_backend: Option<Backend>,
     storage: Option<Arc<dyn StorageService>>,
     config: Option<Arc<dyn ConfigService>>,
     /// The synchronous `ctx.config_get` surface, installed on the `Wafer` at
@@ -156,6 +159,7 @@ impl ImpresspressBuilder {
     pub fn new() -> Self {
         Self {
             database: None,
+            database_backend: None,
             storage: None,
             config: None,
             config_snapshot: HashMap::new(),
@@ -183,9 +187,21 @@ impl ImpresspressBuilder {
         }
     }
 
-    pub fn database(mut self, svc: Arc<dyn DatabaseService>) -> Self {
+    /// The runtime's database service and the SQL dialect it speaks, given
+    /// together so a target cannot name one without the other.
+    ///
+    /// The dialect is what [`RuntimeConfig::install`] publishes as
+    /// [`crate::migration_helper::DATABASE_TYPE_KEY`] on both config
+    /// surfaces, so this is called **before** `install`.
+    pub fn database(mut self, svc: Arc<dyn DatabaseService>, backend: Backend) -> Self {
         self.database = Some(svc);
+        self.database_backend = Some(backend);
         self
+    }
+
+    /// The dialect given with [`Self::database`], if it has been called.
+    pub(super) fn database_backend(&self) -> Option<Backend> {
+        self.database_backend
     }
 
     pub fn storage(mut self, svc: Arc<dyn StorageService>) -> Self {

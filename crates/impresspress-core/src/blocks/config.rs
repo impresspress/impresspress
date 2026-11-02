@@ -298,11 +298,10 @@ impl VariablesConfigBlock {
         }
         let stored = match self.snapshot.read(&self.db).await {
             Ok(rows) => rows.values().get(key).cloned(),
-            // No table yet — a fresh database before admin's migrations, whose
-            // own `Init` reads its backend through here first. Nothing can be
-            // stored, so the read order goes on to the boot map, as
-            // `block_settings::load` and `wrap_grants::load` answer the same
-            // cold start with no rows. Not a failed read.
+            // No table yet — a fresh database before admin's migrations have
+            // created it. Nothing can be stored, so the read order goes on to
+            // the boot map, as `block_settings::load` and `wrap_grants::load`
+            // answer the same cold start with no rows. Not a failed read.
             Err(UnfilteredReadError::Absent(_)) => None,
             // Every failed read is `Unavailable` — this is the one place the
             // config block maps one. Not split the way the config source splits
@@ -314,18 +313,13 @@ impl VariablesConfigBlock {
             //   fault is not told apart from an outage here; which status a
             //   handler gives `Unavailable` is the handler's mapping.
             // - An `Init` that reads here fails transiently, `Unavailable` being
-            //   transient — a fault included. Today that is how every boot
-            //   meets a failed variables read: admin initializes first, and its
-            //   `Init` reads the database backend through here
-            //   (`migration_helper::db_backend`) before any block's config
-            //   source load runs, so the boot's `Strict` policy stops on a
-            //   transient admin failure whatever failed, and the config
-            //   source's `SourceFault` is not reached on a real boot. A fault
-            //   is told apart only by a boot that goes on past admin's
-            //   transient failure to a config-declaring block's source load,
-            //   with the failure still remembered when it does; the boot
-            //   policy that would do that is the outage plan's step IP-B, not
-            //   this block's to decide.
+            //   transient — a fault included. That does not hide a fault from
+            //   the boot: no block reads stored config at `Init` before the
+            //   config source's own load for a block that declares config keys
+            //   (admin reads none — its dialect is a boot-map fact,
+            //   `migration_helper::db_backend`), and that load classifies the
+            //   same remembered failure as `Transient` or `SourceFault`
+            //   (`config_source::database::config_error`).
             Err(
                 e @ (UnfilteredReadError::Read(_) | UnfilteredReadError::MayBeTruncated { .. }),
             ) => {

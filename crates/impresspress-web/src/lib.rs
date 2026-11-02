@@ -326,12 +326,12 @@ mod initialize_tests {
     async fn a_refused_migration_rejects_initialize_by_name() {
         use impresspress_core::{
             blocks::admin::ADMIN_BLOCK_ID,
-            migration_helper::backend_named,
+            migration_helper::parse_backend,
             platform_state::applied_migrations::{self, AppliedMigration},
         };
 
         let db: std::sync::Arc<dyn DatabaseService> = std::sync::Arc::new(fresh_db().await);
-        let sqlite = backend_named("sqlite");
+        let sqlite = parse_backend("sqlite").expect("sqlite is a dialect");
         db.exec_raw(
             &applied_migrations::create_table_sql(sqlite).expect("the ledger's schema"),
             &[],

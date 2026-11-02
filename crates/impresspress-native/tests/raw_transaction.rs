@@ -117,7 +117,7 @@ async fn sqlite_runs_a_raw_transaction_all_or_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("raw_transaction.sqlite3");
     let db = impresspress_native::make_database_service(
-        "sqlite",
+        wafer_sql_utils::Backend::Sqlite,
         path.to_str().expect("utf-8 path"),
         None,
     )

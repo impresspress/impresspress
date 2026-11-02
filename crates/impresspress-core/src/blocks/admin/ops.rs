@@ -3065,6 +3065,41 @@ mod runtime_key_guard_tests {
         );
     }
 
+    /// The database dialect is runtime-owned: an admin cannot store a row
+    /// that would choose it, on either surface. (The key it replaced,
+    /// `WAFER_RUN_SHARED__DATABASE__BACKEND`, was accepted here, so a row
+    /// `postgres` on a D1 database could pick the wrong migration files.)
+    #[tokio::test]
+    async fn the_database_dialect_cannot_be_stored() {
+        let key = crate::migration_helper::DATABASE_TYPE_KEY;
+        assert!(reject_runtime_owned_key(key).is_err());
+
+        let ctx = admin_ctx().await;
+        let msg = admin_msg("update", "/admin/settings");
+        let result = update_variable(
+            &ctx,
+            &msg,
+            key,
+            VariableUpdate {
+                value: Some("postgres"),
+                description: None,
+                sensitive: None,
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the dialect must be refused on the update surface"
+        );
+        assert!(
+            variables::get_by_key(&ctx, key)
+                .await
+                .expect("read back")
+                .is_none(),
+            "a refused update must leave no row"
+        );
+    }
+
     /// Ordinary admin-editable keys are untouched by the guard.
     #[tokio::test]
     async fn an_ordinary_shared_key_is_still_accepted() {

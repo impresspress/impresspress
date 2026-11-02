@@ -22,7 +22,7 @@ pub(crate) const OWNER_ID: &str = "002_owner_id";
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
 /// for one. Selected at runtime by `apply_migrations` when the deployment's
-/// `WAFER_RUN_SHARED__DATABASE__BACKEND` is `postgres`. Empty when the
+/// `IMPRESSPRESS_DB_TYPE` is `postgres`. Empty when the
 /// `postgres` cargo feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]

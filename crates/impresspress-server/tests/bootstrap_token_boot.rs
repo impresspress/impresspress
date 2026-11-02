@@ -28,10 +28,15 @@ use wafer_block::db::ListOptions;
 
 const TOKEN: &str = "a bootstrap token for the restart test";
 
-fn infra(db_type: &str, db_path: &str, db_url: Option<&str>, storage_root: &str) -> InfraConfig {
+fn infra(
+    db_type: wafer_sql_utils::Backend,
+    db_path: &str,
+    db_url: Option<&str>,
+    storage_root: &str,
+) -> InfraConfig {
     InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: db_type.to_string(),
+        db_type,
         db_path: db_path.to_string(),
         db_url: db_url.map(str::to_string),
         storage_type: "local".to_string(),
@@ -46,7 +51,7 @@ fn infra(db_type: &str, db_path: &str, db_url: Option<&str>, storage_root: &str)
 /// it down.
 async fn boot(infra: &InfraConfig, token: Option<&str>) {
     let database = impresspress_native::make_database_service(
-        &infra.db_type,
+        infra.db_type,
         &infra.db_path,
         infra.db_url.as_deref(),
     )
@@ -73,7 +78,7 @@ async fn boot(infra: &InfraConfig, token: Option<&str>) {
 /// Every `bootstrap_tokens` row, as `(token_hash, expires_at)`.
 async fn token_rows(infra: &InfraConfig) -> Vec<(String, String)> {
     let database = impresspress_native::make_database_service(
-        &infra.db_type,
+        infra.db_type,
         &infra.db_path,
         infra.db_url.as_deref(),
     )
@@ -138,7 +143,7 @@ fn sqlite_infra(tmp: &tempfile::TempDir) -> InfraConfig {
     std::fs::create_dir_all(&storage_root).expect("create storage root");
     let db_path = tmp.path().join("bootstrap.sqlite3");
     infra(
-        "sqlite",
+        wafer_sql_utils::Backend::Sqlite,
         db_path.to_str().expect("UTF-8 path"),
         None,
         storage_root.to_str().expect("UTF-8 path"),
@@ -162,9 +167,13 @@ async fn a_restart_with_the_token_still_configured_boots_on_sqlite() {
 async fn postgres_infra(name: &str, storage: &tempfile::TempDir) -> InfraConfig {
     let url = std::env::var("IMPRESSPRESS_TEST_POSTGRES_URL")
         .expect("IMPRESSPRESS_TEST_POSTGRES_URL must name a PostgreSQL database");
-    let server = impresspress_native::make_database_service("postgres", "", Some(&url))
-        .await
-        .expect("connect to PostgreSQL");
+    let server = impresspress_native::make_database_service(
+        wafer_sql_utils::Backend::Postgres,
+        "",
+        Some(&url),
+    )
+    .await
+    .expect("connect to PostgreSQL");
     // Test-fixture setup: a database of its own, created fresh.
     server
         .exec_raw(&format!("DROP DATABASE IF EXISTS {name}"), &[])
@@ -176,7 +185,7 @@ async fn postgres_infra(name: &str, storage: &tempfile::TempDir) -> InfraConfig 
         .expect("create the test's database");
     let (base, _) = url.rsplit_once('/').expect("a database URL");
     infra(
-        "postgres",
+        wafer_sql_utils::Backend::Postgres,
         "",
         Some(&format!("{base}/{name}")),
         storage.path().to_str().expect("UTF-8 path"),

@@ -34,7 +34,7 @@ use wafer_core::interfaces::database::service::{
 fn infra_for(db_path: &Path, storage_root: &Path) -> InfraConfig {
     InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: db_path
             .to_str()
             .expect("db path is valid utf-8")
@@ -133,7 +133,7 @@ async fn a_signup_with_no_call_left_is_a_429_that_writes_nothing() {
     std::fs::create_dir_all(&storage_root).expect("create storage root");
 
     let infra = infra_for(&db_path, &storage_root);
-    let sqlite = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let sqlite = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
     let spent = Arc::new(Mutex::new(false));

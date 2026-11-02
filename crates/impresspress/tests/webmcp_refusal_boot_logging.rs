@@ -141,9 +141,13 @@ async fn build_runtime_with_extra_blocks(
     extras: Vec<(&str, Arc<dyn Block>)>,
 ) -> wafer_run::Wafer {
     let db_path_str = db_path.to_str().expect("db path is valid utf-8");
-    let database = impresspress_native::make_database_service("sqlite", db_path_str, None)
-        .await
-        .expect("construct sqlite database service");
+    let database = impresspress_native::make_database_service(
+        wafer_sql_utils::Backend::Sqlite,
+        db_path_str,
+        None,
+    )
+    .await
+    .expect("construct sqlite database service");
 
     let storage_root_str = storage_root.to_str().expect("storage root is valid utf-8");
     let storage = impresspress_native::make_storage_service("local", storage_root_str)
@@ -154,20 +158,22 @@ async fn build_runtime_with_extra_blocks(
     // builder, so a caller cannot fill the async surface and forget the
     // synchronous snapshot. This harness needs neither key: it is testing what
     // `build()` logs, not what blocks read.
-    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new().install(
-        ImpresspressBuilder::new()
-            .database(database)
-            .storage(storage),
-        |map| {
-            (
-                impresspress_core::builder::fill_config_service(
-                    Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-                    map,
-                ),
-                (),
-            )
-        },
-    );
+    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new()
+        .install(
+            ImpresspressBuilder::new()
+                .database(database, wafer_sql_utils::Backend::Sqlite)
+                .storage(storage),
+            |map| {
+                (
+                    impresspress_core::builder::fill_config_service(
+                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                        map,
+                    ),
+                    (),
+                )
+            },
+        )
+        .expect("install the config surfaces");
     let mut builder = builder
         .crypto(
             impresspress_native::make_jwt_crypto_service(
