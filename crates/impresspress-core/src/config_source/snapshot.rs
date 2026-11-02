@@ -145,17 +145,16 @@ impl VariablesRows {
 pub enum RetryMode {
     /// The snapshot retries on its own: the first reader after the failure's
     /// retry time reads again. 1 s after the first consecutive failure,
-    /// doubling to 60 s. For a runtime nothing rebuilds — native, the browser —
-    /// and for Cloudflare until a retry window that rebuilds the runtime
-    /// exists (D1-OUTAGE-DEGRADE-PLAN I5): without one, a failed read would
-    /// otherwise wait for the next KV-probe rebuild, 5–10 minutes or never.
+    /// doubling to 60 s. For a runtime nothing rebuilds: native and the
+    /// browser.
     Backoff,
     /// The snapshot never retries on its own; only a config write (a new
     /// generation) or a new snapshot — the runtime's rebuild — reads again.
     /// For a runtime whose owner retries by rebuilding it, so a failure costs
     /// one read per rebuild rather than one per rebuild plus one per backoff
-    /// step. Cloudflare's, once the outage plan's retry window rebuilds the
-    /// runtime (its step IP-B sets it).
+    /// step. Cloudflare's: its runtime cache's retry window rebuilds the
+    /// runtime, and arms itself when a published runtime's snapshot
+    /// [remembers a failure](VariablesSnapshot::remembers_a_failure).
     Rebuild,
 }
 

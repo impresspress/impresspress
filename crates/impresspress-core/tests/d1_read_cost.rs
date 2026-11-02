@@ -333,10 +333,10 @@ async fn build(
     }
 }
 
-/// The variables snapshot `build_runtime` creates: retrying a failed read on
-/// its own, on the wall clock.
+/// The variables snapshot `build_runtime` creates: a failed read is retried
+/// only by rebuilding the runtime, never on its own.
 fn workers_snapshot() -> Arc<VariablesSnapshot> {
-    Arc::new(VariablesSnapshot::new(RetryMode::Backoff))
+    Arc::new(VariablesSnapshot::new(RetryMode::Rebuild))
 }
 
 /// `build_runtime`'s order: the database (D1 speaks SQLite) goes into the
@@ -1871,7 +1871,10 @@ impl HandClock {
         self.0.store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// `build_runtime`'s snapshot (`Backoff`), on this clock.
+    /// A snapshot that retries on its own (`Backoff`), on this clock — not
+    /// `build_runtime`'s `Rebuild`, deliberately: moving the clock past the
+    /// retry is how a test makes a remembered failure read again, so any
+    /// stored-config read a request makes reaches D1 and is seen.
     fn snapshot(&self) -> Arc<VariablesSnapshot> {
         let now = Arc::clone(&self.0);
         Arc::new(VariablesSnapshot::with_clock(

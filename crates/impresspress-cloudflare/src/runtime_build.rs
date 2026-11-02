@@ -304,10 +304,12 @@ where
     //    hands the same snapshot, is guaranteed to be. The runtime keeps it
     //    (`BuiltRuntime::variables_snapshot`), so a rebuild starts clean.
     //
-    //    `Backoff`: nothing else retries a failed read on this target yet. The
-    //    outage plan's retry window (its IP-B) rebuilds the runtime instead and
-    //    switches this to `RetryMode::Rebuild`.
-    let variables_snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
+    //    `Rebuild`: the snapshot never retries a failed read on its own. The
+    //    runtime cache's retry window does, by rebuilding the runtime (and a
+    //    published runtime whose snapshot remembers a failure arms it), so an
+    //    outage costs about one failed read per isolate per window rather
+    //    than one per window plus one per backoff step.
+    let variables_snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Rebuild));
     let cfg_source = request_config_source(db.clone(), overlay, variables_snapshot.clone());
     let services = request_services::RequestServices::new(
         environment,
@@ -1113,7 +1115,7 @@ mod tests {
     /// rather than letting each source keep its own memo.
     #[wasm_bindgen_test]
     async fn a_warm_requests_source_reads_through_the_runtimes_snapshot() {
-        let snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
+        let snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Rebuild));
         let declared = [wafer_block::ConfigVar::new("WAFER_RUN__AUTH__A", "doc", "")];
 
         let build_log = js_sys::Array::new();
