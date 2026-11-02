@@ -58,7 +58,7 @@
 # Seeded (mixed): variables=26 (block-scoped 8), legal documents=300, users=500, roles=2, grants=3
 # Seeded (shared): variables=18 (block-scoped 0), legal documents=300, users=500, roles=2, grants=3; block-scoped rows deleted and forwarded as request config: IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET, WAFER_RUN_SHARED__AUTH__PASSWORD_MIN_LENGTH, WAFER_RUN_SHARED__AUTH__SESSION_LIFETIME_DAYS, WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS
 
-## provision — 591 statements, 220 D1 calls, rows≈623
+## provision — 581 statements, 210 D1 calls, rows≈547
 api_keys                                         WRITE         1       0
 auth_sessions                                    WRITE         1       0
 iam_user_roles                                   WRITE         1       0
@@ -77,10 +77,9 @@ impresspress__admin__request_logs                WRITE         9       0
 impresspress__admin__roles                       WRITE         3       0
 impresspress__admin__storage_access_logs         WRITE         3       0
 impresspress__admin__user_roles                  WRITE         5       0
-impresspress__admin__variables                   SCAN          5      90
+impresspress__admin__variables                   SCAN          3      54
 impresspress__admin__variables                   SEARCH        1       1
-impresspress__admin__variables                   INTROSPECT    6      36
-impresspress__admin__variables                   EXISTS        4      16
+impresspress__admin__variables                   INTROSPECT    2      12
 impresspress__admin__variables                   WRITE        23       0
 impresspress__admin__wrap_grants                 SCAN          2       0
 impresspress__admin__wrap_grants                 INTROSPECT    4      20

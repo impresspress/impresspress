@@ -696,7 +696,7 @@ pub(crate) async fn deploy_admin_runtime(
     use impresspress_core::{
         blocks::admin::{AdminBlock, ADMIN_BLOCK_ID},
         features::{BlockSettings, BlockState, MigrationState, BLOCK_SETTINGS_CONFIG_KEY},
-        migration_helper::RUN_MIGRATIONS_KEY,
+        migration_helper::{DATABASE_TYPE_KEY, RUN_MIGRATIONS_KEY},
     };
 
     let mut wafer = wafer_run::Wafer::new(Arc::new(wafer_run::StaticConfigSource::default()))
@@ -729,6 +729,9 @@ pub(crate) async fn deploy_admin_runtime(
     );
     let mut snapshot = HashMap::new();
     snapshot.insert(RUN_MIGRATIONS_KEY.to_string(), "1".to_string());
+    // D1 speaks SQLite: what `RuntimeConfig::install` publishes on a built
+    // runtime, and what admin's migrating `Init` reads.
+    snapshot.insert(DATABASE_TYPE_KEY.to_string(), "sqlite".to_string());
     snapshot.insert(
         BLOCK_SETTINGS_CONFIG_KEY.to_string(),
         BlockSettings::from_blocks(blocks).to_config_json(),

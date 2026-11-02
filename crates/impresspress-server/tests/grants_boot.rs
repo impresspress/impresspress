@@ -29,7 +29,7 @@ async fn a_failed_grants_read_refuses_to_start() {
     std::fs::create_dir_all(&storage_root).expect("create storage root");
     let infra = InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: db_path.to_str().expect("UTF-8 path").to_string(),
         db_url: None,
         storage_type: "local".to_string(),
@@ -44,7 +44,7 @@ async fn a_failed_grants_read_refuses_to_start() {
     // the boot finds it applied and sends no statement naming the table
     // before the grants load.
     let migrations = &admin::migrations::MIGRATIONS;
-    let backend = migration_helper::backend_named(&infra.db_type);
+    let backend = infra.db_type;
     let (files, history) = migrations.for_backend(backend);
     migration_helper::apply_pending_via_service(
         &database,

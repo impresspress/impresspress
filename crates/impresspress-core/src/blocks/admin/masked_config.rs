@@ -300,6 +300,12 @@ mod tests {
             .build()
             .expect("build a bare runtime");
         wafer.set_admin_block(ADMIN_BLOCK_ID);
+        // The dialect every built runtime carries (`RuntimeConfig::install`);
+        // admin's `Init` migrates in it.
+        wafer.set_config_snapshot(std::collections::HashMap::from([(
+            crate::migration_helper::DATABASE_TYPE_KEY.to_string(),
+            "sqlite".to_string(),
+        )]));
         wafer_core::service_blocks::database::register_with_tables(
             &mut wafer,
             sqlite.clone(),

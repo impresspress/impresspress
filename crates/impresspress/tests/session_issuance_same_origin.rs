@@ -40,7 +40,7 @@ const PARTNER_ORIGIN: &str = "https://partner.example";
 fn infra_for(db_path: &Path, storage_root: &Path) -> InfraConfig {
     InfraConfig {
         listen: "127.0.0.1:0".to_string(),
-        db_type: "sqlite".to_string(),
+        db_type: wafer_sql_utils::Backend::Sqlite,
         db_path: db_path
             .to_str()
             .expect("db path is valid utf-8")
@@ -71,7 +71,7 @@ async fn start() -> Site {
     std::fs::create_dir_all(&storage_root).expect("create storage root");
     let infra = infra_for(&db_path, &storage_root);
 
-    let database = impresspress_native::make_database_service(&infra.db_type, &infra.db_path, None)
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
     let app_env = HashMap::from([

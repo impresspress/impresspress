@@ -1,7 +1,7 @@
 //! Database platform-service factories for native targets.
 //!
 //! - `make_database_service(db_type, db_path, db_url)` — dispatches on the
-//!   `IMPRESSPRESS_DB_TYPE` value (`sqlite` | `postgres`).
+//!   dialect `IMPRESSPRESS_DB_TYPE` names (`InfraConfig::db_type`).
 //! - `make_sqlite_database_service(path)` — wraps `wafer-block-sqlite`
 //!   `SQLiteDatabaseService`.
 //! - `make_postgres_database_service(url)` — feature-gated on `postgres`.
@@ -19,34 +19,31 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use wafer_core::interfaces::database::service::DatabaseService;
+use wafer_sql_utils::Backend;
 
-/// Construct the database service selected by `IMPRESSPRESS_DB_TYPE`.
+/// Construct the database service for the dialect `IMPRESSPRESS_DB_TYPE`
+/// names (`InfraConfig::db_type`, parsed once where the env is read).
 ///
-/// - `"sqlite"` (the default) opens a SQLite database at `db_path`.
-/// - `"postgres"` connects to `db_url` (`IMPRESSPRESS_DB_URL`). Requires the
-///   `postgres` cargo feature; without it (or with no `db_url`) this is a
-///   hard boot error rather than a silent fallback to SQLite.
-/// - any other value is a hard error.
+/// - [`Backend::Sqlite`] opens a SQLite database at `db_path`.
+/// - [`Backend::Postgres`] connects to `db_url` (`IMPRESSPRESS_DB_URL`).
+///   Requires the `postgres` cargo feature; without it (or with no `db_url`)
+///   this is a hard boot error rather than a silent fallback to SQLite.
 ///
-/// Centralises the `db_type` → factory dispatch so the boot path can't log
+/// Centralises the dialect → factory dispatch so the boot path can't log
 /// `db = postgres` while silently running SQLite.
 ///
 /// # Errors
 ///
-/// Returns an error when the type is unknown, when `postgres` is requested
-/// but the feature is off / `db_url` is missing, or when the underlying
-/// factory fails.
+/// Returns an error when `postgres` is requested but the feature is off /
+/// `db_url` is missing, or when the underlying factory fails.
 pub async fn make_database_service(
-    db_type: &str,
+    db_type: Backend,
     db_path: &str,
     db_url: Option<&str>,
 ) -> Result<Arc<dyn DatabaseService>> {
     match db_type {
-        "sqlite" => make_sqlite_database_service(db_path),
-        "postgres" => make_postgres_database_service_dispatch(db_url).await,
-        other => Err(anyhow!(
-            "unsupported IMPRESSPRESS_DB_TYPE `{other}` (expected `sqlite` or `postgres`)"
-        )),
+        Backend::Sqlite => make_sqlite_database_service(db_path),
+        Backend::Postgres => make_postgres_database_service_dispatch(db_url).await,
     }
 }
 

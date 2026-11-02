@@ -728,9 +728,9 @@ async fn a_table_not_created_yet_is_transient_and_not_remembered() {
 }
 
 /// The config block's side of a table that does not exist yet: nothing can be
-/// stored, so `CONFIG_GET` reads on to the boot map — what admin's own `Init`
-/// needs on a fresh database, where it reads its backend before its
-/// migrations create the table. Not a failed read, so not `Unavailable`.
+/// stored, so `CONFIG_GET` reads on to the boot map, as on a fresh database
+/// before admin's migrations create the table. Not a failed read, so not
+/// `Unavailable`.
 #[tokio::test]
 async fn before_the_table_exists_config_get_reads_on_to_the_boot_map() {
     let _generation = GENERATION.lock().await;
@@ -739,19 +739,15 @@ async fn before_the_table_exists_config_get_reads_on_to_the_boot_map() {
     let ctx = context_with_config_block(
         &db,
         &snapshot,
-        &[("WAFER_RUN_SHARED__DATABASE__BACKEND", "sqlite")],
+        &[("WAFER_RUN_SHARED__SITE_NAME", "from the boot map")],
     )
     .await;
 
     assert_eq!(
-        wafer_core::clients::config::get_default(
-            &ctx,
-            "WAFER_RUN_SHARED__DATABASE__BACKEND",
-            "default"
-        )
-        .await
-        .expect("no table is no stored config"),
-        "sqlite"
+        wafer_core::clients::config::get_default(&ctx, "WAFER_RUN_SHARED__SITE_NAME", "default")
+            .await
+            .expect("no table is no stored config"),
+        "from the boot map"
     );
     assert_eq!(
         wafer_core::clients::config::get_optional(&ctx, "WAFER_RUN_SHARED__UNSET")

@@ -114,6 +114,7 @@ use wafer_core::interfaces::{
     network::service::{NetworkError, NetworkService, Request, Response},
 };
 use wafer_run::Wafer;
+use wafer_sql_utils::Backend;
 
 /// The bound Worker secret every build carries (`PROTECTED_ENV_KEYS`): on
 /// both config surfaces and in the config source's overlay.
@@ -293,9 +294,11 @@ async fn build(
         overlay,
         variables.clone(),
     ))));
-    let (builder, config) = install(runtime_config);
+    let (builder, config) = install(
+        runtime_config,
+        ImpresspressBuilder::new().database(db.clone(), Backend::Sqlite),
+    );
     let builder = builder
-        .database(db.clone())
         .storage(Arc::new(InMemoryStorageService::new()))
         .crypto(Arc::new(
             wafer_block_crypto::service::Argon2JwtCryptoService::new(JWT_SECRET.to_string())
@@ -334,14 +337,21 @@ fn workers_snapshot() -> Arc<VariablesSnapshot> {
     Arc::new(VariablesSnapshot::new(RetryMode::Backoff))
 }
 
-fn install(runtime_config: RuntimeConfig) -> (ImpresspressBuilder, Arc<dyn ConfigService>) {
-    runtime_config.install(ImpresspressBuilder::new(), |map| {
-        let service = impresspress_core::builder::fill_config_service(
-            Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-            map,
-        );
-        (service.clone(), service)
-    })
+/// `build_runtime`'s order: the database (D1 speaks SQLite) goes into the
+/// builder before `install`, which publishes its dialect on both surfaces.
+fn install(
+    runtime_config: RuntimeConfig,
+    builder: ImpresspressBuilder,
+) -> (ImpresspressBuilder, Arc<dyn ConfigService>) {
+    runtime_config
+        .install(builder, |map| {
+            let service = impresspress_core::builder::fill_config_service(
+                Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                map,
+            );
+            (service.clone(), service)
+        })
+        .expect("install the config surfaces")
 }
 
 /// Phase 1: the deploy funnel over an empty database, then the prepare
@@ -1958,6 +1968,76 @@ async fn an_outage_leaves_a_page_reading_no_stored_config_serving() {
     assert!(
         !reads_variables(&ledger.take()),
         "before its retry, the remembered failure answers with no query"
+    );
+}
+
+/// **Admin's `Init` reads no stored config, and the first block that does
+/// is one that declares config keys** (the outage plan's IP-B addendum,
+/// IP-B0). Attribution by ordering, on the prepared build `boot` runs: seal,
+/// then admin alone, then every other block in `block_names()` order (the
+/// prepared hook is a no-op, so this is `boot`'s sequence), draining the
+/// ledger after each.
+///
+/// Admin used to read the database dialect from the variables table first
+/// (`WAFER_RUN_SHARED__DATABASE__BACKEND`), so a failed variables read failed
+/// admin's `Init` transiently whatever failed, and the config source's
+/// `SourceFault` was never reached. Now the dialect is a boot-map fact, and
+/// the first variables read is a config-declaring block's source load, which
+/// classifies it. The positive half — some block does send the read — is
+/// what proves the ledger sees variables statements at all.
+#[tokio::test]
+async fn admin_init_reads_no_stored_config_and_a_config_declaring_block_reads_first() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    let db = cold(&path, &ledger);
+    let mut built = build(&db, Some(&plan), false, &HashMap::new(), workers_snapshot()).await;
+    built.wafer.seal().await.expect("seal");
+    ledger.take();
+
+    let admin = impresspress_core::blocks::admin::ADMIN_BLOCK_ID;
+    built
+        .wafer
+        .init_block(admin)
+        .await
+        .expect("admin initializes");
+    let trips = ledger.take();
+    assert!(
+        !reads_variables(&trips),
+        "admin's Init read stored config: {trips:#?}"
+    );
+
+    let declaring: Vec<String> = built
+        .wafer
+        .block_infos()
+        .into_iter()
+        .filter(|info| !info.config_keys.is_empty())
+        .map(|info| info.name)
+        .collect();
+    let mut first_reader = None;
+    for name in built.wafer.block_names() {
+        if name == admin {
+            continue;
+        }
+        built
+            .wafer
+            .init_block(&name)
+            .await
+            .unwrap_or_else(|e| panic!("{name} initializes: {e}"));
+        if reads_variables(&ledger.take()) {
+            first_reader = Some(name);
+            break;
+        }
+    }
+    let first_reader = first_reader.expect("some block's Init reads the variables table");
+    assert!(
+        declaring.contains(&first_reader),
+        "the first stored-config read came from `{first_reader}`, which declares no config \
+         keys, so its Init read through the config block (a fault there is `Unavailable`, \
+         transient) before any source load could classify it; declaring: {declaring:?}"
     );
 }
 

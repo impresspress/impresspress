@@ -2,10 +2,9 @@
 //! [`crate::migration_helper::lifecycle_init`].
 //!
 //! Mirrors the auth/files migration pattern. SQL is embedded via
-//! `include_str!`. Backend selection reads the
-//! `WAFER_RUN_SHARED__DATABASE__BACKEND` config key
-//! (`sqlite` | `postgres`). Falls back to `sqlite` when the config block
-//! is not registered.
+//! `include_str!`. The dialect's list is chosen by
+//! [`crate::migration_helper::db_backend`] (the runtime's
+//! `IMPRESSPRESS_DB_TYPE`, `sqlite` | `postgres`).
 //!
 //! Application is gated by [`crate::migration_helper::apply_pending`]:
 //! the helper handles statement splitting + the `current_hash` /

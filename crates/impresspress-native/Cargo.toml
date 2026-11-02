@@ -30,6 +30,9 @@ wafer-block-local-storage = { workspace = true }
 wafer-block-network = { workspace = true }
 wafer-block-crypto = { workspace = true }
 wafer-block-http-listener = { workspace = true }
+# `Backend`, the dialect `IMPRESSPRESS_DB_TYPE` names: parsed once here
+# (`env::InfraConfig::db_type`) and handed on as the enum, never the text.
+wafer-sql-utils = { workspace = true }
 
 wafer-block-postgres = { workspace = true, optional = true }
 # The migration lock's own PostgreSQL session (`migration_lock::postgres`):
@@ -62,8 +65,6 @@ tempfile = "3"
 # `test-support` for the history engine
 # (`impresspress_core::test_support::migration_history`).
 impresspress-core = { path = "../impresspress-core", features = ["test-support"] }
-# The SQL dialect the migration tests name.
-wafer-sql-utils = { workspace = true }
 
 [lints]
 workspace = true

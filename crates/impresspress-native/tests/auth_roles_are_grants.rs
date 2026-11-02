@@ -308,9 +308,13 @@ async fn applies_fresh(db: Arc<dyn DatabaseService>, backend: Backend) {
 
 async fn sqlite(dir: &tempfile::TempDir, name: &str) -> Arc<dyn DatabaseService> {
     let path = dir.path().join(name);
-    impresspress_native::make_database_service("sqlite", path.to_str().expect("utf-8 path"), None)
-        .await
-        .expect("open SQLite")
+    impresspress_native::make_database_service(
+        wafer_sql_utils::Backend::Sqlite,
+        path.to_str().expect("utf-8 path"),
+        None,
+    )
+    .await
+    .expect("open SQLite")
 }
 
 #[tokio::test]

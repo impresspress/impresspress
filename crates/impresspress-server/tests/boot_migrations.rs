@@ -153,12 +153,16 @@ enum Database {
 impl Database {
     fn infra(&self, port: u16, storage_root: &str) -> InfraConfig {
         let (db_type, db_path, db_url) = match self {
-            Self::Sqlite(path) => ("sqlite", path.clone(), None),
-            Self::Postgres(url) => ("postgres", String::new(), Some(url.clone())),
+            Self::Sqlite(path) => (wafer_sql_utils::Backend::Sqlite, path.clone(), None),
+            Self::Postgres(url) => (
+                wafer_sql_utils::Backend::Postgres,
+                String::new(),
+                Some(url.clone()),
+            ),
         };
         InfraConfig {
             listen: format!("127.0.0.1:{port}"),
-            db_type: db_type.to_string(),
+            db_type,
             db_path,
             db_url,
             storage_type: "local".to_string(),
@@ -171,7 +175,7 @@ impl Database {
     async fn open(&self) -> Arc<dyn DatabaseService> {
         let infra = self.infra(0, "");
         impresspress_native::make_database_service(
-            &infra.db_type,
+            infra.db_type,
             &infra.db_path,
             infra.db_url.as_deref(),
         )
@@ -1145,9 +1149,13 @@ async fn an_unsupported_admin_state_refuses_the_boot() {
 async fn the_same_holds_on_postgres() {
     let url = std::env::var("IMPRESSPRESS_TEST_POSTGRES_URL")
         .expect("IMPRESSPRESS_TEST_POSTGRES_URL must name a PostgreSQL database");
-    let admin = impresspress_native::make_database_service("postgres", "", Some(&url))
-        .await
-        .expect("connect to PostgreSQL");
+    let admin = impresspress_native::make_database_service(
+        wafer_sql_utils::Backend::Postgres,
+        "",
+        Some(&url),
+    )
+    .await
+    .expect("connect to PostgreSQL");
     let storage = tempfile::tempdir().expect("tempdir");
     let storage_root = storage.path().to_str().expect("utf-8 path").to_string();
     for scenario in [

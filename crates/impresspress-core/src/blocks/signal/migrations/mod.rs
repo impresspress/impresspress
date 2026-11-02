@@ -1,10 +1,8 @@
 //! Signal block migrations. Delegated to `crate::migration_helper`.
 //!
-//! Backend selection mirrors `files/migrations/mod.rs` and
-//! `vector/migrations/mod.rs`: read `WAFER_RUN_SHARED__DATABASE__BACKEND`
-//! from the config snapshot, fall back to `sqlite` when the config block is
-//! not registered. The actual apply + gating + statement splitting lives in
-//! [`crate::migration_helper::apply_pending`].
+//! The dialect's list is chosen by [`crate::migration_helper::db_backend`]
+//! (the runtime's `IMPRESSPRESS_DB_TYPE`). The actual apply + gating +
+//! statement splitting lives in [`crate::migration_helper::apply_pending`].
 
 const SQL_001_SQLITE: &str = include_str!("001_signal_rooms.sqlite.sql");
 #[cfg(feature = "postgres")]

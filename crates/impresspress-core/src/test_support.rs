@@ -361,7 +361,14 @@ impl TestContext {
         let mut ctx = Self {
             db_service: svc,
             database_block,
-            config: Arc::new(HashMap::new()),
+            // The database dialect every production runtime carries (its
+            // builder publishes it with the database, `RuntimeConfig::install`):
+            // this fixture's database is SQLite, and a migrating `Init` without
+            // it fails as a misbuilt runtime would.
+            config: Arc::new(HashMap::from([(
+                crate::migration_helper::DATABASE_TYPE_KEY.to_string(),
+                "sqlite".to_string(),
+            )])),
             config_store: false,
             variables_snapshot,
             blocks: Arc::new(Mutex::new(HashMap::new())),
@@ -405,6 +412,21 @@ impl TestContext {
     pub fn set_config(&mut self, key: &str, value: &str) {
         let mut map = (*self.config).clone();
         map.insert(key.to_string(), value.to_string());
+        self.config = Arc::new(map);
+
+        if self.config_store {
+            self.install_config_block();
+            return;
+        }
+        self.install_env_config_block();
+    }
+
+    /// Remove a config entry from the snapshot (and the config block over
+    /// it): for a test of what a runtime that lacks a key — the database
+    /// dialect every fixture starts with, say — does.
+    pub fn unset_config(&mut self, key: &str) {
+        let mut map = (*self.config).clone();
+        map.remove(key);
         self.config = Arc::new(map);
 
         if self.config_store {
