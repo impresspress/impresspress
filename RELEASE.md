@@ -19,6 +19,22 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### A degraded block's 503 no longer quotes its cause
+
+**What changes.** A request to a block whose `Init` failed — during a D1
+outage on Cloudflare, a block the runtime published without — answered 503
+with the block's `Init` error in its JSON `message`: D1's text, table names,
+the call budget's numbers. It now answers
+``block `<name>` is temporarily unavailable (ref: <id>)`` (or
+``… failed to initialize (ref: <id>)`` for a failure no retry cures). Status,
+error code and `Retry-After` are unchanged.
+
+- The cause is in the Worker's log, at `warn` (or `error`), under
+  `correlation_id = <id>`; grep it to find what failed. A degraded block's
+  cause is also logged when the runtime is built (`publishing without a block
+  whose Init failed transiently`).
+- `request_logs.error_message` holds the sanitized text, with the reference.
+
 ### The SQL dialect is `IMPRESSPRESS_DB_TYPE`, set by the runtime; a stored `WAFER_RUN_SHARED__DATABASE__BACKEND` row is no longer read
 
 **What changes.** The dialect every block migrates in (and the admin

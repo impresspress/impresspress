@@ -620,7 +620,6 @@ async fn request_flow(
     path: &str,
     cookie: Option<&str>,
 ) -> u16 {
-    deferred::set_mode(DeferMode::Queued);
     let mut headers = vec![
         ("host", "localhost".to_string()),
         ("accept", "text/html".to_string()),
@@ -630,6 +629,20 @@ async fn request_flow(
     if let Some(token) = cookie {
         headers.push(("cookie", format!("auth_token={token}")));
     }
+    respond(wafer, db, flow, path, &headers).await.status
+}
+
+/// A `GET path` with `headers` through `flow`, as the Worker serves it: the
+/// whole response the client receives, then the audit row and the deferred
+/// work the request handed off.
+async fn respond(
+    wafer: &Wafer,
+    db: &Arc<dyn DatabaseService>,
+    flow: &str,
+    path: &str,
+    headers: &[(&str, String)],
+) -> http_codec::HttpResponseParts {
+    deferred::set_mode(DeferMode::Queued);
     let msg = http_codec::build_http_message(
         "GET",
         path,
@@ -638,12 +651,11 @@ async fn request_flow(
         headers.iter().map(|(k, v)| (*k, v.as_str())),
     );
     let after = AfterResponse::new();
-    let status = after_response::scope_root(
+    let response = after_response::scope_root(
         Rc::clone(&after),
         async {
             http_codec::collect_http_response(wafer.run(flow, msg, InputStream::empty()).await)
                 .await
-                .status
         },
         || panic!("a stale after-response scope"),
     )
@@ -656,7 +668,7 @@ async fn request_flow(
     for task in after.take_tasks() {
         task.await;
     }
-    status
+    response
 }
 
 /// The warm requests, with the status each must answer: a request that took
@@ -2231,6 +2243,73 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
         sent.is_empty(),
         "the dispatch ran no Init on `{degraded_block}` — an Init would read its config: {sent:#?}"
     );
+}
+
+/// **A degraded block's 503 tells the client nothing of the cause**, on
+/// every way a client reaches it: a page, an htmx swap and an API call. The
+/// refusal is the runtime's (the block's handler never runs), and before
+/// wafer-run sanitized it the body quoted the block's `Init` error — the D1
+/// text, a table name, the call budget's numbers.
+#[tokio::test]
+async fn a_degraded_block_answers_503_without_its_cause() {
+    let _generation = GENERATION.lock().await;
+    for fault in [Fault::Unavailable, Fault::CallBudgetExhausted] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("d1.sqlite3");
+        let ledger = Arc::new(Ledger::default());
+        let plan = provision(&cold(&path, &ledger)).await;
+
+        let (booted, wafer, db) =
+            boot_prepared_while_variables_fail(&path, &ledger, &plan, fault.clone()).await;
+        let report = booted.expect("an outage publishes degraded");
+        let auth_ui = "impresspress/auth-ui";
+        assert!(
+            report.degraded.iter().any(|d| d.block == auth_ui),
+            "{fault:?}: `{auth_ui}` is degraded: {report:?}"
+        );
+
+        let page = vec![
+            ("host", "localhost".to_string()),
+            ("accept", "text/html".to_string()),
+            ("sec-fetch-mode", "navigate".to_string()),
+        ];
+        let mut htmx = page.clone();
+        htmx.push(("hx-request", "true".to_string()));
+        let api = vec![
+            ("host", "localhost".to_string()),
+            ("accept", "application/json".to_string()),
+        ];
+        for (shape, headers) in [("page", page), ("htmx", htmx), ("api", api)] {
+            let response = respond(&wafer, &db, "site-main", "/b/auth/login", &headers).await;
+            let body = String::from_utf8_lossy(&response.body);
+            assert_eq!(response.status, 503, "{fault:?} {shape}: {body}");
+            for cause in [
+                "D1_ERROR",
+                "injected",
+                "Too many API requests",
+                variables::TABLE,
+                "init transient failure",
+                "not initialized in this runtime",
+            ] {
+                assert!(
+                    !body.contains(cause),
+                    "{fault:?} {shape}: the body quotes the cause ({cause:?}): {body}"
+                );
+            }
+            let message = serde_json::from_slice::<Value>(&response.body)
+                .unwrap_or_else(|e| panic!("{fault:?} {shape}: a JSON body ({e}): {body}"))
+                ["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{fault:?} {shape}: a message: {body}"))
+                .to_string();
+            assert!(
+                message.starts_with(&format!(
+                    "block `{auth_ui}` is temporarily unavailable (ref: "
+                )),
+                "{fault:?} {shape}: {message}"
+            );
+        }
+    }
 }
 
 /// The `[features]` table of the manifest at `crate_dir`.
