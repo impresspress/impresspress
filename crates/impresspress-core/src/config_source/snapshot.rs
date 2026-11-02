@@ -30,8 +30,10 @@
 //!
 //! A failed read is remembered ([`State::Failed`]) and replayed to every reader
 //! until it is retried, with no query. It is never turned into defaults, an
-//! empty map or "not found": `load_for_block` answers `ConfigError::Transient`,
-//! and `CONFIG_GET`/`CONFIG_GET_MANY` answer `ErrorCode::Unavailable`. A route
+//! empty map or "not found": `load_for_block` answers `ConfigError::Transient`
+//! or `ConfigError::SourceFault`, as `config_source::database::config_error`
+//! classifies it, and `CONFIG_GET`/`CONFIG_GET_MANY` answer
+//! `ErrorCode::Unavailable`. A route
 //! that reads stored config therefore answers an error while the table cannot
 //! be read, rather than rendering with config nobody stored.
 //!
@@ -57,7 +59,13 @@
 //! panic a permanent state. Either way the worst an interruption can do is
 //! lose the memo, which costs one read.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use wafer_core::interfaces::database::service::DatabaseService;
 
@@ -173,9 +181,10 @@ struct Failure {
 /// cell whole.
 #[derive(Debug, Clone, Default)]
 enum State {
-    /// Nothing read yet, or nothing worth remembering: a fresh runtime, or the
-    /// last read was the pre-migration-002 shape (see
-    /// [`VariablesSnapshot::read`]), which is deliberately not memoized.
+    /// Nothing read yet, or nothing worth remembering: a fresh runtime, a
+    /// table that does not exist yet, or the last read found the
+    /// pre-migration-002 shape (see [`VariablesSnapshot::read`]), which is
+    /// deliberately not memoized.
     #[default]
     Empty,
     /// A successful read, and the generation captured before it.
@@ -200,6 +209,13 @@ pub struct VariablesSnapshot {
     state: StateCell,
     retry: RetryMode,
     clock: Clock,
+    /// The config-write generation the pre-migration-002 shape was last warned
+    /// about, plus one (0: never — only the 2^64th config write would wrap
+    /// onto it). Its own atomic rather than a [`State`]: a
+    /// check and a store in one `swap`, so exactly one reader of a generation
+    /// warns — parallel native threads included — and no other state a reader
+    /// stores in between (a failure, an `Absent`) can reset it.
+    pre_002_warned: AtomicU64,
 }
 
 impl std::fmt::Debug for VariablesSnapshot {
@@ -226,6 +242,7 @@ impl VariablesSnapshot {
             state: StateCell::default(),
             retry,
             clock: Arc::new(crate::util::now_millis),
+            pre_002_warned: AtomicU64::new(0),
         }
     }
 
@@ -236,6 +253,7 @@ impl VariablesSnapshot {
             state: StateCell::default(),
             retry,
             clock: Arc::new(clock),
+            pre_002_warned: AtomicU64::new(0),
         }
     }
 
@@ -283,7 +301,10 @@ impl VariablesSnapshot {
     /// migration that adds and backfills it runs as raw SQL through
     /// `migration_helper`, which records no config write to invalidate a memo
     /// with. Memoizing would leave every block on its defaults for the rest of
-    /// the runtime, so that read is served and not remembered. Keyed on the
+    /// the runtime, so that read is served and not remembered. It is warned
+    /// about exactly once per config-write generation, not once per read: a
+    /// cold build reads once per config-declaring block, and every
+    /// `CONFIG_GET` reads too. Keyed on the
     /// record's shape, not on the grouping: a table holding only shared rows
     /// (`block` NULL on each) has the column, groups to nothing, and is
     /// memoized like any other — otherwise it would be re-read once per
@@ -321,11 +342,14 @@ impl VariablesSnapshot {
             Ok(read) => {
                 let rows = Arc::new(VariablesRows::new(read.rows));
                 if read.returned > 0 && !read.any_record_has_block_key {
-                    tracing::warn!(
-                        rows = read.returned,
-                        "variables rows carry no `block` column (pre-migration-002); \
-                         serving this read without remembering it"
-                    );
+                    if self.first_pre_002_read_of(generation) {
+                        tracing::warn!(
+                            rows = read.returned,
+                            "variables rows carry no `block` column (pre-migration-002); \
+                             serving every read without remembering it until migration 002 \
+                             has run (warned once per config-write generation)"
+                        );
+                    }
                     self.store(State::Empty);
                 } else {
                     self.store(State::Loaded {
@@ -363,6 +387,15 @@ impl VariablesSnapshot {
         }
     }
 
+    /// Whether this is the first pre-migration-002 read of `generation`, the
+    /// one that warns. The check and the store are one atomic `swap`, so of
+    /// any number of readers of one generation — interleaved async readers on
+    /// Workers, parallel threads natively — exactly one is first.
+    fn first_pre_002_read_of(&self, generation: u64) -> bool {
+        let marker = generation.wrapping_add(1);
+        self.pre_002_warned.swap(marker, Ordering::AcqRel) != marker
+    }
+
     /// Whether a remembered failure may be read again now.
     fn retry_is_due(&self, failure: &Failure) -> bool {
         match self.retry {
@@ -393,6 +426,33 @@ mod tests {
             [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000]
         );
         assert_eq!(retry_delay_ms(u32::MAX), MAX_RETRY_MS);
+    }
+
+    /// Exactly one of many parallel readers of a generation is the first to
+    /// find the pre-migration-002 shape, so exactly one warns; a new
+    /// generation has a first reader again.
+    #[test]
+    fn exactly_one_reader_of_a_generation_warns_about_the_pre_002_shape() {
+        let snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let firsts: usize = (0..16)
+            .map(|_| {
+                let (snapshot, barrier) = (Arc::clone(&snapshot), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    snapshot.first_pre_002_read_of(7)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|reader| usize::from(reader.join().expect("a reader")))
+            .sum();
+        assert_eq!(firsts, 1, "one warning per generation, however many race");
+        assert!(!snapshot.first_pre_002_read_of(7));
+        assert!(
+            snapshot.first_pre_002_read_of(8),
+            "a new generation warns once more"
+        );
     }
 
     // The projections read only a row's `key`, `value` and `block` fields, so
