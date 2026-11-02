@@ -209,12 +209,15 @@ pub struct VariablesSnapshot {
     state: StateCell,
     retry: RetryMode,
     clock: Clock,
-    /// The config-write generation the pre-migration-002 shape was last warned
-    /// about, plus one (0: never — only the 2^64th config write would wrap
-    /// onto it). Its own atomic rather than a [`State`]: a
-    /// check and a store in one `swap`, so exactly one reader of a generation
-    /// warns — parallel native threads included — and no other state a reader
-    /// stores in between (a failure, an `Absent`) can reset it.
+    /// The newest config-write generation the pre-migration-002 shape has been
+    /// warned about, plus one (0: never — only the 2^64th config write would
+    /// wrap onto it). Its own atomic rather than a [`State`]: the check and the
+    /// store are one `fetch_max`, so the marker only moves forward. At most
+    /// one reader of a generation warns — parallel native threads included —
+    /// a reader still holding an older generation across a config write never
+    /// warns after a newer one has (nor moves the marker back for the newer
+    /// generation to warn again), and no other state a reader stores in between
+    /// (a failure, an `Absent`) can reset it.
     pre_002_warned: AtomicU64,
 }
 
@@ -302,7 +305,8 @@ impl VariablesSnapshot {
     /// `migration_helper`, which records no config write to invalidate a memo
     /// with. Memoizing would leave every block on its defaults for the rest of
     /// the runtime, so that read is served and not remembered. It is warned
-    /// about exactly once per config-write generation, not once per read: a
+    /// about at most once per config-write generation, and never for a
+    /// generation older than one already warned about, not once per read: a
     /// cold build reads once per config-declaring block, and every
     /// `CONFIG_GET` reads too. Keyed on the
     /// record's shape, not on the grouping: a table holding only shared rows
@@ -347,7 +351,7 @@ impl VariablesSnapshot {
                             rows = read.returned,
                             "variables rows carry no `block` column (pre-migration-002); \
                              serving every read without remembering it until migration 002 \
-                             has run (warned once per config-write generation)"
+                             has run (warned at most once per config-write generation)"
                         );
                     }
                     self.store(State::Empty);
@@ -388,12 +392,14 @@ impl VariablesSnapshot {
     }
 
     /// Whether this is the first pre-migration-002 read of `generation`, the
-    /// one that warns. The check and the store are one atomic `swap`, so of
-    /// any number of readers of one generation — interleaved async readers on
-    /// Workers, parallel threads natively — exactly one is first.
+    /// one that warns: whether `generation` is newer than every generation
+    /// warned about so far. The check and the store are one atomic
+    /// `fetch_max`, so of any number of readers of one generation —
+    /// interleaved async readers on Workers, parallel threads natively — at
+    /// most one is first, and none is once a newer generation has been.
     fn first_pre_002_read_of(&self, generation: u64) -> bool {
         let marker = generation.wrapping_add(1);
-        self.pre_002_warned.swap(marker, Ordering::AcqRel) != marker
+        self.pre_002_warned.fetch_max(marker, Ordering::AcqRel) < marker
     }
 
     /// Whether a remembered failure may be read again now.
@@ -430,7 +436,8 @@ mod tests {
 
     /// Exactly one of many parallel readers of a generation is the first to
     /// find the pre-migration-002 shape, so exactly one warns; a new
-    /// generation has a first reader again.
+    /// generation has a first reader again; a stale generation, read across a
+    /// config write, is never first after a newer one.
     #[test]
     fn exactly_one_reader_of_a_generation_warns_about_the_pre_002_shape() {
         let snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Backoff));
@@ -452,6 +459,14 @@ mod tests {
         assert!(
             snapshot.first_pre_002_read_of(8),
             "a new generation warns once more"
+        );
+        assert!(
+            !snapshot.first_pre_002_read_of(7),
+            "a reader still holding an older generation never warns after a newer one"
+        );
+        assert!(
+            !snapshot.first_pre_002_read_of(8),
+            "nor does it move the marker back for the newer generation to warn again"
         );
     }
 
