@@ -19,6 +19,23 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: a request waiting for another's runtime build gives up after 3 s
+
+**What changes.** A cold request that finds another request building the
+isolate's runtime waits for it, re-checking on a timer. It re-checked every
+25 ms for up to 10 s, and each check costs about a quarter of a millisecond
+of CPU on Workers, so a second of waiting spent the Free plan's whole 10 ms
+budget; such waiters were a third of the requests Cloudflare killed in the
+2026-11-03 outage check. It now re-checks after 25, 50, 100, then every
+200 ms (about 4 ms of CPU for the longest wait), and answers **503 with
+`Retry-After`** (at least the retry window's remaining time) once it has
+waited 3 s and the build is still running. A build that takes longer than
+that is one whose request Cloudflare stopped; the slot is freed by its lease
+(5 or 10 s), for a later request.
+
+**Who has to act.** No one. A client may see a 503 + `Retry-After` during a
+cold start where it used to wait up to 10 s, or be cut off by Cloudflare.
+
 ### Cloudflare: a retry checks D1 before it rebuilds; `/health` says `retries`
 
 **What was wrong.** During a D1 outage each isolate retried its runtime by
