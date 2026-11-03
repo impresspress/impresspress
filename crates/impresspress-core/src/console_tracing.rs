@@ -19,6 +19,25 @@ use tracing::{
     span, Event, Level, Metadata, Subscriber,
 };
 
+/// The most verbose `tracing` level a Cloudflare Worker writes to its
+/// console (`impresspress-cloudflare::init_isolate`): warnings and errors.
+///
+/// Those are the framework's failure signals: a block a runtime was
+/// published without, a block whose `Init` keeps failing the same way
+/// (`runtime_health`), and a refused dispatch's cause, which wafer-run logs
+/// under the `ref` the response body names. `info` and `debug` events fire
+/// on every runtime build and many requests ("registering database WRAP
+/// grants", cache outcomes), and on Workers each console line is a Workers
+/// Logs event, which the Free plan meters per day: keeping them would spend
+/// that allowance on routine lines and crowd out the failures. A block's own
+/// logging goes through its `LoggerService` instead, whose level
+/// `IMPRESSPRESS_CF_LOG_LEVEL` sets.
+///
+/// Here, rather than in the Cloudflare crate, so a native test of what a
+/// Worker's console shows (`tests/d1_read_cost.rs`) captures at the Worker's
+/// own level instead of a copy of it.
+pub const WORKER_MAX_LEVEL: Level = Level::WARN;
+
 /// Collects an event's `message` and its remaining fields into one line:
 /// `target message key=value key=value`.
 #[derive(Default)]

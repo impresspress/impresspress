@@ -656,8 +656,8 @@ async fn a_table_without_updated_at_fails_the_blocks_init_by_name() {
         .register_block("site/nostamp", Arc::new(block))
         .expect("register site/nostamp");
     // `start` tolerates a block whose `Init` fails (logged), as the
-    // sandbox's runtime does; the block then answers every call with that
-    // failure.
+    // sandbox's runtime does; the block then refuses every call, and the
+    // cause stays in its slot and the log.
     let wafer = wafer.start().await.expect("start the runtime");
     let answer = wafer
         .run_block(

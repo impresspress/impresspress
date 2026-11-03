@@ -19,25 +19,32 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
-### A degraded block's 503 no longer quotes its cause; wafer-run 54683c50
+### A degraded block's refusal no longer quotes its cause; wafer-run 54683c50
 
 **What changes.** The wafer-run pin moves from `f9edcf43` to `54683c50`
 (wafer-run#477). A request to a block whose `Init` failed — during a D1
 outage on Cloudflare, a block the runtime published without — answered 503
-with the block's `Init` error in its JSON `message`: D1's text, table names,
-the call budget's numbers. It now answers
-``block `<name>` is temporarily unavailable (ref: <id>)`` (or
-``… failed to initialize (ref: <id>)`` for a failure no retry cures). Status,
-error code and `Retry-After` are unchanged.
+(412 for a failure no retry cures) with the block's `Init` error in its JSON
+`message`: D1's text, table names, the call budget's numbers. It now answers
+``block `<name>` is temporarily unavailable (ref: <id>)`` (503), or
+``block `<name>` failed to initialize (ref: <id>)`` (412). Status, error
+code and `Retry-After` are unchanged. On Cloudflare a permanent `Init`
+failure fails the runtime's build instead, so a Worker answers only the 503;
+the 412 is native's, for an `Init` that fails lazily.
 
-- The cause is in the Worker's console (`wrangler tail`, Workers Logs), at
-  `warn` (or `error`), on one line with the reference: `… dispatch refused: …
-  correlation_id=<id> block=<name> error=<cause>`, or `last_failure=<cause>`
-  for a block the runtime refuses because its `Init` has not settled. Search
-  for the `<id>` the client was given. A degraded block's cause is also
-  logged when the runtime is built (`publishing without a block whose Init
-  failed transiently`). Both reach the console since the Worker installs a
-  `tracing` subscriber (below).
+- The cause is logged at `warn` (`error` for the 412) on one line with the
+  reference: `… dispatch refused: … correlation_id=<id> block=<name>
+  error=<cause>`, or `last_failure=<cause>` for a block the runtime refuses
+  because its `Init` has not settled. On a Worker that line is in the console
+  (`wrangler tail`, Workers Logs) — the Worker installs a `tracing`
+  subscriber (below); on native it is in the server's log. Search for the
+  `<id>` the client was given. A degraded block's cause is also logged when
+  the runtime is built (`publishing without a block whose Init failed
+  transiently`).
+- On a Worker, every refused request writes that line: one Workers Logs
+  event per request, metered on the Free plan, so a client retrying a
+  degraded route during an outage spends the allowance at one line per
+  request.
 - `request_logs.error_message` holds the sanitized text, with the reference.
 
 ### `/_deploy/prepare` answers 503 when every failure may clear on a retry

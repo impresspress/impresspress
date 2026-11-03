@@ -179,22 +179,6 @@ pub fn init_isolate() {
     });
 }
 
-/// The most verbose `tracing` level a Worker writes to its console: warnings
-/// and errors.
-///
-/// Those are the framework's failure signals: a block a runtime was
-/// published without, a block whose `Init` keeps failing the same way
-/// (`runtime_health`), and — from the wafer-run that logs a refused
-/// dispatch's cause under the `ref` its body names — that cause. `info` and
-/// `debug` events fire on every runtime
-/// build and many requests ("registering database WRAP grants", cache
-/// outcomes), and on Workers each console line is a Workers Logs event,
-/// which the Free plan meters per day: keeping them would spend that
-/// allowance on routine lines and crowd out the failures. A block's own
-/// logging goes through its `LoggerService` instead, whose level
-/// `IMPRESSPRESS_CF_LOG_LEVEL` sets.
-const CONSOLE_TRACING_MAX_LEVEL: tracing::Level = tracing::Level::WARN;
-
 /// Install [`impresspress_core::console_tracing::ConsoleTracing`] as this
 /// isolate's `tracing` default, writing to the Worker console: whether it was
 /// installed.
@@ -206,7 +190,7 @@ const CONSOLE_TRACING_MAX_LEVEL: tracing::Level = tracing::Level::WARN;
 fn install_console_tracing() -> bool {
     tracing::subscriber::set_global_default(
         impresspress_core::console_tracing::ConsoleTracing::new(
-            CONSOLE_TRACING_MAX_LEVEL,
+            impresspress_core::console_tracing::WORKER_MAX_LEVEL,
             console_emit,
         ),
     )
@@ -2927,7 +2911,8 @@ mod console_tracing_tests {
 
     /// **A framework `tracing::warn!` reaches the Worker console** once the
     /// isolate is initialized, at its own level; an `info!` does not
-    /// (`CONSOLE_TRACING_MAX_LEVEL`). Before, no subscriber was installed and
+    /// (`impresspress_core::console_tracing::WORKER_MAX_LEVEL`). Before, no
+    /// subscriber was installed and
     /// every such line was dropped. The warning carries its fields in the `%`
     /// shape wafer-run's refusal logs its reference and cause with.
     #[wasm_bindgen_test]
