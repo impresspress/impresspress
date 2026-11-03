@@ -87,9 +87,10 @@ pub enum CacheOutcome {
     /// rebuilding anything (one read of the variables table: the Cloudflare
     /// runtime cache's gate), and the check failed: nothing was built, the
     /// window was re-armed, and the runtime this isolate already had was
-    /// served, still not current. Distinct from `Stale`, which builds nothing
-    /// and checks nothing, so a `Server-Timing` reader can count the checks an
-    /// outage costs without inferring them.
+    /// served, still not current. Distinct from `Stale`, which either checked
+    /// nothing (inside the window) or failed past the check (a rebuild attempt
+    /// that failed after the check passed), so a `Server-Timing` reader can
+    /// count the checks an outage costs without inferring them.
     Gated,
 }
 
