@@ -361,9 +361,9 @@ impl VariablesConfigBlock {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    return OutputStream::error(WaferError::new(
-                        e.code,
-                        format!("{CONFIG_GET_MANY}: {e}"),
+                    return OutputStream::error(crate::blocks::errors::db_failed(
+                        CONFIG_GET_MANY,
+                        e,
                     ))
                 }
             }
@@ -613,9 +613,9 @@ impl Block for VariablesConfigBlock {
                 let value = match self.resolve(&key).await {
                     Ok(value) => value,
                     Err(e) => {
-                        return OutputStream::error(WaferError::new(
-                            e.code,
-                            format!("config.get {key}: {e}"),
+                        return OutputStream::error(crate::blocks::errors::db_failed(
+                            &format!("config.get {key}"),
+                            e,
                         ))
                     }
                 };

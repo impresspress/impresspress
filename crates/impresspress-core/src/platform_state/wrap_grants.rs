@@ -249,31 +249,32 @@ fn decode_error(e: String) -> WaferError {
 /// that probe is a `sqlite_master` scan of every schema row up to this
 /// table, which admin's migration creates last — about thirty rows on every
 /// database-built runtime when it ran first. Only a definite "absent" turns
-/// a failed list into no grants; a probe that also failed, or that found the
-/// table, is no evidence the failure was the cold start, so the list's own
-/// error is returned.
+/// a failed list into no grants. A probe that found the table returns the
+/// list's own error; a probe that failed leaves the read unresolved, and
+/// [`super::unresolved_read_error`] picks the error that keeps its class (a
+/// probe the call budget refused after the cold `no such table` is transient).
 pub async fn load(db: &Arc<dyn DatabaseService>) -> Result<Vec<ResourceGrant>, DatabaseError> {
-    let opts = ListOptions {
-        limit: Some(10_000),
-        skip_count: true,
-        ..Default::default()
-    };
-    let rows = match db.list(TABLE, &opts).await {
+    let rows = match db.list(TABLE, &load_list_opts()).await {
         Ok(list) => list.records,
-        Err(e) => {
-            if let Ok(false) = db.schema_table_exists(TABLE).await {
+        Err(e) => match db.schema_table_exists(TABLE).await {
+            Ok(false) => {
                 tracing::debug!(
                     "wrap_grants table absent (fresh boot before migrations); no dynamic grants"
                 );
                 return Ok(Vec::new());
             }
-            tracing::error!(
-                error = %e,
-                "wrap_grants list failed (operational error, not a missing table); \
-                 refusing to build a runtime without its admin-created grants"
-            );
-            return Err(e);
-        }
+            Ok(true) => {
+                tracing::error!(
+                    error = %e,
+                    "wrap_grants list failed (operational error, not a missing table); \
+                     refusing to build a runtime without its admin-created grants"
+                );
+                return Err(e);
+            }
+            // Unresolved: see `unresolved_read_error` for which error is
+            // the read's.
+            Err(probe) => return Err(super::unresolved_read_error(TABLE, e, probe)),
+        },
     };
     Ok(rows
         .into_iter()
@@ -350,6 +351,15 @@ pub(crate) async fn fixture_with_failing_reads() -> Arc<dyn DatabaseService> {
 // Runtime flavour: over `Context`, under WRAP.
 // ---------------------------------------------------------------------------
 
+/// The one read [`load`] makes.
+fn load_list_opts() -> ListOptions {
+    ListOptions {
+        limit: Some(10_000),
+        skip_count: true,
+        ..Default::default()
+    }
+}
+
 /// Every row, for the permissions page. A row that does not decode is an
 /// error here rather than silently omitted: the page renders these as the
 /// custom grants in force, and a listing that hides a row it cannot read
@@ -385,6 +395,28 @@ mod tests {
 
     use super::*;
     use crate::test_support::{FailingDbOpContext, TestContext};
+
+    /// A spent call budget is the read's error, not the list's: see
+    /// `block_settings`'s test of the same name. Transient, so a funnel
+    /// that meets it answers 503 rather than a 500 naming a missing table.
+    #[tokio::test]
+    async fn a_probe_refused_by_the_call_budget_is_the_reads_error() {
+        let shaped =
+            crate::test_support::d1_shaped::spent_by_a_failed_list(TABLE, &load_list_opts()).await;
+        let db: Arc<dyn DatabaseService> = shaped.clone();
+        let error = load(&db).await.expect_err("the probe was refused");
+        assert!(
+            matches!(error, DatabaseError::CallBudgetExhausted(_)),
+            "{error:?}"
+        );
+        assert!(
+            wafer_run::init_failure_is_transient(error.code(), error.detail_code()),
+            "{error:?}"
+        );
+
+        shaped.clear_fault();
+        assert!(load(&db).await.expect("absent is no grants").is_empty());
+    }
 
     fn new_grant(resource_type: &str) -> NewWrapGrant {
         NewWrapGrant {

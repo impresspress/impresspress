@@ -211,22 +211,25 @@ async fn read_rows(db: &Arc<dyn DatabaseService>) -> Result<Vec<BlockSettingsRow
     let opts = crate::cache_key::full_table_list_opts();
     let listed = match db.list(TABLE, &opts).await {
         Ok(listed) => listed,
-        Err(e) => {
-            // A probe that cannot answer is not evidence the table is there,
-            // so anything but a definite `false` keeps the original error.
-            if let Ok(false) = db.schema_table_exists(TABLE).await {
+        Err(e) => match db.schema_table_exists(TABLE).await {
+            Ok(false) => {
                 tracing::debug!(
                     "block_settings table absent (fresh boot before migrations); no rows"
                 );
                 return Ok(Vec::new());
             }
-            tracing::error!(
-                error = %e,
-                "block_settings list failed (operational error, not a missing table); \
-                 refusing to fabricate all-enabled defaults"
-            );
-            return Err(e);
-        }
+            Ok(true) => {
+                tracing::error!(
+                    error = %e,
+                    "block_settings list failed (operational error, not a missing table); \
+                     refusing to fabricate all-enabled defaults"
+                );
+                return Err(e);
+            }
+            // Unresolved: see `unresolved_read_error` for which error is
+            // the read's.
+            Err(probe) => return Err(super::unresolved_read_error(TABLE, e, probe)),
+        },
     };
     Ok(decode_rows(
         listed.records.iter().map(|r| (r.id.as_str(), &r.data)),
@@ -487,6 +490,39 @@ mod tests {
         features::USER_EDITED_SENTINEL,
         test_support::{FailingDbOpContext, TestContext},
     };
+
+    /// **A spent call budget is the read's error, not the list's.** On a
+    /// fresh database the cold `list` of the missing table spends the last
+    /// call; the existence probe is then refused. That refusal — transient —
+    /// is returned: the list's `no such table` is permanent, and it made
+    /// `/_deploy/prepare` under a small budget answer a 500 that named a
+    /// missing table instead of the budget.
+    #[tokio::test]
+    async fn a_probe_refused_by_the_call_budget_is_the_reads_error() {
+        let shaped = crate::test_support::d1_shaped::spent_by_a_failed_list(
+            TABLE,
+            &crate::cache_key::full_table_list_opts(),
+        )
+        .await;
+        let db: Arc<dyn DatabaseService> = shaped.clone();
+        let error = load(&db).await.expect_err("the probe was refused");
+        assert!(
+            matches!(error, DatabaseError::CallBudgetExhausted(_)),
+            "{error:?}"
+        );
+        assert!(
+            wafer_run::init_failure_is_transient(error.code(), error.detail_code()),
+            "{error:?}"
+        );
+
+        // With calls to spare, the same fresh database is the cold start.
+        shaped.clear_fault();
+        assert!(load(&db)
+            .await
+            .expect("absent is no rows")
+            .to_sorted_map()
+            .is_empty());
+    }
 
     /// The codec: every column `upsert_fields` writes comes back through
     /// `list_all` unchanged, `enabled` as a bool from the integer column.

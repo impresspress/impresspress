@@ -976,9 +976,9 @@ pub(crate) mod helpers {
         ctx: &dyn wafer_run::context::Context,
         user_id: &str,
     ) -> Result<Vec<String>, WaferError> {
-        let grants = user_roles::list_for_user(ctx, user_id)
-            .await
-            .map_err(|e| repo::db_failed("get_user_roles: roles table lookup", e))?;
+        let grants = user_roles::list_for_user(ctx, user_id).await.map_err(|e| {
+            crate::blocks::errors::db_failed("get_user_roles: roles table lookup", e)
+        })?;
         Ok(role_names(grants))
     }
 
@@ -1029,7 +1029,9 @@ pub(crate) mod helpers {
         ) -> Result<Self, WaferError> {
             let grants = user_roles::list_for_user(ctx, &user.id)
                 .await
-                .map_err(|e| repo::db_failed("token roles: roles table lookup", e))?;
+                .map_err(|e| {
+                    crate::blocks::errors::db_failed("token roles: roles table lookup", e)
+                })?;
             Ok(Self {
                 auth_version: user.auth_version,
                 roles: role_names(grants),
@@ -1496,7 +1498,7 @@ pub(crate) mod helpers {
                     .map(|_| ())
                     .map_err(|e| {
                         FamilyNotEstablished::Failed(
-                            repo::db_failed("login family insert", e),
+                            crate::blocks::errors::db_failed("login family insert", e),
                             "Could not record the sign-in",
                         )
                     })

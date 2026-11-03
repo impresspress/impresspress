@@ -1574,8 +1574,12 @@ async fn list_whole_table(
 ///
 /// Lists first, and only after a failed list asks whether the table exists:
 /// a definite "absent" is [`UnfilteredReadError::Absent`] — a fresh database
-/// before admin's migrations, which holds no stored config — and anything else
-/// is the list's own error, [`UnfilteredReadError::Read`]. On a healthy
+/// before admin's migrations, which holds no stored config. A probe that
+/// found the table is the list's own error, [`UnfilteredReadError::Read`];
+/// a probe that failed is `Read` with the error
+/// [`super::unresolved_read_error`] picks, which keeps the read's class (a
+/// probe the call budget refused after the cold `no such table` is
+/// transient). On a healthy
 /// database the probe never runs. `wrap_grants::load` and
 /// `block_settings::load` answer their own tables' cold start the same way.
 pub async fn read_unfiltered(
@@ -1585,8 +1589,13 @@ pub async fn read_unfiltered(
         Err(UnfilteredReadError::Read(error)) => {
             return Err(match db.schema_table_exists(TABLE).await {
                 Ok(false) => UnfilteredReadError::Absent(error),
-                Ok(true) | Err(_) => UnfilteredReadError::Read(error),
-            })
+                Ok(true) => UnfilteredReadError::Read(error),
+                // Unresolved: see `unresolved_read_error` for which error
+                // is the read's.
+                Err(probe) => {
+                    UnfilteredReadError::Read(super::unresolved_read_error(TABLE, error, probe))
+                }
+            });
         }
         listed => listed?,
     };
@@ -1659,8 +1668,8 @@ pub enum UnfilteredReadError {
     /// The "absent" is definite: `schema_table_exists` runs wafer-core's
     /// `exec::table_exists`, which no backend can override, and which answers
     /// `false` only for exactly one row whose `present` is 0. Any other
-    /// answer — no row, a NULL, a non-number — is an error, so the list's
-    /// error stands as [`Self::Read`]. Each reader decides what this variant
+    /// answer — no row, a NULL, a non-number — is an error, and the read is
+    /// [`Self::Read`] (see [`super::unresolved_read_error`] for which error). Each reader decides what this variant
     /// means for it (the config source retries the block, the config block
     /// reads on down its read order), and the runtime's snapshot never
     /// remembers it: the migration that creates the table runs as raw SQL
@@ -2298,6 +2307,38 @@ pub async fn delete_by_key(ctx: &dyn Context, key: &str) -> Result<(), WaferErro
 mod tests {
     use super::*;
     use crate::{config_vars::APP_NAME_KEY, test_support::TestContext};
+
+    /// A spent call budget is the read's error, not the list's: see
+    /// `block_settings`'s test of the same name. `Read` with the probe's
+    /// transient refusal, never `Read` with the list's `no such table`.
+    #[tokio::test]
+    async fn a_probe_refused_by_the_call_budget_is_the_reads_error() {
+        let shaped = crate::test_support::d1_shaped::spent_by_a_failed_list(
+            TABLE,
+            &crate::cache_key::full_table_list_opts(),
+        )
+        .await;
+        let db: Arc<dyn DatabaseService> = shaped.clone();
+        match read_unfiltered(&db).await {
+            Err(UnfilteredReadError::Read(error)) => {
+                assert!(
+                    matches!(
+                        error,
+                        wafer_core::interfaces::database::service::DatabaseError::CallBudgetExhausted(_)
+                    ),
+                    "{error:?}"
+                );
+            }
+            Err(other) => panic!("expected the probe's refusal: {other:?}"),
+            Ok(_) => panic!("expected the probe's refusal, read rows"),
+        }
+
+        shaped.clear_fault();
+        assert!(matches!(
+            read_unfiltered(&db).await,
+            Err(UnfilteredReadError::Absent(_))
+        ));
+    }
 
     /// **A taken key is the write's own answer, on the database these tests
     /// run on.** A second variable with a taken key is refused by the UNIQUE

@@ -110,7 +110,7 @@ use wafer_block::{http_codec, InputStream};
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_core::interfaces::{
     config::service::ConfigService,
-    database::service::DatabaseService,
+    database::service::{DatabaseError, DatabaseService},
     network::service::{NetworkError, NetworkService, Request, Response},
 };
 use wafer_run::Wafer;
@@ -260,6 +260,20 @@ async fn build(
     request_config: &HashMap<String, String>,
     variables: Arc<VariablesSnapshot>,
 ) -> Built {
+    try_build(db, prepared, provisioning, request_config, variables)
+        .await
+        .expect("the build's block_settings read")
+}
+
+/// [`build`], answering a failed `block_settings` read — the build's one
+/// database read, as `build_runtime`'s — rather than panicking on it.
+async fn try_build(
+    db: &Arc<dyn DatabaseService>,
+    prepared: Option<&PreparedRuntimePlan>,
+    provisioning: bool,
+    request_config: &HashMap<String, String>,
+    variables: Arc<VariablesSnapshot>,
+) -> Result<Built, DatabaseError> {
     let settings = match prepared {
         Some(plan) => BlockSettings::from_blocks(
             plan.structure
@@ -268,9 +282,7 @@ async fn build(
                 .map(|(name, state)| (name.clone(), state.clone()))
                 .collect(),
         ),
-        None => block_settings::load(db)
-            .await
-            .expect("the build's block_settings read"),
+        None => block_settings::load(db).await?,
     };
     let (mut runtime_config, mut overlay) = structural_runtime_config(StructuralConfigInputs {
         secrets: vec![(JWT_SECRET_KEY, JWT_SECRET.to_string())],
@@ -323,14 +335,14 @@ async fn build(
     let exporter = builder.prepared_plan_exporter().expect("an exporter");
     let block_settings = builder.block_settings_handle();
     let wafer = builder.build().expect("the runtime builds");
-    Built {
+    Ok(Built {
         wafer,
         exporter,
         block_settings,
         config,
         source,
         variables,
-    }
+    })
 }
 
 /// The variables snapshot `build_runtime` creates: a failed read is retried
@@ -2275,6 +2287,157 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
         "the dispatch ran no Init on `{degraded_block}` — an Init would read its config: {sent:#?}"
     );
 }
+
+/// **A deploy funnel under a spent D1 call budget reports the budget, as a
+/// transient failure** — what `/_deploy/prepare` answers 503 (retry) on.
+///
+/// - At the Miniflare rehearsal's 4 calls, a fresh database fails the
+///   build's own `block_settings` read (`build_runtime`'s eager read, copied
+///   here as `build` copies it): the cold `list` of the missing table spends
+///   the budget and its existence probe is refused. The read used to return
+///   the list's `no such table`, and the deploy answered a permanent 500
+///   naming a table.
+/// - With enough calls for the build, admin's migrations run out part-way.
+///   Every failure in the `Reported` boot's report is then transient — admin's
+///   refused migration, the seed, and each later block the budget refused —
+///   so the report is [`BootReport::failed_transiently`], and admin's own
+///   error names the budget.
+#[tokio::test]
+async fn a_funnel_under_a_spent_call_budget_reports_it_transiently() {
+    let _generation = GENERATION.lock().await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ledger = Arc::new(Ledger::default());
+    let shaped = Arc::new(D1Shaped::open(
+        &tmp.path().join("d1.sqlite3"),
+        Arc::clone(&ledger),
+    ));
+    shaped.limit_calls(4);
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let error = block_settings::load(&db)
+        .await
+        .expect_err("4 calls are not enough for the build's read");
+    assert!(
+        matches!(error, DatabaseError::CallBudgetExhausted(_)),
+        "the build's read names the budget, not the missing table: {error:?}"
+    );
+    assert!(wafer_run::init_failure_is_transient(
+        error.code(),
+        error.detail_code()
+    ));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let shaped = Arc::new(D1Shaped::open(
+        &tmp.path().join("d1.sqlite3"),
+        Arc::clone(&ledger),
+    ));
+    shaped.limit_calls(FUNNEL_CALLS_PAST_THE_BUILD);
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let mut built = build(&db, None, true, &HashMap::new(), workers_snapshot()).await;
+    let report = boot_deploy_runtime(
+        &mut built.wafer,
+        &db,
+        &built.block_settings,
+        built.config.clone(),
+    )
+    .await
+    .expect("a Reported boot runs to its report");
+    assert!(!report.ok, "{report:#?}");
+    let admin = report
+        .blocks
+        .iter()
+        .find(|b| b.block == impresspress_core::blocks::admin::ADMIN_BLOCK_ID)
+        .expect("admin's outcome");
+    assert!(!admin.ok && admin.transient, "{admin:#?}");
+    let admin_error = admin.error.as_deref().unwrap_or_default();
+    assert!(
+        admin_error.contains(&format!(
+            "has sent {FUNNEL_CALLS_PAST_THE_BUILD} D1 calls and may send \
+             {FUNNEL_CALLS_PAST_THE_BUILD}, so this call was not sent"
+        )),
+        "admin's error names the spent budget: {admin_error}"
+    );
+    assert!(
+        report.failed_transiently(),
+        "every failure under a spent budget is transient: {report:#?}"
+    );
+}
+
+/// **No call budget makes `/_deploy/prepare` fail permanently.** For every
+/// budget from 1 to [`SWEPT_CALL_BUDGETS`], on a fresh database, the funnel —
+/// the build's `block_settings` read, then the `Reported` boot — either
+/// succeeds or fails only transiently: a build error the budget refused, or
+/// a report whose every failure is transient (what the endpoint answers 503
+/// for). The cut lands in a different step at each budget: the build's cold
+/// read (1–4), admin's migrations, admin's variables seed — its read of the
+/// table, its writes, its seed-hash stamp, which each re-wrapped the
+/// budget's refusal without its detail code and so failed permanently
+/// (28–49) — and the later blocks' `Init`s. Two sample budgets missed that
+/// band; the sweep is what keeps the next re-wrap from bringing it back.
+#[tokio::test]
+async fn no_call_budget_fails_the_funnel_permanently() {
+    let _generation = GENERATION.lock().await;
+    let mut permanent = Vec::new();
+    for budget in 1..=SWEPT_CALL_BUDGETS {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let shaped = Arc::new(D1Shaped::open(
+            &tmp.path().join("d1.sqlite3"),
+            Arc::new(Ledger::default()),
+        ));
+        shaped.limit_calls(budget);
+        let db: Arc<dyn DatabaseService> = shaped.clone();
+        let mut built = match try_build(&db, None, true, &HashMap::new(), workers_snapshot()).await
+        {
+            Ok(built) => built,
+            Err(error) => {
+                if !wafer_run::init_failure_is_transient(error.code(), error.detail_code()) {
+                    permanent.push(format!("{budget}: build: {error}"));
+                }
+                continue;
+            }
+        };
+        let report = boot_deploy_runtime(
+            &mut built.wafer,
+            &db,
+            &built.block_settings,
+            built.config.clone(),
+        )
+        .await
+        .expect("a Reported boot runs to its report");
+        if !report.ok && !report.failed_transiently() {
+            let failures: Vec<String> = [("grants", &report.grants), ("seed", &report.seed)]
+                .into_iter()
+                .filter(|(_, step)| !step.ok && !step.transient)
+                .map(|(name, step)| format!("{name}: {:?}", step.error))
+                .chain(
+                    report
+                        .blocks
+                        .iter()
+                        .filter(|block| !block.ok && !block.transient)
+                        .map(|block| format!("{}: {:?}", block.block, block.error)),
+                )
+                .collect();
+            permanent.push(format!("{budget}: {}", failures.join("; ")));
+        }
+    }
+    assert!(
+        permanent.is_empty(),
+        "budgets that fail the funnel permanently:\n{}",
+        permanent.join("\n")
+    );
+}
+
+/// The budgets [`no_call_budget_fails_the_funnel_permanently`] sweeps: every
+/// one up to past the last band the reviewer's 1–260 sweep found (admin's
+/// variables seed, 28–49), with margin. A provision takes 210 calls; the
+/// budgets above this reach only later blocks' `Init`s and the seal, which
+/// the sweep up to 260 found transient.
+const SWEPT_CALL_BUDGETS: usize = 64;
+
+/// Enough calls for [`a_funnel_under_a_spent_call_budget_reports_it_transiently`]'s
+/// build (its `block_settings` read and probe) and too few for admin's
+/// migrations, which provisioning spends most of its 210 on.
+const FUNNEL_CALLS_PAST_THE_BUILD: usize = 20;
 
 /// The `[features]` table of the manifest at `crate_dir`.
 fn manifest_features(crate_dir: &str) -> toml::Table {

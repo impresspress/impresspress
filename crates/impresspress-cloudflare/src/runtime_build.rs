@@ -67,7 +67,14 @@ pub(crate) struct BuiltRuntime {
 /// over the runtime `/_deploy/init` and `/_deploy/prepare` built, under this
 /// request's services. The seeded settings are published through the
 /// stateless config forwarder, as the cached runtime's are.
-pub(crate) async fn boot_deploy_runtime(built: &mut BuiltRuntime) -> Result<BootReport, String> {
+///
+/// The error stays a typed [`BootError`](impresspress_core::builder::BootError),
+/// so the endpoint answers it by its class ([`BootError::is_transient`]).
+///
+/// [`BootError::is_transient`]: impresspress_core::builder::BootError::is_transient
+pub(crate) async fn boot_deploy_runtime(
+    built: &mut BuiltRuntime,
+) -> Result<BootReport, impresspress_core::builder::BootError> {
     let db = built.db.clone();
     let block_settings = built.block_settings_handle.clone();
     request_services::scope(built.services.clone(), async {
@@ -78,7 +85,6 @@ pub(crate) async fn boot_deploy_runtime(built: &mut BuiltRuntime) -> Result<Boot
             request_services::config_proxy(),
         )
         .await
-        .map_err(|error| format!("boot: {error}"))
     })
     .await
 }
@@ -189,14 +195,19 @@ where
     //    `block` in memory. block_settings still needs an eager load
     //    because the ImpresspressRouter consumes the enablement map up front
     //    when wiring routes (it can't defer to a per-block init event).
-    // An error here is a genuine operational failure (D1 outage, corruption)
-    // — never the missing-table cold-start case, which `block_settings::load`
-    // answers with no rows (see its doc). Propagate rather than fabricate
-    // "every block enabled": the runtime build fails, so no requests are
-    // served with a fabricated all-enabled snapshot. Classified like every
-    // other failed read on the request path (the shared transient rule): an
-    // outage is a 503 the retry window retries, anything else a 500. Usually
-    // answered from the KV row cache, so it reaches D1 only on a miss.
+    // A missing table that the probe confirms absent (a fresh database) is
+    // no rows, not an error (`block_settings::load`'s doc). An error here is
+    // a failed read — a D1 outage, corruption — or a cold start the read
+    // could not confirm: on a fresh database whose table-existence probe was
+    // refused (D1 unreachable, or this invocation's call budget spent by the
+    // cold list), it is the probe's transient error
+    // (`platform_state::unresolved_read_error`), not the list's
+    // `no such table`. Propagate rather than fabricate "every block
+    // enabled": the runtime build fails, so no requests are served with a
+    // fabricated all-enabled snapshot. Classified by the shared transient
+    // rule: an outage or a spent call budget is a 503 (the retry window, or
+    // the operator, retries), anything else a 500. Usually answered from the
+    // KV row cache, so it reaches D1 only on a miss.
     let block_settings = if let Some(plan) = prepared_plan {
         impresspress_core::features::BlockSettings::from_blocks(
             plan.structure

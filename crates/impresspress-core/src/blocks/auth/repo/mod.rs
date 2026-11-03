@@ -4,7 +4,7 @@
 //! `&dyn wafer_run::context::Context` and operate on a single table defined
 //! by migration 001. Errors are the database client's own
 //! [`wafer_run::WaferError`], carried through unchanged apart from a label:
-//! [`db_failed`] prefixes the statement that failed, and [`internal_error`]
+//! [`db_failed`](crate::blocks::errors::db_failed) prefixes the statement that failed, and [`internal_error`]
 //! is this layer's own fault (a row whose columns are not the shape its type
 //! describes).
 //!
@@ -47,29 +47,13 @@ pub mod sessions;
 pub mod tokens;
 pub mod users;
 
-/// Label a failed database call with the statement that failed, keeping the
-/// [`wafer_run::ErrorCode`] the client classified it with.
-///
-/// `what` is the same short label the deleted `RepoError::Db(format!("{what}:
-/// {e}"))` carried, and it stays in the message because it is the only thing
-/// naming which statement of a multi-step repo function gave up. The code is
-/// what that spelling destroyed: `crud::db_error` needs it to answer 404 for
-/// a missing row, **403 for a WRAP refusal** and 500 for anything else, and
-/// a `String` makes all three identical.
-pub(crate) fn db_failed(what: &str, error: WaferError) -> WaferError {
-    WaferError {
-        code: error.code,
-        message: format!("{what}: {}", error.message),
-        meta: error.meta,
-    }
-}
-
 /// A fault this layer found in a successful read: a row whose columns are
 /// not the shape the module's row type describes.
 ///
 /// Always [`ErrorCode::Internal`], never the caller's fault — the row came
 /// back, the table is simply not the one migration 001 describes, which is a
-/// deployment or migration fault. Separate from [`db_failed`] because there
+/// deployment or migration fault. Separate from
+/// [`db_failed`](crate::blocks::errors::db_failed) because there
 /// is no client error to carry a code from.
 pub(crate) fn internal_error(what: impl Into<String>) -> WaferError {
     WaferError::new(ErrorCode::Internal, what)
