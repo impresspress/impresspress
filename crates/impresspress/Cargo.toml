@@ -13,6 +13,13 @@ path = "src/lib.rs"
 name = "impresspress"
 path = "src/main.rs"
 
+# The deploy half of the Miniflare D1-outage harness (`scripts/miniflare-outage/`):
+# the CLI's own build and packaging, uploads replaced by local files. It
+# publishes the UI asset bytes this crate embeds, so it needs them embedded.
+[[example]]
+name = "miniflare_deploy"
+required-features = ["embed-assets"]
+
 [features]
 # Defaults pull every impresspress-core feature block that was unconditionally
 # compiled before the Phase 0b feature split (block-fastembed stays opt-in

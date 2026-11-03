@@ -142,16 +142,20 @@ thread_local! {
 /// One-time isolate initialization: selects [`DeferMode::Queued`] (work a
 /// handler defers until after its response drains into `ctx.wait_until` — see
 /// `dispatch`; spawned any other way it would be cancelled with the
-/// response), and installs the spawn wrapper that runs a producer spawned
-/// during a request inside that request's service scope
-/// (`request_services::wrap_spawned`). Audit rows need no isolate setting:
+/// response), registers the runtime cache as the source of what `/health`
+/// reports beyond a runtime's slots (`runtime_cache::platform_health`), and
+/// installs the spawn wrapper that runs a producer spawned during a request
+/// inside that request's service scope (`request_services::wrap_spawned`),
+/// and installs the `tracing` subscriber that writes the framework's
+/// warnings and errors to the Worker console ([`install_console_tracing`]).
+/// Audit rows need no isolate setting:
 /// `dispatch` queues each request's rows in that request's own queue.
 ///
 /// [`run_with_config`] (and so [`run`]) calls it first, before any request
 /// is routed — the `/_deploy/*` endpoints included, which boot a runtime and
 /// run every block's Init on a cold isolate — and [`run_scheduled_with_config`]
-/// calls it before its sweep. So every request an isolate serves sees both
-/// settings, whatever it served first. A consumer's `#[event(start)]` handler
+/// calls it before its sweep. So every request an isolate serves sees all
+/// four settings, whatever it served first. A consumer's `#[event(start)]` handler
 /// may call it too; repeat calls are no-ops.
 ///
 /// [`DeferMode::Queued`]: impresspress_core::deferred::DeferMode::Queued
@@ -159,13 +163,65 @@ pub fn init_isolate() {
     ISOLATE_INITIALIZED.with(|done| {
         if !done.get() {
             impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Queued);
+            // `/health` reports the cached runtime's health and the retry
+            // window, which live in this isolate's runtime cache.
+            impresspress_core::runtime_health::set_platform_health_source(Some(
+                runtime_cache::platform_health,
+            ));
             // A producer spawned during a request runs in that request's
             // service scope; see `request_services::wrap_spawned`.
             #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
             wafer_block::spawn::set_spawn_wrapper(Some(request_services::wrap_spawned));
+            // Before it, every `tracing` event on a Worker was dropped.
+            install_console_tracing();
             done.set(true);
         }
     });
+}
+
+/// The most verbose `tracing` level a Worker writes to its console: warnings
+/// and errors.
+///
+/// Those are the framework's failure signals: a block a runtime was
+/// published without, a block whose `Init` keeps failing the same way
+/// (`runtime_health`), and — from the wafer-run that logs a refused
+/// dispatch's cause under the `ref` its body names — that cause. `info` and
+/// `debug` events fire on every runtime
+/// build and many requests ("registering database WRAP grants", cache
+/// outcomes), and on Workers each console line is a Workers Logs event,
+/// which the Free plan meters per day: keeping them would spend that
+/// allowance on routine lines and crowd out the failures. A block's own
+/// logging goes through its `LoggerService` instead, whose level
+/// `IMPRESSPRESS_CF_LOG_LEVEL` sets.
+const CONSOLE_TRACING_MAX_LEVEL: tracing::Level = tracing::Level::WARN;
+
+/// Install [`impresspress_core::console_tracing::ConsoleTracing`] as this
+/// isolate's `tracing` default, writing to the Worker console: whether it was
+/// installed.
+///
+/// Never fatal and never twice: `set_global_default` refuses a second
+/// subscriber (a repeat call, or a consumer that installed its own first)
+/// with an error, which leaves the existing one in place — a logger that
+/// cannot be installed must not fail a request.
+fn install_console_tracing() -> bool {
+    tracing::subscriber::set_global_default(
+        impresspress_core::console_tracing::ConsoleTracing::new(
+            CONSOLE_TRACING_MAX_LEVEL,
+            console_emit,
+        ),
+    )
+    .is_ok()
+}
+
+/// One `tracing` line to the console method of its level, so `wrangler tail`
+/// and Workers Logs record its level.
+fn console_emit(level: tracing::Level, line: String) {
+    match level {
+        tracing::Level::ERROR => worker::console_error!("{line}"),
+        tracing::Level::WARN => worker::console_warn!("{line}"),
+        tracing::Level::INFO => worker::console_log!("{line}"),
+        tracing::Level::DEBUG | tracing::Level::TRACE => worker::console_debug!("{line}"),
+    }
 }
 
 /// Worker entry shim: load D1 vars, wire services, run the consumer's
@@ -2818,6 +2874,108 @@ mod isolate_executor_tests {
              no microtask of its own was scheduled: it would never be polled (Workers: \"code had \
              hung\", ~0 ms CPU). The executor's `is_scheduled` flag is stranded until the isolate \
              is retired."
+        );
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod console_tracing_tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// Replace `console[method]` with a recorder until the returned guard is
+    /// dropped, which puts the original back.
+    struct ConsoleSpy {
+        method: &'static str,
+        original: JsValue,
+        lines: Rc<RefCell<Vec<String>>>,
+        _recorder: Closure<dyn Fn(JsValue)>,
+    }
+
+    impl ConsoleSpy {
+        fn on(method: &'static str) -> Self {
+            let console = js_sys::Reflect::get(&js_sys::global(), &"console".into()).unwrap();
+            let original = js_sys::Reflect::get(&console, &method.into()).unwrap();
+            let lines = Rc::new(RefCell::new(Vec::new()));
+            let sink = Rc::clone(&lines);
+            let recorder = Closure::<dyn Fn(JsValue)>::new(move |line: JsValue| {
+                sink.borrow_mut().push(line.as_string().unwrap_or_default());
+            });
+            js_sys::Reflect::set(&console, &method.into(), recorder.as_ref().unchecked_ref())
+                .unwrap();
+            Self {
+                method,
+                original,
+                lines,
+                _recorder: recorder,
+            }
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.lines.borrow().clone()
+        }
+    }
+
+    impl Drop for ConsoleSpy {
+        fn drop(&mut self) {
+            let console = js_sys::Reflect::get(&js_sys::global(), &"console".into()).unwrap();
+            js_sys::Reflect::set(&console, &self.method.into(), &self.original).unwrap();
+        }
+    }
+
+    /// **A framework `tracing::warn!` reaches the Worker console** once the
+    /// isolate is initialized, at its own level; an `info!` does not
+    /// (`CONSOLE_TRACING_MAX_LEVEL`). Before, no subscriber was installed and
+    /// every such line was dropped. The warning carries its fields in the `%`
+    /// shape wafer-run's refusal logs its reference and cause with.
+    #[wasm_bindgen_test]
+    fn a_framework_warning_reaches_the_worker_console() {
+        crate::init_isolate();
+        let warn = ConsoleSpy::on("warn");
+        let error = ConsoleSpy::on("error");
+        let log = ConsoleSpy::on("log");
+        // The `%` (Display) field shape wafer-run's refusal uses.
+        let (reference, cause) = ("0123456789abcdef", "D1 down");
+        tracing::warn!(correlation_id = %reference, error = %cause, "dispatch refused");
+        tracing::error!("an error line");
+        tracing::info!("a routine line");
+        let (warned, errored, logged) = (warn.lines(), error.lines(), log.lines());
+        drop((warn, error, log));
+
+        assert!(
+            warned.iter().any(|line| line.contains("dispatch refused")
+                && line.contains("correlation_id=0123456789abcdef")
+                && line.contains("error=D1 down")),
+            "{warned:?}"
+        );
+        assert!(
+            errored.iter().any(|line| line.contains("an error line")),
+            "{errored:?}"
+        );
+        assert!(
+            !logged.iter().any(|line| line.contains("a routine line")),
+            "info is below the Worker's tracing level: {logged:?}"
+        );
+    }
+
+    /// A repeat initialization, or a second install, neither panics nor
+    /// replaces the subscriber.
+    #[wasm_bindgen_test]
+    fn a_second_install_is_refused_without_a_panic() {
+        crate::init_isolate();
+        crate::init_isolate();
+        // `init_isolate` installed it: asked before this test installs
+        // anything itself, so a revert of that install fails here and leaves
+        // no subscriber for the console test to pass on.
+        assert!(
+            tracing::dispatcher::has_been_set(),
+            "init_isolate installed no tracing subscriber"
+        );
+        assert!(
+            !crate::install_console_tracing(),
+            "a second install must be refused, leaving init_isolate's subscriber in place"
         );
     }
 }

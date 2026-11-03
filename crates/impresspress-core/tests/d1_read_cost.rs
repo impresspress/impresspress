@@ -620,6 +620,17 @@ async fn request_flow(
     path: &str,
     cookie: Option<&str>,
 ) -> u16 {
+    respond_flow(wafer, db, flow, path, cookie).await.status
+}
+
+/// [`request_flow`]'s whole response: status, headers and body.
+async fn respond_flow(
+    wafer: &Wafer,
+    db: &Arc<dyn DatabaseService>,
+    flow: &str,
+    path: &str,
+    cookie: Option<&str>,
+) -> http_codec::HttpResponseParts {
     let mut headers = vec![
         ("host", "localhost".to_string()),
         ("accept", "text/html".to_string()),
@@ -629,7 +640,7 @@ async fn request_flow(
     if let Some(token) = cookie {
         headers.push(("cookie", format!("auth_token={token}")));
     }
-    respond(wafer, db, flow, path, &headers).await.status
+    respond(wafer, db, flow, path, &headers).await
 }
 
 /// A `GET path` with `headers` through `flow`, as the Worker serves it: the
@@ -2207,12 +2218,45 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
         );
     }
 
-    // A route that needs no stored config still serves, over the database
-    // that is still refusing the variables table.
+    // `/health` reports exactly those blocks, by their class, from the
+    // runtime's own slots: a 503 with `Retry-After`. It is served — by a
+    // block with no D1 dependency, over the database that is still refusing
+    // the variables table — and sends that database nothing.
+    ledger.take();
+    let health = respond_flow(&wafer, &db, "site-main", "/health", None).await;
+    assert_eq!(health.status, 503, "a degraded runtime is not healthy");
+    assert!(
+        health
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("retry-after")
+                && value.parse::<u32>().is_ok_and(|secs| secs >= 1)),
+        "every 503 carries Retry-After: {:?}",
+        health.headers
+    );
+    let body: Value = serde_json::from_slice(&health.body).expect("a JSON body");
+    assert_eq!(body["status"], "degraded", "{body}");
+    let mut listed: Vec<String> = body["unavailable"]
+        .as_array()
+        .expect("the unavailable blocks")
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry["class"], "retrying", "{entry}");
+            entry["block"].as_str().expect("a block name").to_string()
+        })
+        .collect();
+    listed.sort();
     assert_eq!(
-        request(&wafer, &db, "/health", None).await,
-        200,
-        "a block with no D1 dependency serves"
+        listed, readers,
+        "`/health` lists exactly the degraded blocks"
+    );
+    assert!(
+        !body.to_string().contains("injected outage"),
+        "no backend text in the public body: {body}"
+    );
+    assert!(
+        ledger.take().is_empty(),
+        "`/health` reads the slots, never the database"
     );
 
     let degraded_block = declaring.first().expect("a degraded block").clone();

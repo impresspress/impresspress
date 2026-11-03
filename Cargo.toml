@@ -13,6 +13,7 @@ members = [
     "crates/wafer-guest",
     "examples/minimal-browser",
     "examples/webmcp-demo",
+    "scripts/miniflare-outage/fixture",
 ]
 # impresspress-cloudflare is wasm32-only (depends on `worker`/`wasm-bindgen`,
 # whose StorageService futures wrap `!Send` JsFuture). Excluded from
@@ -20,7 +21,8 @@ members = [
 # explicitly with `cargo <cmd> -p impresspress-cloudflare --target wasm32-unknown-unknown`.
 # examples/webmcp-demo is its Cloudflare consumer and wasm32-only for the same
 # reason; it is built by `impresspress build --target cloudflare` from its own
-# directory.
+# directory. scripts/miniflare-outage/fixture is the Worker the Miniflare
+# D1-outage harness builds, wasm32-only for the same reason.
 default-members = [
     "crates/impresspress-browser",
     "crates/impresspress-bundle",

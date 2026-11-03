@@ -1,0 +1,23 @@
+# The Miniflare D1-outage harness's Worker — `impresspress build/deploy
+# --target cloudflare` config, read by the harness's driver
+# (`crates/impresspress/examples/miniflare_deploy.rs`) through the CLI's own
+# loader. Nothing here is ever deployed: the account and database ids the
+# loader requires are the driver's placeholders, and Miniflare serves the
+# bindings locally.
+
+[cloudflare]
+worker_name        = "impresspress-miniflare-fixture"
+# Not after the bundled workerd's own date (miniflare 4.20260730.0 →
+# workerd 1.20260730.1, `scripts/miniflare-outage/package.json`).
+compatibility_date = "2026-07-01"
+# The `CONFIG_CACHE` KV binding the D1 config cache needs, which the generator
+# does not emit (as `examples/webmcp-demo` adds it).
+wrangler_overrides_path = "wrangler.overrides.toml"
+
+[cloudflare.d1]
+binding       = "DB"
+database_name = "impresspress-miniflare-fixture"
+
+[cloudflare.r2]
+binding     = "STORAGE"
+bucket_name = "impresspress-miniflare-fixture"
