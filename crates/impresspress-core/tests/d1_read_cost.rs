@@ -2294,10 +2294,27 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
 /// refusal is the runtime's (the block's handler never runs), and before
 /// wafer-run sanitized it the body quoted the block's `Init` error — the D1
 /// text, a table name, the call budget's numbers.
+///
+/// **And the cause is on the console line the body's reference names.** The
+/// framework's `tracing` events are captured through the console subscriber
+/// the Cloudflare Worker installs (`ConsoleTracing` at `WARN`, as
+/// `impresspress-cloudflare::init_isolate` installs it), so the line asserted
+/// is the one `wrangler tail` shows: an operator holding the client's
+/// `(ref: X)` finds `correlation_id=X` and the D1 cause on one line.
 #[tokio::test]
 async fn a_degraded_block_answers_503_without_its_cause() {
     let _generation = GENERATION.lock().await;
-    for fault in [Fault::Unavailable, Fault::CallBudgetExhausted] {
+    let console: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let sink = Arc::clone(&console);
+    let _console =
+        tracing::subscriber::set_default(impresspress_core::console_tracing::ConsoleTracing::new(
+            tracing::Level::WARN,
+            move |_level, line| sink.lock().expect("console lines").push(line),
+        ));
+    for (fault, cause) in [
+        (Fault::Unavailable, "injected outage"),
+        (Fault::CallBudgetExhausted, "Too many API requests"),
+    ] {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("d1.sqlite3");
         let ledger = Arc::new(Ledger::default());
@@ -2346,11 +2363,23 @@ async fn a_degraded_block_answers_503_without_its_cause() {
                 .as_str()
                 .unwrap_or_else(|| panic!("{fault:?} {shape}: a message: {body}"))
                 .to_string();
-            assert!(
-                message.starts_with(&format!(
+            let reference = message
+                .strip_prefix(&format!(
                     "block `{auth_ui}` is temporarily unavailable (ref: "
-                )),
-                "{fault:?} {shape}: {message}"
+                ))
+                .and_then(|rest| rest.strip_suffix(')'))
+                .unwrap_or_else(|| {
+                    panic!("{fault:?} {shape}: not the sanitized refusal: {message}")
+                });
+            let lines = console.lock().expect("console lines");
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains(&format!("correlation_id={reference}"))
+                        && line.contains(auth_ui)
+                        && line.contains(cause)),
+                "{fault:?} {shape}: no console line names `{reference}` and the cause \
+                 ({cause:?}): {lines:#?}"
             );
         }
     }
