@@ -1,5 +1,5 @@
-// A warm, degraded **dynamic** runtime whose retry meets a D1 outage (PR #282
-// review M1), on the `wafer-site-init-reader` shape's candidate version (no
+// A warm, degraded **dynamic** runtime whose retry meets a D1 outage, on the
+// `wafer-site-init-reader` shape's candidate version (no
 // packaged plan: every build is dynamic, as on an isolate after an admin
 // save).
 //
@@ -7,10 +7,10 @@
 //    `Init` statement, so the cold dynamic build publishes without that
 //    block: `/health` 503 `degraded`.
 // 2. D1 goes down. The retry after the window is the gate alone, and the
-//    gate is its first D1 read: a warm dynamic retry reads `block_settings`
-//    through to D1, and with that read first the outage failed it, before
-//    the gate, so the runtime of the current config was marked `stale`. Now
-//    the retry builds nothing (`build=gate`), its request reports `gated`,
+//    gate is its first D1 read (a warm dynamic retry also reads
+//    `block_settings` through to D1; were that read first, the outage would
+//    fail it before the gate and mark the current-config runtime `stale`).
+//    The retry builds nothing (`build=gate`), its request reports `gated`,
 //    and `/health` stays `degraded` (not `stale`), `retries` 2.
 
 import assert from "node:assert/strict";

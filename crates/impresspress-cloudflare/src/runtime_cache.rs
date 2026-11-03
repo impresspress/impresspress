@@ -2162,10 +2162,10 @@ async fn gated_hydrate(
 /// build.
 ///
 /// The gate is the attempt's first D1 read. A warm retry reads
-/// `block_settings` through to D1 (`read_through`, past the KV row cache),
-/// so with that read first a database-wide outage failed there, before the
-/// gate, and a runtime of the current config was marked stale for a check
-/// that built nothing (PR #282 review M1). After a gate that passed, a failed
+/// `block_settings` through to D1 (`read_through`, past the KV row cache);
+/// were that read first, a database-wide outage would fail it before the
+/// gate, and a runtime of the current config would be marked stale for a
+/// check that built nothing. After a gate that passed, a failed
 /// `block_settings` read is a backend failing in part: a failed rebuild.
 ///
 /// Any failed gate builds nothing, a cold isolate's included (CPU-GATE review
@@ -4858,7 +4858,7 @@ pub(crate) mod tests {
     }
 
     /// **A warm degraded dynamic runtime whose retry meets the outage stays
-    /// degraded, not stale** (PR #282 review M1): the gate is the attempt's
+    /// degraded, not stale**: the gate is the attempt's
     /// first D1 read, so a database-wide outage fails it rather than the
     /// read-through `block_settings` read, and the retry is a failed gate —
     /// `Gated`, `GateFailed`, the runtime kept as it was — not a failed
