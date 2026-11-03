@@ -17,42 +17,87 @@
 //   spends far more, so at the live check's value every route is 503, the
 //   static site file included, until a much larger budget.
 // - **deploy**: `/_deploy/prepare` itself runs under the budget, so a deploy
-//   that carries the lowered var fails at prepare.
+//   that carries the lowered var fails at prepare: a 503 with `Retry-After`,
+//   every failure in it the spent budget (transient), never the 500 a fault
+//   answers.
+//
+// Every 503 a client gets names no cause: a refused block is wafer-run's
+// fixed text and a reference, and the spent budget ("call budget exhausted",
+// with its numbers) is only in the Worker's log under that reference.
 //
 // The live check's preconditions follow, and are written into the plan:
 // apply the var to the *final* version's config (not through
 // `impresspress deploy`), and make no admin save between the deploy and the
 // check. Otherwise expect the candidate row.
 //
-// Below `LIVE_CHECK_VALUE` the Worker refuses the var outright: a permanent
+// Below `PARSE_FLOOR` the Worker refuses the var outright: a permanent
 // misconfiguration answering 500 on every dispatched route, the site's static
 // files included. The scenario pins that too, because it is how the live check
 // would break dev-test.
 
 import assert from "node:assert/strict";
 
-import { staticAssetPath } from "./common.mjs";
+import {
+  assertRefused,
+  assertUnavailable,
+  AUTH_UI,
+  staticAssetPath,
+} from "./common.mjs";
 
-/** The value the live check sets on dev-test. */
+/**
+ * The smallest value the Worker accepts ("must be a whole number from 4 to
+ * 1000", `impresspress-cloudflare`'s environment parse). A different quantity
+ * from `LIVE_CHECK_VALUE`, which happens to equal it today.
+ */
+const PARSE_FLOOR = 4;
+/** The value the live check sets on dev-test: the smallest prepared value that degrades transiently. */
 const LIVE_CHECK_VALUE = 4;
+/** What the adapter's spent budget says, in the log only. */
+const BUDGET_CAUSE = "call budget exhausted";
+/** What the edge logs for a request the retry window answered. */
+const WINDOW_CAUSE = "no runtime while the retry window lasts";
 /** Budgets the matrix covers. */
 const VALUES = [3, 4, 5, 6, 8, 12];
 
 const VAR = "IMPRESSPRESS_D1_CALLS_PER_INVOCATION";
 
+/** Which 503 a client got: what its body is, never what caused it. */
+function shape(answer) {
+  if (answer.body.startsWith("Service temporarily unavailable")) return "edge, no runtime";
+  try {
+    const { message } = JSON.parse(answer.body);
+    if (/^block `[^`]+` is temporarily unavailable \(ref: [0-9a-f]{16}\)$/.test(message)) {
+      return "block refused (ref)";
+    }
+    return "Unavailable";
+  } catch {
+    return "other";
+  }
+}
+
 function branch(answer) {
   if (answer.status === 500) return "500 permanent";
-  if (answer.status === 503) return `503 transient, Retry-After ${answer.retryAfter}`;
+  if (answer.status === 503) {
+    return `503 transient, Retry-After ${answer.retryAfter}: ${shape(answer)}`;
+  }
   return `${answer.status}`;
 }
 
-/** Each budget's answers on `stage`'s cold isolate, route by route. */
+/**
+ * Each budget's answers on `stage`'s cold isolate, route by route; each
+ * answer's `mark` is where its log lines start.
+ */
 async function row(d, stage, routes) {
   const answers = new Map();
   for (const value of VALUES) {
     await d.start(stage, { vars: { [VAR]: String(value) } });
     const byRoute = [];
-    for (const path of routes) byRoute.push(await d.fetch(path));
+    for (const path of routes) {
+      const mark = d.mark();
+      const answer = await d.fetch(path);
+      answer.mark = mark;
+      byRoute.push(answer);
+    }
     answers.set(value, byRoute);
   }
   return answers;
@@ -97,13 +142,14 @@ export default {
     ]) {
       for (const [value, byRoute] of answers) {
         for (const [i, answer] of byRoute.entries()) {
-          if (value < LIVE_CHECK_VALUE) {
+          if (value < PARSE_FLOOR) {
             // Refused: every dispatched route is the permanent 500; only
             // `/b/static/`, served from R2 before any runtime, is untouched.
             assert.equal(answer.status, isStatic(i) ? 200 : 500, `${label} ${VAR}=${value} ${routes[i]}`);
           } else {
             assert.notEqual(answer.status, 500, `${label} ${VAR}=${value} ${routes[i]}: never the permanent branch`);
           }
+          if (answer.status === 503) assertUnavailable(answer, `${label} ${VAR}=${value} ${routes[i]}`);
         }
       }
     }
@@ -116,10 +162,48 @@ export default {
       assert.ok(answer.retryAfter >= 1, `dynamic ${VAR}=${LIVE_CHECK_VALUE} ${routes[i]}: Retry-After`);
     }
 
-    // A deploy under the live check's value fails at prepare.
+    // At the live check's value, every 503 that names a reference has its
+    // cause logged under it: the spent budget for the request whose build or
+    // dispatch spent it, the retry window for a request the window answered.
+    // Each row's spent budget is logged at least once.
+    for (const [label, answers] of [
+      ["prepared", prepared],
+      ["dynamic", dynamic],
+    ]) {
+      let budgetLogged = 0;
+      for (const [i, answer] of answers.get(LIVE_CHECK_VALUE).entries()) {
+        if (answer.status !== 503) continue;
+        const what = `${label} ${VAR}=${LIVE_CHECK_VALUE} ${routes[i]}`;
+        let line;
+        if (shape(answer) === "block refused (ref)") {
+          const reference = assertRefused(answer, what, AUTH_UI);
+          line = await d.logLine((l) => l.includes(`correlation_id=${reference} `), answer.mark);
+        } else if (shape(answer) === "edge, no runtime") {
+          const reference = /\(reference: ([0-9a-f-]{36})\)$/.exec(answer.body)?.[1];
+          assert.ok(reference, `${what}: the edge's 503 names a reference: ${answer.body}`);
+          line = await d.logLine((l) => l.includes(`[${reference}]`), answer.mark);
+        } else {
+          continue; // A stored-config read failing closed names no reference (I4b).
+        }
+        assert.ok(
+          line.includes(BUDGET_CAUSE) || line.includes(WINDOW_CAUSE),
+          `${what}: the log under its reference names the spent budget or the window: ${line}`,
+        );
+        if (line.includes(BUDGET_CAUSE)) budgetLogged += 1;
+      }
+      assert.ok(budgetLogged >= 1, `${label} ${VAR}=${LIVE_CHECK_VALUE}: the spent budget is logged under a reference`);
+    }
+
+    // A deploy under the live check's value fails at prepare, transiently:
+    // every failure in the funnel is the spent budget, which a fresh
+    // invocation may clear (#278).
     await d.start("candidate", { vars: { [VAR]: String(LIVE_CHECK_VALUE) } });
     const prepare = await d.prepare();
-    console.log(`     /_deploy/prepare under ${VAR}=${LIVE_CHECK_VALUE}: ${prepare.status}`);
-    assert.notEqual(prepare.status, 200, "a deploy under the lowered budget does not prepare");
+    console.log(
+      `     /_deploy/prepare under ${VAR}=${LIVE_CHECK_VALUE}: ${prepare.status}, ` +
+        `Retry-After ${prepare.retryAfter}: ${prepare.body.replace(/\s+/g, " ").slice(0, 200)}`,
+    );
+    assert.equal(prepare.status, 503, `a deploy under the lowered budget does not prepare (${prepare.body.slice(0, 300)})`);
+    assert.ok(prepare.retryAfter >= 1, `prepare's 503 names a Retry-After: ${prepare.retryAfter}`);
   },
 };

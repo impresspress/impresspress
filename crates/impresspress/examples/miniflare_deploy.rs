@@ -7,6 +7,7 @@
 //! ```text
 //! miniflare_deploy candidate <fixture-dir> <state-dir> <candidate-version-id>
 //! miniflare_deploy final     <fixture-dir> <state-dir> <prepare-response.json>
+//! miniflare_deploy smoke     <fixture-dir> <worker-url> <deploy-token>
 //! ```
 //!
 //! `candidate` is `deploy`'s steps up to the candidate's upload: the build
@@ -23,6 +24,18 @@
 //! against the identity (`verify_compatibility`), packages it
 //! (`stage_prepared_module`) and writes the final config
 //! (`wrangler::generate_final_upload`), then `<state-dir>/final.json`.
+//!
+//! `smoke` is `deploy`'s pre-promotion smoke against the running final
+//! version, in the order `impresspress deploy` runs it
+//! (`cli/flows/embed_cloudflare.rs`): the authenticated `/health` GET
+//! (`smoke_authenticated_get`), then the 160-request concurrency smoke over
+//! the config's `deploy_smoke_paths` (`smoke_authenticated_concurrency`). The
+//! first failure is the error, as it is the deploy's: the flow promotes only
+//! after both pass. Not run: `call_deploy_verify` (it probes the
+//! password-hasher Worker, which the harness does not run), the preview
+//! lockdown check (a `*.workers.dev` preview's, meaningless on a loopback
+//! URL), the KV propagation settle before the burst (Miniflare has one KV
+//! copy) and the memory report (Cloudflare's analytics).
 //!
 //! `CLOUDFLARE_ACCOUNT_ID` and `IMPRESSPRESS_CLOUDFLARE_D1_DATABASE_ID`, which
 //! the config loader requires, are placeholders the harness sets.
@@ -181,6 +194,18 @@ fn finalize(fixture: &Path, state: &Path, prepare_response: &Path) -> Result<()>
     )
 }
 
+async fn smoke(fixture: &Path, worker_url: &str, token: &str) -> Result<()> {
+    let cfg = env::load(fixture)?;
+    cf_deploy::smoke_authenticated_get(worker_url, token, "/health").await?;
+    cf_deploy::smoke_authenticated_concurrency(
+        worker_url,
+        token,
+        &cfg.deploy_smoke_paths,
+        std::time::Duration::ZERO,
+    )
+    .await
+}
+
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
     std::fs::write(path, serde_json::to_vec_pretty(value)?)
         .with_context(|| format!("write {}", path.display()))
@@ -200,9 +225,13 @@ async fn main() -> Result<()> {
         [cmd, fixture, state, response] if cmd == "final" => {
             finalize(&path(fixture)?, &path(state)?, &path(response)?)
         }
+        [cmd, fixture, worker_url, token] if cmd == "smoke" => {
+            smoke(&path(fixture)?, worker_url, token).await
+        }
         _ => bail!(
             "usage: miniflare_deploy candidate <fixture-dir> <state-dir> <candidate-version-id>\n\
-             \x20      miniflare_deploy final <fixture-dir> <state-dir> <prepare-response.json>"
+             \x20      miniflare_deploy final <fixture-dir> <state-dir> <prepare-response.json>\n\
+             \x20      miniflare_deploy smoke <fixture-dir> <worker-url> <deploy-token>"
         ),
     }
 }

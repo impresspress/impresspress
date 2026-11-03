@@ -2,11 +2,20 @@
 // impresspress-site deployment: on a cold isolate during an outage, `/` is a
 // 503 + Retry-After (its landing switch is a stored-config read that fails
 // closed, I4b), never a 500; the site's static files and `/b/static/` still
-// serve.
+// serve. The D1 route is wafer-run's refusal of a block it published without:
+// fixed text and a reference, the cause only in the log.
 
 import assert from "node:assert/strict";
 
-import { assertServed, assertUnavailable, staticAssetPath } from "./common.mjs";
+import {
+  assertCauseLogged,
+  assertRefused,
+  assertServed,
+  assertUnavailable,
+  AUTH_UI,
+  QUOTA_CAUSE,
+  staticAssetPath,
+} from "./common.mjs";
 
 export default {
   name: "prepared-impresspress-site",
@@ -21,7 +30,9 @@ export default {
     assert.equal(JSON.parse(home.body).error, "Unavailable", "outage /: error code");
     assertServed(await d.fetch("/hello.html"), "outage /hello.html", "a static site file");
     assertServed(await d.fetch(staticAssetPath(d)), "outage /b/static/");
-    assertUnavailable(await d.fetch("/b/auth/login"), "outage /b/auth/login");
+    const mark = d.mark();
+    const login = await d.fetch("/b/auth/login");
+    await assertCauseLogged(d, assertRefused(login, "outage /b/auth/login", AUTH_UI), QUOTA_CAUSE, mark);
     assertUnavailable(await d.fetch("/"), "outage / again");
   },
 };

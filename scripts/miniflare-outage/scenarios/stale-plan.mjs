@@ -19,9 +19,13 @@
 import assert from "node:assert/strict";
 
 import {
+  assertCauseLogged,
+  assertRefused,
   assertServed,
   assertUnavailable,
   attemptedBuild,
+  AUTH_UI,
+  QUOTA_CAUSE,
   pollUntil,
   RECOVERY_DEADLINE_MS,
 } from "./common.mjs";
@@ -57,8 +61,10 @@ export default {
 
     // 6, D1 still down: after the window, one dynamic attempt; the stale
     //    runtime is kept and the plan stays un-bypassed.
+    mark = d.mark();
     const login = await d.fetch("/b/auth/login");
-    assertUnavailable(login, "the stale runtime's D1 route");
+    const loginRef = assertRefused(login, "the stale runtime's D1 route", AUTH_UI);
+    await assertCauseLogged(d, loginRef, QUOTA_CAUSE, mark);
     const { answer: down, answers: waiting } = await pollUntil(
       d,
       "/",

@@ -21,6 +21,7 @@ default = []
 # The CLI builds with `--no-default-features --features target-cloudflare`.
 target-cloudflare = [
     "dep:impresspress-cloudflare",
+    "dep:impresspress-core",
     "dep:wafer-run",
     "dep:wafer-block",
     "dep:wafer-core",
@@ -35,6 +36,9 @@ target-cloudflare = [
 # outage scenarios need a stored-config route (`/b/auth/login`) and nothing
 # that a feature block adds.
 impresspress-cloudflare = { path = "../../../crates/impresspress-cloudflare", optional = true, default-features = false }
+# `ImpresspressBuilder`, which the `wafer-site-init-reader` shape's block
+# registration takes (`impresspress-cloudflare` does not re-export it).
+impresspress-core = { path = "../../../crates/impresspress-core", optional = true, default-features = false }
 wafer-run = { workspace = true, optional = true }
 wafer-block = { workspace = true, optional = true }
 wafer-core = { workspace = true, optional = true }

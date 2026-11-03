@@ -12,6 +12,12 @@
 //!   content block. During a D1 outage its pages keep serving.
 //! - **`impresspress-site`** — impresspress as an ordinary site deploys it, its
 //!   landing switch a stored-config read that fails closed during an outage.
+//! - **`wafer-site-init-reader`** — `wafer-site` plus one block,
+//!   [`InitReader`], whose `Init` sends D1 a statement of its own. No block
+//!   impresspress ships does: each reads its config from the one variables
+//!   snapshot the runtime build takes. A consumer's block can (D1 outage plan
+//!   I2g: a block whose own `Init` makes D1 reset), and this one stands for it,
+//!   so the harness can fail that block's statement alone.
 //!
 //! The var is read here, before `run_with_config`, and is not part of the
 //! runtime's identity: a harness scenario deploys one shape for its whole
@@ -21,13 +27,15 @@
 mod worker_entry {
     use std::sync::Arc;
 
-    use wafer_core::interfaces::storage::service::StorageService;
+    use impresspress_core::builder::ImpresspressBuilder;
+    use wafer_core::{clients::database as db, interfaces::storage::service::StorageService};
     use wafer_run::{
-        Block, BlockInfo, Context, ErrorCode, InputStream, LifecycleEvent, Message, MetaEntry,
-        OutputStream, Wafer, WaferError, META_RESP_CONTENT_TYPE,
+        Block, BlockInfo, Context, ErrorCode, InputStream, LifecycleEvent, LifecycleType, Message,
+        MetaEntry, OutputStream, Wafer, WaferError, META_RESP_CONTENT_TYPE,
     };
 
-    /// The Worker var naming the shape: `wafer-site` or `impresspress-site`.
+    /// The Worker var naming the shape: `wafer-site`, `wafer-site-init-reader`
+    /// or `impresspress-site`.
     pub const SHAPE_VAR: &str = "MINIFLARE_FIXTURE_SHAPE";
 
     /// The release folder the content block serves, as wafer-site's
@@ -80,6 +88,54 @@ mod worker_entry {
         }
     }
 
+    /// A block whose `Init` sends D1 one statement of its own: whether its own
+    /// table exists (a read under its `{org}__{block}__` prefix, which WRAP
+    /// admits without a grant). Its `Init` succeeds whatever the answer, and
+    /// fails when the statement does, classified as the platform classifies
+    /// the statement's error. It serves nothing: every request is `NotFound`.
+    struct InitReader;
+
+    impl InitReader {
+        const NAME: &'static str = "miniflare/init-reader";
+        /// The harness's D1 wrapper fails the statements that name this
+        /// (`workers/d1-control.mjs`, mode `init-reset`).
+        const TABLE: &'static str = "miniflare__init_reader__state";
+    }
+
+    #[wafer_block::wafer_async_trait]
+    impl Block for InitReader {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(Self::NAME, "0.0.1", "http-handler@v1", "reads D1 at Init")
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::error(WaferError::new(ErrorCode::NotFound, "Not found"))
+        }
+
+        async fn lifecycle(
+            &self,
+            ctx: &dyn Context,
+            event: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            if event.event_type == LifecycleType::Init {
+                db::table_exists(ctx, Self::TABLE).await?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Add [`InitReader`] to the runtime, before `build()`.
+    fn with_init_reader(
+        builder: ImpresspressBuilder,
+    ) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>> {
+        Ok(builder.extra_block(InitReader::NAME, Arc::new(InitReader)))
+    }
+
     /// Make `wafer` wafer-site-shaped, after `build()`: the content block over
     /// the platform storage, and the router's route table replaced by the
     /// site's.
@@ -120,11 +176,16 @@ mod worker_entry {
         })?;
         match shape.as_str() {
             "wafer-site" => impresspress_cloudflare::run(req, env, ctx, Ok, make_site_shaped).await,
+            "wafer-site-init-reader" => {
+                impresspress_cloudflare::run(req, env, ctx, with_init_reader, make_site_shaped)
+                    .await
+            }
             "impresspress-site" => {
                 impresspress_cloudflare::run(req, env, ctx, Ok, |_wafer, _storage| Ok(())).await
             }
             other => Err(worker::Error::RustError(format!(
-                "{SHAPE_VAR} is {other:?}; expected \"wafer-site\" or \"impresspress-site\""
+                "{SHAPE_VAR} is {other:?}; expected \"wafer-site\", \"wafer-site-init-reader\" \
+                 or \"impresspress-site\""
             ))),
         }
     }
