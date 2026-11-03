@@ -5,11 +5,20 @@
 // the harness sets the mode it wants after each start.
 //
 //   POST /gate          the wrapper's question: counts the call and answers
-//                       `{ error }`, null in mode `ok`
+//                       `{ error }`, null when the call does not fail in the
+//                       current mode; while held, only once
+//                       released, in the mode set then
 //   PUT  /mode          body: one of the MODES keys
-//   GET  /calls         `{ mode, calls: [{ op, statements, refused }] }`
+//   PUT  /hold          hold every gate question from now on
+//   PUT  /release       answer the held questions, and stop holding
+//   GET  /calls         `{ mode, held, calls: [{ op, statements, binds, refused }] }`:
+//                       each call's SQL texts and, beside them, their bound
+//                       values; `held` the number of questions waiting
 //   POST /kv            the KV wrapper's report: `{ op, key }`, recorded
 //   GET  /kv            `{ kv: [{ op, key }] }`
+
+/** The table the fixture's `miniflare/init-reader` block reads at `Init` (`fixture/src/lib.rs`). */
+const INIT_READER_TABLE = "miniflare__init_reader__state";
 
 const MODES = {
   ok: null,
@@ -21,19 +30,53 @@ const MODES = {
     "See https://developers.cloudflare.com/d1/platform/limits/ for more details.",
   // A permanent fault: a statement against a table that does not exist.
   "no-such-table": "D1_ERROR: no such table: variables: SQLITE_ERROR",
+  // A reset only the fixture's `miniflare/init-reader` block causes: its
+  // `Init` statement fails with D1's CPU-limit reset, every other statement
+  // is answered (plan I2g, a block whose own `Init` makes D1 reset).
+  "init-reset": {
+    only: INIT_READER_TABLE,
+    error: "D1_ERROR: D1 DB exceeded its CPU time limit and was reset.",
+  },
 };
+
+/** The error a call fails with in the current mode, or null. */
+function failure(statements) {
+  const rule = MODES[mode];
+  if (rule === null || typeof rule === "string") return rule;
+  const touches = statements.some(
+    (s) => s.sql.includes(rule.only) || s.binds.some((b) => b === rule.only),
+  );
+  return touches ? rule.error : null;
+}
 
 let mode = "ok";
 const calls = [];
 const kv = [];
+/**
+ * Whether gate questions are held. A held question polls this flag on a
+ * timer of its own request: workerd does not run a continuation a different
+ * request resolves once the creating one has ended, so no promise is shared.
+ */
+let holding = false;
+let held = 0;
 
 export default {
   async fetch(request) {
     const { pathname } = new URL(request.url);
     if (pathname === "/gate" && request.method === "POST") {
       const { op, statements } = await request.json();
-      const error = MODES[mode];
-      calls.push({ op, statements, refused: error !== null });
+      if (holding) {
+        held += 1;
+        while (holding) await new Promise((resolve) => setTimeout(resolve, 10));
+        held -= 1;
+      }
+      const error = failure(statements);
+      calls.push({
+        op,
+        statements: statements.map((s) => s.sql),
+        binds: statements.map((s) => s.binds),
+        refused: error !== null,
+      });
       return Response.json({ error });
     }
     if (pathname === "/mode" && request.method === "PUT") {
@@ -44,6 +87,14 @@ export default {
       mode = next;
       return new Response(mode);
     }
+    if (pathname === "/hold" && request.method === "PUT") {
+      holding = true;
+      return new Response("holding");
+    }
+    if (pathname === "/release" && request.method === "PUT") {
+      holding = false;
+      return new Response("released");
+    }
     if (pathname === "/kv" && request.method === "POST") {
       kv.push(await request.json());
       return new Response(null, { status: 204 });
@@ -52,7 +103,7 @@ export default {
       return Response.json({ kv });
     }
     if (pathname === "/calls" && request.method === "GET") {
-      return Response.json({ mode, calls });
+      return Response.json({ mode, held, calls });
     }
     return new Response("not found", { status: 404 });
   },
