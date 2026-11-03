@@ -816,8 +816,10 @@ pub fn r2_upload_ui_assets(bucket: &str) -> Result<UiAssetUploadReport> {
     r2_upload_ui_assets_with_client(&mut client, OBJECT_RETRY_SECS)
 }
 
+/// [`r2_upload_ui_assets`] over any [`R2ObjectClient`], each object retried
+/// after the delays in `retry_delays` (seconds).
 #[cfg(feature = "embed-assets")]
-fn r2_upload_ui_assets_with_client<C: R2ObjectClient>(
+pub fn r2_upload_ui_assets_with_client<C: R2ObjectClient>(
     client: &mut C,
     retry_delays: &[u64],
 ) -> Result<UiAssetUploadReport> {
@@ -909,7 +911,12 @@ pub fn r2_upload_final_deployment_record(
     Ok(record_key.expect("with_object_retries returned Ok without running the record upload"))
 }
 
-trait R2ObjectClient {
+/// The object store a release is uploaded to. Production deploys reach R2
+/// through `wrangler r2 object` ([`r2_upload_release`]); the Miniflare outage
+/// harness (`examples/miniflare_deploy.rs`) stages into a local directory it
+/// then loads into Miniflare's R2, through the same upload and verification
+/// ([`r2_upload_release_with_client`], [`r2_upload_ui_assets_with_client`]).
+pub trait R2ObjectClient {
     fn put_file(&mut self, key: &str, path: &Path, content_type: &str) -> Result<()>;
     fn put_bytes(&mut self, key: &str, bytes: &[u8], content_type: &str) -> Result<()>;
     fn get_bytes(&mut self, key: &str) -> Result<Vec<u8>>;
@@ -1021,7 +1028,9 @@ fn with_object_retries<C: R2ObjectClient>(
     op(client)
 }
 
-fn r2_upload_release_with_client<C: R2ObjectClient>(
+/// [`r2_upload_release`] over any [`R2ObjectClient`], each object retried
+/// after the delays in `retry_delays` (seconds).
+pub fn r2_upload_release_with_client<C: R2ObjectClient>(
     client: &mut C,
     assets_root: &Path,
     release: &ReleaseManifest,

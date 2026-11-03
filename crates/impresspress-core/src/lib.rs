@@ -58,6 +58,7 @@ pub mod cache_key;
 pub mod config_generation;
 pub mod config_source;
 pub mod config_vars;
+pub mod console_tracing;
 pub mod crypto;
 pub mod csrf;
 pub mod db_read;

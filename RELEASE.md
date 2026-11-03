@@ -49,6 +49,19 @@ absent otherwise, so the report's schema version is unchanged.
   without it is permanent. Every one keeps the detail code now, as do the
   config block's `config.get` and `config.get_many` errors.
 
+### Cloudflare: framework warnings and errors reach the Worker console
+
+**What changes.** A Worker installed no `tracing` subscriber, so every
+`tracing::warn!`/`error!` from `impresspress-core` and `wafer-run` was
+dropped: a runtime published without a block whose `Init` failed during an
+outage, and a block whose `Init` keeps failing the same way in every runtime
+built for minutes. `init_isolate` now installs
+one that writes **warnings and errors** to the console (`wrangler tail`,
+Workers Logs), each as `target message key=value …`. `info` and `debug`
+framework events stay off: they fire on routine builds and requests, and
+each console line is a metered Workers Logs event. A block's own logging is
+unchanged and keeps its `IMPRESSPRESS_CF_LOG_LEVEL`.
+
 ### `/health` answers 503 when part of the runtime does not serve
 
 **What was wrong.** `GET /health` always answered 200 `{"status":"ok"}`.
