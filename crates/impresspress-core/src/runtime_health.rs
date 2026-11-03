@@ -1,0 +1,741 @@
+//! Runtime health: what `GET /health` reports (D1 outage plan I6).
+//!
+//! A runtime can serve while part of it cannot: on Cloudflare a boot under
+//! `InitPolicy::Serving` publishes without the blocks whose `Init` failed
+//! transiently, and the isolate can keep serving a runtime whose config is
+//! out of date while its backend is down. `/health` reports that state from
+//! two sources, with no query of its own:
+//!
+//! - the runtime's own slots, [`Context::block_init_states`]: a block that is
+//!   not `Ready` does not serve;
+//! - what the platform knows about the runtime as a whole
+//!   ([`PlatformHealth`]): whether it was published degraded, is serving
+//!   stale config, or is serving on after a rebuild failed permanently, and
+//!   the retry window it will be rebuilt after. The platform registers where
+//!   to read it from with [`set_platform_health_source`], as the Cloudflare
+//!   entry does once per isolate; a platform that registers nothing (native,
+//!   the browser) is reported from the slots alone.
+//!
+//! [`HealthReport::of`] combines them. Its status, by precedence:
+//!
+//! | status     | when                                                            |
+//! |------------|-----------------------------------------------------------------|
+//! | `failed`   | a block's `Init` failed permanently, or the last rebuild did    |
+//! | `stale`    | the runtime serves config older than the database's             |
+//! | `degraded` | a block does not serve (its `Init` is retrying), or the runtime's variables read failed |
+//! | `ok`       | none of the above                                               |
+//!
+//! A runtime that is both stale and degraded (a stale plan hydrated during
+//! an outage usually is) reports `stale`, with the blocks that do not serve
+//! still listed. Every status but `ok` is a 503 with `Retry-After`.
+//!
+//! The body names each block's state by its class
+//! ([`BlockInitState::as_str`]), never the failure's text, which can quote
+//! the backend. A block that has stayed `retrying` on the same failure
+//! across rebuilds — a block whose own `Init` makes D1 reset, say, which the
+//! transient classifier cannot tell from an outage — carries `since` and
+//! `runtimes`, so it reads as the persistent failure it is rather than a
+//! blip ([`RetryStreaks`]).
+//!
+//! Limitations:
+//!
+//! - A block that swallows its database errors at `Init` reports `ready`.
+//!   Only a block whose `Init` fails loudly is listed.
+//! - A run ([`RetryStreak`]) and the episode's `rebuilds` live in one
+//!   isolate. Cloudflare evicts isolates often, and a new one starts its
+//!   runs again at `runtimes: 1`, so a monitor polling across isolates sees
+//!   several short runs where the failure is one long one. The `error!` log a
+//!   run writes when it reaches [`PERSISTENT_RUNTIMES`] is what outlives the
+//!   isolate (Workers Logs).
+//! - A failure is identified by the **first** transient text its message
+//!   contains ([`transient_text`](crate::sqlite_text_error::transient_text)).
+//!   So two different texts can share one identity and extend one run (`D1_ERROR:
+//!   Internal error in D1 DB storage caused object to be reset` and `D1_ERROR:
+//!   internal error; reference = …` are both `D1_ERROR: internal error`), and
+//!   one cause that surfaces as alternating texts (a self-inflicted reset
+//!   seen by one attempt as the reset, by the next as `Network connection
+//!   lost`) restarts its run on each change.
+
+use std::{cell::Cell, collections::BTreeMap};
+
+use serde::Serialize;
+use wafer_run::{context::Context, BlockInitState};
+
+/// One block's run of consecutive published runtimes in which its `Init` was
+/// retrying on the same failure ([`RetryStreaks`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetryStreak {
+    /// Which failure: its [`transient_text`](crate::sqlite_text_error::transient_text)
+    /// when it is a known transient one (so two occurrences that differ only
+    /// in a reference id are the same), else its whole text. Compared, never
+    /// reported.
+    failure: String,
+    /// When the first runtime of the run was published.
+    pub since_ms: u64,
+    /// How many published runtimes the run spans, at least 1.
+    pub runtimes: u32,
+}
+
+/// Every retrying block's [`RetryStreak`], carried from one published
+/// runtime to the next by a platform that retries by rebuilding: its fresh
+/// runtime's slots know only their own attempt, so on their own they report a
+/// block that has failed the same way for an hour exactly as one that failed
+/// once.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetryStreaks(BTreeMap<String, RetryStreak>);
+
+impl RetryStreaks {
+    /// The streaks of a runtime published at `now_ms` whose slots are
+    /// `states`, given the streaks of the runtime it replaces (`self`): a
+    /// block retrying on the failure it was retrying on before extends its
+    /// run, a block retrying on another failure starts one, and every other
+    /// block has none. A run that reaches [`PERSISTENT_RUNTIMES`] is logged at
+    /// `error!`, once.
+    #[must_use]
+    pub fn carried(&self, states: &BTreeMap<String, BlockInitState>, now_ms: u64) -> Self {
+        Self(
+            states
+                .iter()
+                .filter_map(|(block, state)| {
+                    let BlockInitState::Retrying { reason, .. } = state else {
+                        return None;
+                    };
+                    let failure = failure_identity(reason);
+                    let streak = match self.0.get(block) {
+                        Some(previous) if previous.failure == failure => RetryStreak {
+                            failure,
+                            since_ms: previous.since_ms,
+                            runtimes: previous.runtimes.saturating_add(1),
+                        },
+                        _ => RetryStreak {
+                            failure,
+                            since_ms: now_ms,
+                            runtimes: 1,
+                        },
+                    };
+                    if streak.is_newly_persistent() {
+                        tracing::error!(
+                            block = %block,
+                            failure = %streak.failure,
+                            runtimes = streak.runtimes,
+                            since_ms = streak.since_ms,
+                            "a block's Init has failed the same way in every runtime built \
+                             for minutes: a lasting failure, possibly caused by the block \
+                             itself (a query that makes D1 reset), not a passing outage"
+                        );
+                    }
+                    Some((block.clone(), streak))
+                })
+                .collect(),
+        )
+    }
+
+    /// `block`'s run, if it has one.
+    #[must_use]
+    pub fn get(&self, block: &str) -> Option<&RetryStreak> {
+        self.0.get(block)
+    }
+}
+
+/// How many consecutive published runtimes a block must retry on the same
+/// failure in before its run is logged at `error!` ([`RetryStreaks::carried`]).
+///
+/// 8: the retry window doubles from 1 s and is capped at 60 s, so the 8th
+/// runtime is published about 1+2+4+8+16+32+60 ≈ 2 minutes after the first.
+/// D1's resets, overloads and lost connections clear within seconds, so a run
+/// that long is not a blip: it is a lasting outage (worth an `error!` anyway)
+/// or a block causing its own failure (plan I2g), which `warn!` alone hid.
+/// Lower, and an ordinary reset storm would log errors; much higher, and a
+/// self-inflicted reset goes unflagged for most of an isolate's life.
+pub const PERSISTENT_RUNTIMES: u32 = 8;
+
+impl RetryStreak {
+    /// Whether this run has just reached [`PERSISTENT_RUNTIMES`] — true for
+    /// exactly one runtime of the run.
+    #[must_use]
+    pub const fn is_newly_persistent(&self) -> bool {
+        self.runtimes == PERSISTENT_RUNTIMES
+    }
+}
+
+/// Which failure `reason` is, for [`RetryStreak::failure`].
+fn failure_identity(reason: &str) -> String {
+    crate::sqlite_text_error::transient_text(reason)
+        .map_or_else(|| reason.to_owned(), str::to_owned)
+}
+
+/// The retry window of a platform that retries a runtime by rebuilding it
+/// (Cloudflare's isolate retry window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryEpisode {
+    /// When the window was first armed: when this run of failed or degraded
+    /// builds began.
+    pub since_ms: u64,
+    /// When the next rebuild may run.
+    pub retry_at_ms: u64,
+    /// Consecutive builds that armed it, the first included (a cold build or
+    /// a hydrate as well as a rebuild): at least 1.
+    pub rebuilds: u32,
+    /// The last of them failed permanently: the runtime serving was built
+    /// before it, and the next rebuild is likely to fail the same way.
+    pub failed: bool,
+}
+
+/// What the platform knows about the runtime serving this isolate, beyond
+/// its slots. [`Default`] is a platform with nothing to add.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PlatformHealth {
+    /// The retry window, while one is armed or awaiting its rebuild.
+    pub episode: Option<RetryEpisode>,
+    /// Published without a block whose `Init` failed transiently, or its
+    /// variables read failed after it was published.
+    pub degraded_since_ms: Option<u64>,
+    /// Serving config older than the database's.
+    pub stale_since_ms: Option<u64>,
+    /// The serving runtime's [`RetryStreaks`].
+    pub retry_streaks: RetryStreaks,
+}
+
+/// Where [`platform_health`] reads from.
+pub type PlatformHealthSource = fn() -> PlatformHealth;
+
+thread_local! {
+    /// Per thread, which is per isolate on Cloudflare, where the one source
+    /// is registered. Native and the browser register none.
+    static SOURCE: Cell<Option<PlatformHealthSource>> = const { Cell::new(None) };
+}
+
+/// Register where this thread (isolate) reads its [`PlatformHealth`] from,
+/// returning the source it replaces (so a test can put it back). The
+/// Cloudflare entry registers its runtime cache's once per isolate.
+pub fn set_platform_health_source(
+    source: Option<PlatformHealthSource>,
+) -> Option<PlatformHealthSource> {
+    SOURCE.with(|cell| cell.replace(source))
+}
+
+/// The registered source's [`PlatformHealth`], or the default when none is
+/// registered.
+#[must_use]
+pub fn platform_health() -> PlatformHealth {
+    SOURCE
+        .with(Cell::get)
+        .map_or_else(PlatformHealth::default, |source| source())
+}
+
+/// `/health`'s `status`, in increasing precedence: see the module doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    Ok,
+    Degraded,
+    Stale,
+    Failed,
+}
+
+/// A block that does not serve, as `/health` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnavailableBlock {
+    pub block: String,
+    /// Its [`BlockInitState::as_str`]: `retrying`, `failed`, `initializing`
+    /// or `not_initialized`.
+    pub class: &'static str,
+    /// Whole seconds until its `Init` can run again, for a `retrying` block:
+    /// the platform's retry window when one is armed (the rebuild is the
+    /// retry), else the slot's own backoff. At least 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_in: Option<u32>,
+    /// When the block began retrying on this failure ([`RetryStreak`]),
+    /// RFC 3339.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// How many consecutive published runtimes it has been retrying on this
+    /// failure in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtimes: Option<u32>,
+}
+
+/// The `/health` report. Serializes to its body: `{"status":"ok"}` when
+/// healthy, otherwise the status with `since` (when known), `retry_in`,
+/// `rebuilds` (on a rebuilding platform) and `unavailable`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HealthReport {
+    pub status: HealthStatus,
+    /// RFC 3339. For `degraded` and `failed`, the start of the outage
+    /// episode (when the retry window was first armed), which can be before
+    /// this status: a `failed` after ten minutes of `degraded` reports the
+    /// `degraded` start. For `stale`, when the runtime became stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// The `Retry-After` seconds, at least 1; `None` when `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_in: Option<u32>,
+    /// [`RetryEpisode::rebuilds`]: the builds that armed the window, the
+    /// first included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebuilds: Option<u32>,
+    /// The blocks that do not serve, by name; `None` when `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Vec<UnavailableBlock>>,
+}
+
+impl HealthReport {
+    /// The report for the runtime behind `ctx`, at `now_ms`: its slots and
+    /// the registered [`PlatformHealth`]. Reads no backend.
+    #[must_use]
+    pub fn for_context(ctx: &dyn Context, now_ms: u64) -> Self {
+        Self::of(&ctx.block_init_states(), &platform_health(), now_ms)
+    }
+
+    /// The report for slots `states` and `platform`, at `now_ms`.
+    #[must_use]
+    pub fn of(
+        states: &BTreeMap<String, BlockInitState>,
+        platform: &PlatformHealth,
+        now_ms: u64,
+    ) -> Self {
+        // While the window is armed its end is when anything is retried: the
+        // rebuild is the retry, and the slots' own backoff spaces nothing.
+        let window_secs = platform
+            .episode
+            .filter(|episode| now_ms < episode.retry_at_ms)
+            .map(|episode| whole_secs(episode.retry_at_ms - now_ms));
+
+        let unavailable: Vec<UnavailableBlock> = states
+            .iter()
+            .filter(|(_, state)| !state.is_ready())
+            .map(|(block, state)| {
+                let retry_in = match state {
+                    BlockInitState::Retrying { retry_in, .. } => {
+                        Some(window_secs.unwrap_or_else(|| {
+                            whole_secs(u64::try_from(retry_in.as_millis()).unwrap_or(u64::MAX))
+                        }))
+                    }
+                    _ => None,
+                };
+                let streak = matches!(state, BlockInitState::Retrying { .. })
+                    .then(|| platform.retry_streaks.get(block))
+                    .flatten();
+                UnavailableBlock {
+                    block: block.clone(),
+                    class: state.as_str(),
+                    retry_in,
+                    since: streak.and_then(|streak| rfc3339(streak.since_ms)),
+                    runtimes: streak.map(|streak| streak.runtimes),
+                }
+            })
+            .collect();
+
+        let block_failed = states
+            .values()
+            .any(|state| matches!(state, BlockInitState::Failed { .. }));
+        let rebuild_failed = platform.episode.is_some_and(|episode| episode.failed);
+        let (status, since_ms) = if block_failed || rebuild_failed {
+            (
+                HealthStatus::Failed,
+                platform
+                    .episode
+                    .filter(|episode| episode.failed)
+                    .map(|episode| episode.since_ms),
+            )
+        } else if let Some(stale_since) = platform.stale_since_ms {
+            (HealthStatus::Stale, Some(stale_since))
+        } else if platform.degraded_since_ms.is_some() || !unavailable.is_empty() {
+            (
+                HealthStatus::Degraded,
+                platform
+                    .episode
+                    .map(|episode| episode.since_ms)
+                    .or(platform.degraded_since_ms),
+            )
+        } else {
+            return Self {
+                status: HealthStatus::Ok,
+                since: None,
+                retry_in: None,
+                rebuilds: None,
+                unavailable: None,
+            };
+        };
+
+        let retry_in = window_secs
+            .or_else(|| unavailable.iter().filter_map(|block| block.retry_in).max())
+            .unwrap_or(1);
+        Self {
+            status,
+            since: since_ms.and_then(rfc3339),
+            retry_in: Some(retry_in),
+            rebuilds: platform.episode.map(|episode| episode.rebuilds),
+            unavailable: Some(unavailable),
+        }
+    }
+
+    /// The HTTP status: 200 when `ok`, else 503.
+    #[must_use]
+    pub const fn http_status(&self) -> u16 {
+        match self.status {
+            HealthStatus::Ok => 200,
+            HealthStatus::Degraded | HealthStatus::Stale | HealthStatus::Failed => 503,
+        }
+    }
+}
+
+/// `ms` in whole seconds, rounded up, at least 1 (a `Retry-After: 0` invites
+/// an immediate hammering retry).
+fn whole_secs(ms: u64) -> u32 {
+    u32::try_from(ms.div_ceil(1_000)).unwrap_or(u32::MAX).max(1)
+}
+
+/// `ms` since the epoch as RFC 3339 UTC, to the millisecond.
+fn rfc3339(ms: u64) -> Option<String> {
+    let ms = i64::try_from(ms).ok()?;
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::*;
+
+    const NOW: u64 = 1_800_000_000_000;
+    const RESET: &str = "D1_ERROR: D1 DB exceeded its CPU time limit and was reset.";
+    const QUOTA: &str = "D1_ERROR: Your account has exceeded D1's free tier daily row read limit.";
+
+    fn retrying(reason: &str, retry_in_ms: u64) -> BlockInitState {
+        BlockInitState::Retrying {
+            reason: reason.to_string(),
+            retry_in: Duration::from_millis(retry_in_ms),
+        }
+    }
+
+    fn states(entries: &[(&str, BlockInitState)]) -> BTreeMap<String, BlockInitState> {
+        entries
+            .iter()
+            .map(|(block, state)| ((*block).to_string(), state.clone()))
+            .collect()
+    }
+
+    fn body(report: &HealthReport) -> serde_json::Value {
+        serde_json::to_value(report).expect("serializes")
+    }
+
+    #[test]
+    fn every_block_ready_is_ok() {
+        let report = HealthReport::of(
+            &states(&[("a", BlockInitState::Ready), ("b", BlockInitState::Ready)]),
+            &PlatformHealth::default(),
+            NOW,
+        );
+        assert_eq!(report.http_status(), 200);
+        assert_eq!(body(&report), json!({"status": "ok"}));
+    }
+
+    /// A retrying block makes the runtime degraded: 503, the block by its
+    /// class, never the failure's text.
+    #[test]
+    fn a_retrying_block_is_degraded_and_its_reason_is_not_reported() {
+        let report = HealthReport::of(
+            &states(&[("a", BlockInitState::Ready), ("b", retrying(QUOTA, 2_500))]),
+            &PlatformHealth::default(),
+            NOW,
+        );
+        assert_eq!(report.http_status(), 503);
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "degraded",
+                "retry_in": 3,
+                "unavailable": [{"block": "b", "class": "retrying", "retry_in": 3}],
+            })
+        );
+        assert!(!body(&report).to_string().contains("D1"), "no backend text");
+    }
+
+    /// Under an armed retry window, the window is when anything is retried:
+    /// it is every retrying block's `retry_in` and the `Retry-After`, and the
+    /// episode's start is `since`.
+    #[test]
+    fn the_retry_window_times_a_degraded_runtime() {
+        let platform = PlatformHealth {
+            episode: Some(RetryEpisode {
+                since_ms: NOW - 600_000,
+                retry_at_ms: NOW + 41_200,
+                rebuilds: 7,
+                failed: false,
+            }),
+            degraded_since_ms: Some(NOW - 30_000),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(
+            &states(&[("b", retrying(QUOTA, 0)), ("c", BlockInitState::Ready)]),
+            &platform,
+            NOW,
+        );
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "degraded",
+                "since": "2027-01-15T07:50:00.000Z",
+                "retry_in": 42,
+                "rebuilds": 7,
+                "unavailable": [{"block": "b", "class": "retrying", "retry_in": 42}],
+            })
+        );
+    }
+
+    /// Degraded with every block ready: the variables read failed after the
+    /// runtime was published. Still a 503.
+    #[test]
+    fn a_runtime_degraded_after_publishing_is_degraded_with_no_block_listed() {
+        let platform = PlatformHealth {
+            degraded_since_ms: Some(NOW - 1_000),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(&states(&[("a", BlockInitState::Ready)]), &platform, NOW);
+        assert_eq!(report.status, HealthStatus::Degraded);
+        assert_eq!(report.http_status(), 503);
+        assert_eq!(report.unavailable, Some(Vec::new()));
+        assert_eq!(report.retry_in, Some(1));
+    }
+
+    /// Stale and degraded at once reports `stale` (the addendum's IP-C
+    /// precedence note), with the blocks that do not serve still listed.
+    #[test]
+    fn stale_takes_precedence_over_degraded_and_keeps_the_list() {
+        let platform = PlatformHealth {
+            episode: Some(RetryEpisode {
+                since_ms: NOW - 5_000,
+                retry_at_ms: NOW + 1_000,
+                rebuilds: 2,
+                failed: false,
+            }),
+            degraded_since_ms: Some(NOW - 2_000),
+            stale_since_ms: Some(NOW - 5_000),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(&states(&[("b", retrying(QUOTA, 0))]), &platform, NOW);
+        assert_eq!(report.http_status(), 503);
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "stale",
+                "since": "2027-01-15T07:59:55.000Z",
+                "retry_in": 1,
+                "rebuilds": 2,
+                "unavailable": [{"block": "b", "class": "retrying", "retry_in": 1}],
+            })
+        );
+    }
+
+    /// A rebuild that failed permanently, with the runtime before it serving
+    /// on: `failed`, over stale and degraded.
+    #[test]
+    fn a_permanent_rebuild_failure_is_failed() {
+        let platform = PlatformHealth {
+            episode: Some(RetryEpisode {
+                since_ms: NOW - 3_000,
+                retry_at_ms: NOW + 4_000,
+                rebuilds: 3,
+                failed: true,
+            }),
+            stale_since_ms: Some(NOW - 9_000),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(&states(&[("a", BlockInitState::Ready)]), &platform, NOW);
+        assert_eq!(report.http_status(), 503);
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "failed",
+                "since": "2027-01-15T07:59:57.000Z",
+                "retry_in": 4,
+                "rebuilds": 3,
+                "unavailable": [],
+            })
+        );
+    }
+
+    /// A block whose `Init` failed permanently is `failed` and listed without
+    /// a `retry_in`: its runtime never retries it.
+    #[test]
+    fn a_failed_block_is_failed() {
+        let report = HealthReport::of(
+            &states(&[
+                (
+                    "a",
+                    BlockInitState::Failed {
+                        reason: "no such table: x".into(),
+                    },
+                ),
+                ("b", retrying(QUOTA, 1_000)),
+            ]),
+            &PlatformHealth::default(),
+            NOW,
+        );
+        assert_eq!(report.http_status(), 503);
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "failed",
+                "retry_in": 1,
+                "unavailable": [
+                    {"block": "a", "class": "failed"},
+                    {"block": "b", "class": "retrying", "retry_in": 1},
+                ],
+            })
+        );
+    }
+
+    /// Plan I2g: a block that stays retrying on the same failure across
+    /// rebuilt runtimes carries the run's start and length, whatever detail
+    /// differs between occurrences; a new failure starts a new run; a block
+    /// that recovers loses its run.
+    #[test]
+    fn a_block_retrying_on_the_same_failure_across_runtimes_carries_its_run() {
+        let first = RetryStreaks::default().carried(
+            &states(&[("b", retrying(RESET, 0)), ("c", retrying(QUOTA, 0))]),
+            NOW - 120_000,
+        );
+        let second = first.carried(
+            &states(&[
+                ("b", retrying(&format!("{RESET}: undefined"), 0)),
+                ("c", BlockInitState::Ready),
+            ]),
+            NOW - 60_000,
+        );
+        let third = second.carried(
+            &states(&[("b", retrying(RESET, 0)), ("c", retrying(QUOTA, 0))]),
+            NOW,
+        );
+        let b = third.get("b").expect("b's run");
+        assert_eq!((b.since_ms, b.runtimes), (NOW - 120_000, 3));
+        let c = third.get("c").expect("c's new run");
+        assert_eq!((c.since_ms, c.runtimes), (NOW, 1));
+
+        let fourth = third.carried(&states(&[("b", retrying(QUOTA, 0))]), NOW + 60_000);
+        let b = fourth.get("b").expect("b's new run");
+        assert_eq!(
+            (b.since_ms, b.runtimes),
+            (NOW + 60_000, 1),
+            "another failure"
+        );
+        assert!(fourth.get("c").is_none(), "c has no state, so no run");
+
+        let report = HealthReport::of(
+            &states(&[("b", retrying(RESET, 0))]),
+            &PlatformHealth {
+                retry_streaks: third,
+                ..PlatformHealth::default()
+            },
+            NOW,
+        );
+        assert_eq!(
+            body(&report)["unavailable"],
+            json!([{
+                "block": "b",
+                "class": "retrying",
+                "retry_in": 1,
+                "since": "2027-01-15T07:58:00.000Z",
+                "runtimes": 3,
+            }])
+        );
+    }
+
+    /// The window has ended and the rebuild it allows has not run yet (the
+    /// first request after it owns the rebuild; others are served the cached
+    /// runtime meanwhile): `retry_in` falls back to the slots' backoff, or 1,
+    /// never `retry_at - now` underflowed; `since` and `rebuilds` stay.
+    #[test]
+    fn an_elapsed_window_awaiting_its_rebuild_times_nothing() {
+        let platform = PlatformHealth {
+            episode: Some(RetryEpisode {
+                since_ms: NOW - 90_000,
+                retry_at_ms: NOW - 2_000,
+                rebuilds: 4,
+                failed: false,
+            }),
+            degraded_since_ms: Some(NOW - 30_000),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(
+            &states(&[("b", retrying(QUOTA, 0)), ("c", retrying(QUOTA, 2_500))]),
+            &platform,
+            NOW,
+        );
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "degraded",
+                "since": "2027-01-15T07:58:30.000Z",
+                "retry_in": 3,
+                "rebuilds": 4,
+                "unavailable": [
+                    {"block": "b", "class": "retrying", "retry_in": 1},
+                    {"block": "c", "class": "retrying", "retry_in": 3},
+                ],
+            })
+        );
+    }
+
+    /// A run is newly persistent in exactly one runtime: the
+    /// [`PERSISTENT_RUNTIMES`]th, when `carried` logs it.
+    #[test]
+    fn a_run_becomes_persistent_once_at_the_threshold() {
+        let slots = states(&[("b", retrying(RESET, 0))]);
+        let mut streaks = RetryStreaks::default();
+        let mut flagged = Vec::new();
+        for n in 1..=PERSISTENT_RUNTIMES + 3 {
+            streaks = streaks.carried(&slots, NOW + u64::from(n));
+            let run = streaks.get("b").expect("b's run");
+            assert_eq!(run.runtimes, n);
+            if run.is_newly_persistent() {
+                flagged.push(n);
+            }
+        }
+        assert_eq!(flagged, vec![PERSISTENT_RUNTIMES]);
+    }
+
+    /// A block mid-`Init` or not yet initialized does not serve either.
+    #[test]
+    fn an_unsettled_block_is_degraded() {
+        let report = HealthReport::of(
+            &states(&[
+                ("a", BlockInitState::Initializing),
+                ("b", BlockInitState::NotInitialized),
+            ]),
+            &PlatformHealth::default(),
+            NOW,
+        );
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "degraded",
+                "retry_in": 1,
+                "unavailable": [
+                    {"block": "a", "class": "initializing"},
+                    {"block": "b", "class": "not_initialized"},
+                ],
+            })
+        );
+    }
+
+    /// The registered source is what the report reads; none is the default.
+    #[test]
+    fn the_registered_source_supplies_the_platform_health() {
+        fn stale() -> PlatformHealth {
+            PlatformHealth {
+                stale_since_ms: Some(NOW - 1),
+                ..PlatformHealth::default()
+            }
+        }
+        let before = set_platform_health_source(None);
+        assert_eq!(platform_health(), PlatformHealth::default());
+        set_platform_health_source(Some(stale));
+        assert_eq!(platform_health().stale_since_ms, Some(NOW - 1));
+        set_platform_health_source(before);
+    }
+}

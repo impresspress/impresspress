@@ -92,10 +92,19 @@ pub fn statement_error(message: String) -> DatabaseError {
 /// Whether `message` contains one of the [`TRANSIENT`] texts, in any ASCII
 /// case.
 fn is_transient(message: &str) -> bool {
+    transient_text(message).is_some()
+}
+
+/// The first [`TRANSIENT`] text `message` contains, in any ASCII case: which
+/// transient failure it is, without the parts that differ between two
+/// occurrences of it (a reference id, a wrapper's prefix). `None` for a
+/// message that is not a transient failure's.
+pub fn transient_text(message: &str) -> Option<&'static str> {
     let message = message.to_ascii_lowercase();
     TRANSIENT
         .iter()
-        .any(|text| message.contains(&text.to_ascii_lowercase()))
+        .copied()
+        .find(|text| message.contains(&text.to_ascii_lowercase()))
 }
 
 #[cfg(test)]
@@ -241,6 +250,24 @@ mod tests {
         ] {
             assert_unavailable(text);
         }
+    }
+
+    /// Two occurrences of one failure name the same text, whatever their
+    /// wrappers and references; another failure names another, and a
+    /// non-transient message none.
+    #[test]
+    fn transient_text_names_the_failure_without_its_details() {
+        let first = transient_text("D1_ERROR: internal error; reference = abc123");
+        assert_eq!(first, Some("D1_ERROR: internal error"));
+        assert_eq!(
+            transient_text("config: D1_ERROR: Internal error; reference = def456: undefined"),
+            first
+        );
+        assert_eq!(
+            transient_text("D1_ERROR: D1 DB exceeded its CPU time limit and was reset."),
+            Some("D1 DB exceeded its CPU time limit and was reset")
+        );
+        assert_eq!(transient_text("NOT NULL constraint failed: t.name"), None);
     }
 
     /// Every other failure is a fault, exactly as on the native backends —
