@@ -19,7 +19,7 @@ use serde_json::json;
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, WaferError};
 
-use super::db_failed;
+use crate::blocks::errors::db_failed;
 
 pub const TABLE: &str = "wafer_run__auth__maintenance";
 

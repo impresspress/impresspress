@@ -7,8 +7,9 @@ use wafer_block::db::{Filter, FilterOp, SortField};
 use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
-use super::{db_failed, decode_hex, internal_error, map_opt_str, map_str, now_iso};
+use super::{decode_hex, internal_error, map_opt_str, map_str, now_iso};
 use crate::{
+    blocks::errors::db_failed,
     db_read::{self, Bound},
     util::hex_encode,
 };

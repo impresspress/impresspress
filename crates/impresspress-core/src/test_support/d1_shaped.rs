@@ -731,7 +731,6 @@ mod tests {
     }
 
     /// A runtime schema mutation is refused, as D1 refuses it, and sends
-    /// nothing.    /// A runtime schema mutation is refused, as D1 refuses it, and sends
     /// nothing.
     #[tokio::test]
     async fn a_schema_mutation_is_refused_as_on_d1() {

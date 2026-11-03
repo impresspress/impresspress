@@ -15,7 +15,8 @@ use wafer_block::{
 use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
-use super::{db_failed, internal_error, map_bool, map_opt_str, map_str, now_iso};
+use super::{internal_error, map_bool, map_opt_str, map_str, now_iso};
+use crate::blocks::errors::db_failed;
 
 pub const TABLE: &str = "wafer_run__auth__local_credentials";
 

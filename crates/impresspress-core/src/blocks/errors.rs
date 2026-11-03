@@ -161,6 +161,30 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// Label a failed call with what was being done, keeping the whole error the
+/// client classified it with: its [`wafer_run::ErrorCode`] and its meta — the
+/// detail code included.
+///
+/// `what` is a short label naming which step of a multi-step function gave
+/// up; it is the only thing in the message saying so. The rest is what a
+/// re-spelled error loses:
+/// - the code, which `crud::db_error` needs to answer 404 for a missing row,
+///   **403 for a WRAP refusal** and 500 for anything else (a `String` makes
+///   all three identical);
+/// - the detail code, which [`wafer_run::init_failure_is_transient`] reads to
+///   tell the invocation's spent database call budget
+///   (`database.call_budget_exhausted`, transient: a fresh invocation may run
+///   it) from any other `ResourceExhausted` (permanent). A
+///   `WaferError::new(e.code, …)` re-wrap drops it, and a deploy under a
+///   small call budget then failed permanently for a cause that clears.
+pub(crate) fn db_failed(what: &str, error: wafer_run::WaferError) -> wafer_run::WaferError {
+    wafer_run::WaferError {
+        code: error.code,
+        message: format!("{what}: {}", error.message),
+        meta: error.meta,
+    }
+}
+
 /// Helper to create a JSON error response with a structured error code.
 ///
 /// Maps the fine-grained impresspress [`ErrorCode`] to the coarse wafer

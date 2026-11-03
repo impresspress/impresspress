@@ -204,8 +204,11 @@ where
                 }
             }
             worker::console_log!("deploy_init failed: {}", e.message);
-            // An outage (D1 unreachable for the build's read or the seal's) is
-            // a 503 the operator retries; anything else the 500 it was.
+            // A failure a fresh attempt may clear — the build's read, the
+            // boot or the seal meeting an unreachable D1 or this invocation's
+            // spent call budget (`FunnelFailure::transient`, from each step's
+            // typed error) — is a 503 the operator retries; anything else a
+            // 500.
             if e.transient {
                 let mut response =
                     worker::Response::error(format!("deploy_init: {}", e.message), 503)?;

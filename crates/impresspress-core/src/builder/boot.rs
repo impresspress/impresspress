@@ -1050,7 +1050,7 @@ mod tests {
         assert!(!older.transient);
     }
 
-    /// `Serving` publishes past a block whose `Init` failed **transiently**:    /// `Serving` publishes past a block whose `Init` failed **transiently**:
+    /// `Serving` publishes past a block whose `Init` failed **transiently**:
     /// it is listed in `degraded`, every other block initializes, and a
     /// dispatch to it answers `Unavailable` without running its `Init` again
     /// — the runtime is retried by being rebuilt, never in a request.

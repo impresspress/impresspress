@@ -24,8 +24,11 @@ use wafer_block::{
 use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
-use super::{db_failed, internal_error, map_opt_str, map_str, now_iso};
-use crate::db_read::{self, Bound};
+use super::{internal_error, map_opt_str, map_str, now_iso};
+use crate::{
+    blocks::errors::db_failed,
+    db_read::{self, Bound},
+};
 
 pub const TABLE: &str = "wafer_run__auth__provider_links";
 

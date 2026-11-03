@@ -195,14 +195,19 @@ where
     //    `block` in memory. block_settings still needs an eager load
     //    because the ImpresspressRouter consumes the enablement map up front
     //    when wiring routes (it can't defer to a per-block init event).
-    // An error here is a genuine operational failure (D1 outage, corruption)
-    // — never the missing-table cold-start case, which `block_settings::load`
-    // answers with no rows (see its doc). Propagate rather than fabricate
-    // "every block enabled": the runtime build fails, so no requests are
-    // served with a fabricated all-enabled snapshot. Classified like every
-    // other failed read on the request path (the shared transient rule): an
-    // outage is a 503 the retry window retries, anything else a 500. Usually
-    // answered from the KV row cache, so it reaches D1 only on a miss.
+    // A missing table that the probe confirms absent (a fresh database) is
+    // no rows, not an error (`block_settings::load`'s doc). An error here is
+    // a failed read — a D1 outage, corruption — or a cold start the read
+    // could not confirm: on a fresh database whose table-existence probe was
+    // refused (D1 unreachable, or this invocation's call budget spent by the
+    // cold list), it is the probe's transient error
+    // (`platform_state::unresolved_read_error`), not the list's
+    // `no such table`. Propagate rather than fabricate "every block
+    // enabled": the runtime build fails, so no requests are served with a
+    // fabricated all-enabled snapshot. Classified by the shared transient
+    // rule: an outage or a spent call budget is a 503 (the retry window, or
+    // the operator, retries), anything else a 500. Usually answered from the
+    // KV row cache, so it reaches D1 only on a miss.
     let block_settings = if let Some(plan) = prepared_plan {
         impresspress_core::features::BlockSettings::from_blocks(
             plan.structure

@@ -352,13 +352,20 @@ pub async fn call_deploy_prepare(preview_url: &str, token: &str) -> Result<Prepa
 /// The error a failed `/_deploy/prepare` answer becomes, by its class.
 ///
 /// The Worker answers **503** when every failure may clear on a fresh
-/// attempt — D1 unreachable, or the invocation's D1 call budget refused a
-/// migration, which the next attempt resumes from its ledger — and 500 when
-/// something needs fixing. Both stop the deploy before anything is promoted;
-/// the message says which one it was, so a transient failure reads as "run
-/// it again" rather than as a broken release. The Worker's body (the
+/// attempt — D1 unreachable, or the invocation's D1 call budget spent — and
+/// 500 when something needs fixing. Both stop the deploy before anything is
+/// promoted; the message says which one it was, so a transient failure reads
+/// as "run it again" rather than as a broken release. The Worker's body (the
 /// funnel's error, or its init report) follows either way: it holds the
 /// cause.
+///
+/// A 503 promises no progress. Migrations a prepare completed are recorded
+/// and not re-run, so a retry under a budget that fits each step gets
+/// further; but a budget too small for one step — under about a dozen calls
+/// the build's cold read and the boot spend it before any migration commits
+/// — fails the same way on every retry. So the message names
+/// [`D1_CALLS_PER_INVOCATION_KEY`](impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_KEY)
+/// as what to raise when retries make no progress.
 fn prepare_failure(
     status: reqwest::StatusCode,
     retry_after: Option<&str>,
@@ -369,11 +376,14 @@ fn prepare_failure(
         let wait = retry_after
             .map(|secs| format!(" (the Worker asks for {secs} s)"))
             .unwrap_or_default();
+        let budget = impresspress_core::config_vars::D1_CALLS_PER_INVOCATION_KEY;
         anyhow::anyhow!(
             "{PREPARE_ENDPOINT} failed transiently ({status}): a backend the deploy needs did \
-             not answer, or the Worker's D1 call budget ran out part-way. Nothing was promoted, \
-             and the database work already done is kept. Retry the deploy{wait}; it resumes \
-             where this one stopped. Worker said: {body}"
+             not answer, or the Worker's D1 call budget ran out before prepare finished. \
+             Nothing was promoted; migrations that completed are recorded and are not run \
+             again. Retry the deploy{wait}. If retries fail the same way without getting \
+             further, {budget} is too low for prepare: raise it, or unset it for D1's own \
+             limit. Worker said: {body}"
         )
     } else {
         anyhow::anyhow!("{PREPARE_ENDPOINT} failed with {status}: {body}")
@@ -1252,8 +1262,10 @@ mod tests {
 
     /// A 503 prepare — every failure may clear on a retry — reads as
     /// transient, says nothing was promoted and to retry, names the
-    /// Worker's `Retry-After`, and keeps the Worker's cause. A 500 does not
-    /// read as transient.
+    /// Worker's `Retry-After`, names the call-budget variable to raise when
+    /// retries make no progress (it promises no resume: a budget too small
+    /// for one step never gets further), and keeps the Worker's cause. A 500
+    /// does not read as transient.
     #[tokio::test]
     async fn a_503_prepare_says_it_is_transient_and_to_retry() {
         let cause = "deploy_init: read block_settings: call budget exhausted: this invocation \
@@ -1272,6 +1284,8 @@ mod tests {
             "failed transiently (503 Service Unavailable)",
             "Nothing was promoted",
             "Retry the deploy (the Worker asks for 1 s)",
+            "If retries fail the same way without getting further, \
+             IMPRESSPRESS_D1_CALLS_PER_INVOCATION is too low for prepare",
             cause,
         ] {
             assert!(message.contains(part), "{part:?} missing from: {message}");
