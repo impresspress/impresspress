@@ -145,6 +145,9 @@ export default {
       assertInsideWindow(answer, cold, windowMs, episode, `inside the first window, /health ${i}`);
       inside += 1;
     }
+    // Margin: the cold build takes 40–200 ms of a window of at least 1 s,
+    // leaving 0.8–1.1 s for these requests (about 20 fit) even on one
+    // contended core (PR281-review); 3 is far below what a runner manages.
     assert.ok(inside >= 3, `only ${inside} /health requests were answered inside the first window`);
 
     // 4. One rebuild after the window, still in the outage.
@@ -179,25 +182,33 @@ export default {
     await sleep(Math.max(0, armedBy.doneAt + armedBy.retryAfter * 1000 - Date.now()) + 100);
     await d.hold();
     const owner = fetchMarked(d, "/health");
-    const heldSince = Date.now();
-    while ((await d.held()) === 0) {
-      assert.ok(Date.now() - heldSince < 10_000, "the rebuild reached D1");
-      await sleep(20);
+    // An assertion below that fails leaves `owner` unawaited; it rejects
+    // when the harness disposes Miniflare, and must not crash the runner
+    // before it reports the failure and where it kept the state.
+    owner.catch(() => {});
+    let during;
+    try {
+      const heldSince = Date.now();
+      while ((await d.held()) === 0) {
+        assert.ok(Date.now() - heldSince < 10_000, "the rebuild reached D1");
+        await sleep(20);
+      }
+      // A held call is counted once released, so what `meanwhile` sent is
+      // what the ledger gained plus what is held beside the owner's one call.
+      const callsBefore = (await d.calls()).length;
+      const meanwhile = await d.fetch("/health");
+      const sentMeanwhile = (await d.calls()).length - callsBefore + (await d.held()) - 1;
+      during = assertHealth(meanwhile, "/health while the rebuild runs", "degraded");
+      assert.equal(meanwhile.built, false, `served from the cached runtime (${meanwhile.cacheOutcome})`);
+      assert.equal(sentMeanwhile, 0, "the /health served meanwhile sent D1 nothing");
+      assert.deepEqual(
+        during,
+        { ...episode, retry_in: during.retry_in, unavailable: during.unavailable },
+        "/health while the rebuild runs: the elapsed episode",
+      );
+    } finally {
+      await d.release();
     }
-    // A held call is counted once released, so what `meanwhile` sent is
-    // what the ledger gained plus what is held beside the owner's one call.
-    const callsBefore = (await d.calls()).length;
-    const meanwhile = await d.fetch("/health");
-    const sentMeanwhile = (await d.calls()).length - callsBefore + (await d.held()) - 1;
-    const during = assertHealth(meanwhile, "/health while the rebuild runs", "degraded");
-    assert.equal(meanwhile.built, false, `served from the cached runtime (${meanwhile.cacheOutcome})`);
-    assert.equal(sentMeanwhile, 0, "the /health served meanwhile sent D1 nothing");
-    assert.deepEqual(
-      during,
-      { ...episode, retry_in: during.retry_in, unavailable: during.unavailable },
-      "/health while the rebuild runs: the elapsed episode",
-    );
-    await d.release();
     const rebuilt = await owner;
     const third = assertHealth(rebuilt, "rebuild 3 /health", "degraded");
     assert.ok(rebuilt.built, `the held request rebuilt (${rebuilt.cacheOutcome})`);

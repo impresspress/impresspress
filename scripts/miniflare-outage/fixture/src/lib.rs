@@ -90,9 +90,9 @@ mod worker_entry {
 
     /// A block whose `Init` sends D1 one statement of its own: whether its own
     /// table exists (a read under its `{org}__{block}__` prefix, which WRAP
-    /// admits without a grant). It answers `true` or `false` while D1 answers;
-    /// a failure is the block's `Init` failure, classified as the platform
-    /// classifies the statement's error. It serves nothing.
+    /// admits without a grant). Its `Init` succeeds whatever the answer, and
+    /// fails when the statement does, classified as the platform classifies
+    /// the statement's error. It serves nothing: every request is `NotFound`.
     struct InitReader;
 
     impl InitReader {

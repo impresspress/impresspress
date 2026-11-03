@@ -67,6 +67,8 @@ export default {
     });
     // The window was armed inside request 1 and lasts at least the base
     // delay, so an answer before `first.sentAt + WINDOW_BASE_MS` is inside it.
+    // Margin: the first poll is answered 60–260 ms after request 1 was sent,
+    // even on one contended core (PR281-review), against the 1000 ms floor.
     const surelyInside = answers.filter((a) => a.doneAt < first.sentAt + WINDOW_BASE_MS);
     assert.ok(surelyInside.length >= 1, "a /health was answered inside the window with D1 back");
     for (const [i, a] of answers.slice(0, -1).entries()) {
