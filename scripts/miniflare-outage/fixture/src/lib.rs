@@ -133,13 +133,7 @@ mod worker_entry {
     fn with_init_reader(
         builder: ImpresspressBuilder,
     ) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>> {
-        // `extra_block` takes `Arc<dyn Block>`; see `make_site_shaped`.
-        #[expect(
-            clippy::arc_with_non_send_sync,
-            reason = "the `Arc` is forced by `extra_block`'s signature, not chosen over an `Rc`"
-        )]
-        let block = Arc::new(InitReader);
-        Ok(builder.extra_block(InitReader::NAME, block))
+        Ok(builder.extra_block(InitReader::NAME, Arc::new(InitReader)))
     }
 
     /// Make `wafer` wafer-site-shaped, after `build()`: the content block over
@@ -183,7 +177,8 @@ mod worker_entry {
         match shape.as_str() {
             "wafer-site" => impresspress_cloudflare::run(req, env, ctx, Ok, make_site_shaped).await,
             "wafer-site-init-reader" => {
-                impresspress_cloudflare::run(req, env, ctx, with_init_reader, make_site_shaped).await
+                impresspress_cloudflare::run(req, env, ctx, with_init_reader, make_site_shaped)
+                    .await
             }
             "impresspress-site" => {
                 impresspress_cloudflare::run(req, env, ctx, Ok, |_wafer, _storage| Ok(())).await

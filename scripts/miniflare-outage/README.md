@@ -47,5 +47,7 @@ from worker-build's own download cache under `~/.cache/worker-build`.
 A module under `scenarios/` exporting `{ name, shape, run(deployment) }`
 (`shape`: `wafer-site` or `impresspress-site`), listed in `scenarios/index.mjs`.
 `run` gets a fresh `Deployment` (`harness.mjs`): `deploy()`, `start()`/`restart()`
-for cold isolates, `setMode()` for the outage, `fetchCounted()` for a request
-with its D1 and KV calls. It fails by throwing.
+for cold isolates, `setMode()` for the outage, `hold()`/`release()` to keep D1
+calls in flight, `fetchCounted()` for a request with its D1 and KV calls,
+`logLine()` for the Worker's console, and `smoke()` for the CLI's
+pre-promotion smoke. It fails by throwing.
