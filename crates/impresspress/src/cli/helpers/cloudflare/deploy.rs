@@ -334,17 +334,50 @@ pub async fn call_deploy_prepare(preview_url: &str, token: &str) -> Result<Prepa
         .await
         .with_context(|| format!("POST {url}"))?;
     let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let bytes = response
         .bytes()
         .await
         .with_context(|| format!("read {PREPARE_ENDPOINT} response from {url}"))?;
     if !status.is_success() {
-        bail!(
-            "{PREPARE_ENDPOINT} failed with {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
+        return Err(prepare_failure(status, retry_after.as_deref(), &bytes));
     }
     parse_prepare_response(&bytes)
+}
+
+/// The error a failed `/_deploy/prepare` answer becomes, by its class.
+///
+/// The Worker answers **503** when every failure may clear on a fresh
+/// attempt — D1 unreachable, or the invocation's D1 call budget refused a
+/// migration, which the next attempt resumes from its ledger — and 500 when
+/// something needs fixing. Both stop the deploy before anything is promoted;
+/// the message says which one it was, so a transient failure reads as "run
+/// it again" rather than as a broken release. The Worker's body (the
+/// funnel's error, or its init report) follows either way: it holds the
+/// cause.
+fn prepare_failure(
+    status: reqwest::StatusCode,
+    retry_after: Option<&str>,
+    body: &[u8],
+) -> anyhow::Error {
+    let body = String::from_utf8_lossy(body);
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        let wait = retry_after
+            .map(|secs| format!(" (the Worker asks for {secs} s)"))
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "{PREPARE_ENDPOINT} failed transiently ({status}): a backend the deploy needs did \
+             not answer, or the Worker's D1 call budget ran out part-way. Nothing was promoted, \
+             and the database work already done is kept. Retry the deploy{wait}; it resumes \
+             where this one stopped. Worker said: {body}"
+        )
+    } else {
+        anyhow::anyhow!("{PREPARE_ENDPOINT} failed with {status}: {body}")
+    }
 }
 
 /// Verify the packaged Text module, plan identities, hydrated structure, one
@@ -1167,11 +1200,12 @@ mod tests {
     #[cfg(feature = "embed-assets")]
     use super::r2_upload_ui_assets_with_client;
     use super::{
-        artifact_sha256, free_plan_ten_ms_compatible_config, parse_labeled_line,
-        r2_upload_release_with_client, resolve_secret, smoke_authenticated_concurrency,
-        upload_deployment_record_with_client, verify_artifact_sha256, DeploymentReleaseRecord,
-        R2ObjectClient, CONCURRENT_SMOKE_MAX_IN_FLIGHT, CONCURRENT_SMOKE_TOTAL_REQUESTS,
-        FREE_PLAN_CPU_LIMIT_ERROR, FREE_PLAN_CPU_LIMIT_ERROR_CODE,
+        artifact_sha256, call_deploy_prepare, free_plan_ten_ms_compatible_config,
+        parse_labeled_line, r2_upload_release_with_client, resolve_secret,
+        smoke_authenticated_concurrency, upload_deployment_record_with_client,
+        verify_artifact_sha256, DeploymentReleaseRecord, R2ObjectClient,
+        CONCURRENT_SMOKE_MAX_IN_FLIGHT, CONCURRENT_SMOKE_TOTAL_REQUESTS, FREE_PLAN_CPU_LIMIT_ERROR,
+        FREE_PLAN_CPU_LIMIT_ERROR_CODE,
     };
     use crate::cli::helpers::cloudflare::assets::release_manifest_from_staged_dir;
     #[cfg(feature = "embed-assets")]
@@ -1187,6 +1221,79 @@ mod tests {
         ]
         .map(str::to_string)
         .to_vec()
+    }
+
+    /// A server that answers one request with `response` (a raw HTTP
+    /// response, head and body) and closes.
+    async fn spawn_one_shot_server(response: String) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0, "client closed before request headers completed");
+                head.extend_from_slice(&chunk[..read]);
+            }
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    fn raw_response(status: &str, extra_headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A 503 prepare — every failure may clear on a retry — reads as
+    /// transient, says nothing was promoted and to retry, names the
+    /// Worker's `Retry-After`, and keeps the Worker's cause. A 500 does not
+    /// read as transient.
+    #[tokio::test]
+    async fn a_503_prepare_says_it_is_transient_and_to_retry() {
+        let cause = "deploy_init: read block_settings: call budget exhausted: this invocation \
+                     has sent 4 D1 calls and may send 4";
+        let url = spawn_one_shot_server(raw_response(
+            "503 Service Unavailable",
+            "Retry-After: 1\r\n",
+            cause,
+        ))
+        .await;
+        let message = call_deploy_prepare(&url, "token")
+            .await
+            .expect_err("a 503 prepare fails the deploy")
+            .to_string();
+        for part in [
+            "failed transiently (503 Service Unavailable)",
+            "Nothing was promoted",
+            "Retry the deploy (the Worker asks for 1 s)",
+            cause,
+        ] {
+            assert!(message.contains(part), "{part:?} missing from: {message}");
+        }
+
+        let url = spawn_one_shot_server(raw_response(
+            "500 Internal Server Error",
+            "",
+            "deploy_init: boot: seal failed",
+        ))
+        .await;
+        let message = call_deploy_prepare(&url, "token")
+            .await
+            .expect_err("a 500 prepare fails the deploy")
+            .to_string();
+        assert!(
+            message
+                .contains("failed with 500 Internal Server Error: deploy_init: boot: seal failed"),
+            "{message}"
+        );
+        assert!(!message.contains("transient"), "{message}");
+        assert!(!message.contains("Retry"), "{message}");
     }
 
     #[derive(Clone)]

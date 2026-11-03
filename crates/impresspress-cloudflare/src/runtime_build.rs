@@ -67,7 +67,14 @@ pub(crate) struct BuiltRuntime {
 /// over the runtime `/_deploy/init` and `/_deploy/prepare` built, under this
 /// request's services. The seeded settings are published through the
 /// stateless config forwarder, as the cached runtime's are.
-pub(crate) async fn boot_deploy_runtime(built: &mut BuiltRuntime) -> Result<BootReport, String> {
+///
+/// The error stays a typed [`BootError`](impresspress_core::builder::BootError),
+/// so the endpoint answers it by its class ([`BootError::is_transient`]).
+///
+/// [`BootError::is_transient`]: impresspress_core::builder::BootError::is_transient
+pub(crate) async fn boot_deploy_runtime(
+    built: &mut BuiltRuntime,
+) -> Result<BootReport, impresspress_core::builder::BootError> {
     let db = built.db.clone();
     let block_settings = built.block_settings_handle.clone();
     request_services::scope(built.services.clone(), async {
@@ -78,7 +85,6 @@ pub(crate) async fn boot_deploy_runtime(built: &mut BuiltRuntime) -> Result<Boot
             request_services::config_proxy(),
         )
         .await
-        .map_err(|error| format!("boot: {error}"))
     })
     .await
 }

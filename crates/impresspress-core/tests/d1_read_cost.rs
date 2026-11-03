@@ -110,7 +110,7 @@ use wafer_block::{http_codec, InputStream};
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_core::interfaces::{
     config::service::ConfigService,
-    database::service::DatabaseService,
+    database::service::{DatabaseError, DatabaseService},
     network::service::{NetworkError, NetworkService, Request, Response},
 };
 use wafer_run::Wafer;
@@ -2232,6 +2232,86 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
         "the dispatch ran no Init on `{degraded_block}` — an Init would read its config: {sent:#?}"
     );
 }
+
+/// **A deploy funnel under a spent D1 call budget reports the budget, as a
+/// transient failure** — what `/_deploy/prepare` answers 503 (retry) on.
+///
+/// - At the Miniflare rehearsal's 4 calls, a fresh database fails the
+///   build's own `block_settings` read (`build_runtime`'s eager read, copied
+///   here as `build` copies it): the cold `list` of the missing table spends
+///   the budget and its existence probe is refused. The read used to return
+///   the list's `no such table`, and the deploy answered a permanent 500
+///   naming a table.
+/// - With enough calls for the build, admin's migrations run out part-way.
+///   Every failure in the `Reported` boot's report is then transient — admin's
+///   refused migration, the seed, and each later block the budget refused —
+///   so the report is [`BootReport::failed_transiently`], and admin's own
+///   error names the budget.
+#[tokio::test]
+async fn a_funnel_under_a_spent_call_budget_reports_it_transiently() {
+    let _generation = GENERATION.lock().await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ledger = Arc::new(Ledger::default());
+    let shaped = Arc::new(D1Shaped::open(
+        &tmp.path().join("d1.sqlite3"),
+        Arc::clone(&ledger),
+    ));
+    shaped.limit_calls(4);
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let error = block_settings::load(&db)
+        .await
+        .expect_err("4 calls are not enough for the build's read");
+    assert!(
+        matches!(error, DatabaseError::CallBudgetExhausted(_)),
+        "the build's read names the budget, not the missing table: {error:?}"
+    );
+    assert!(wafer_run::init_failure_is_transient(
+        error.code(),
+        error.detail_code()
+    ));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let shaped = Arc::new(D1Shaped::open(
+        &tmp.path().join("d1.sqlite3"),
+        Arc::clone(&ledger),
+    ));
+    shaped.limit_calls(FUNNEL_CALLS_PAST_THE_BUILD);
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let mut built = build(&db, None, true, &HashMap::new(), workers_snapshot()).await;
+    let report = boot_deploy_runtime(
+        &mut built.wafer,
+        &db,
+        &built.block_settings,
+        built.config.clone(),
+    )
+    .await
+    .expect("a Reported boot runs to its report");
+    assert!(!report.ok, "{report:#?}");
+    let admin = report
+        .blocks
+        .iter()
+        .find(|b| b.block == impresspress_core::blocks::admin::ADMIN_BLOCK_ID)
+        .expect("admin's outcome");
+    assert!(!admin.ok && admin.transient, "{admin:#?}");
+    let admin_error = admin.error.as_deref().unwrap_or_default();
+    assert!(
+        admin_error.contains(&format!(
+            "has sent {FUNNEL_CALLS_PAST_THE_BUILD} D1 calls and may send \
+             {FUNNEL_CALLS_PAST_THE_BUILD}, so this call was not sent"
+        )),
+        "admin's error names the spent budget: {admin_error}"
+    );
+    assert!(
+        report.failed_transiently(),
+        "every failure under a spent budget is transient: {report:#?}"
+    );
+}
+
+/// Enough calls for [`a_funnel_under_a_spent_call_budget_reports_it_transiently`]'s
+/// build (its `block_settings` read and probe) and too few for admin's
+/// migrations, which provisioning spends most of its 210 on.
+const FUNNEL_CALLS_PAST_THE_BUILD: usize = 20;
 
 /// The `[features]` table of the manifest at `crate_dir`.
 fn manifest_features(crate_dir: &str) -> toml::Table {

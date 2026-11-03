@@ -12,7 +12,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use impresspress_core::{
-    builder::{ImpresspressBuilder, DEPLOY_RESPONSE_SCHEMA_VERSION, PREPARE_RUNTIME_PLAN_KEY},
+    builder::{
+        BootReport, ImpresspressBuilder, DEPLOY_RESPONSE_SCHEMA_VERSION, PREPARE_RUNTIME_PLAN_KEY,
+    },
     release_inventory::{ReleaseManifest, RELEASE_MANIFEST_SCHEMA_VERSION},
 };
 use wafer_core::interfaces::storage::service::StorageService;
@@ -114,7 +116,7 @@ where
         .map_err(|e| FunnelFailure::new(e.is_unavailable(), e))?;
         let report = boot_deploy_runtime(&mut built)
             .await
-            .map_err(|e| FunnelFailure::new(false, e))?;
+            .map_err(|e| FunnelFailure::new(e.is_transient(), format!("boot: {e}")))?;
         let plan_draft = if prepare_plan && report.ok {
             impresspress_core::builder::seal_prepared_plan(&built.db, &built.plan_exporter)
                 .await
@@ -175,7 +177,6 @@ where
                 },
                 None => None,
             };
-            let status = if report.ok { 200 } else { 500 };
             let body = if let Some(plan) = plan {
                 serde_json::to_string_pretty(&serde_json::json!({
                     "schema_version": DEPLOY_RESPONSE_SCHEMA_VERSION,
@@ -186,7 +187,7 @@ where
                 serde_json::to_string_pretty(&report)
             }
             .unwrap_or_else(|e| format!("{{\"serialize_error\":\"{e}\"}}"));
-            Ok(worker::Response::ok(body)?.with_status(status))
+            report_response(&report, body)
         }
         Err(e) => {
             // A failed funnel may have committed a prefix of its mutations.
@@ -208,13 +209,49 @@ where
             if e.transient {
                 let mut response =
                     worker::Response::error(format!("deploy_init: {}", e.message), 503)?;
-                response.headers_mut().set("Retry-After", "1")?;
+                response
+                    .headers_mut()
+                    .set("Retry-After", FUNNEL_RETRY_AFTER_SECS)?;
                 Ok(response)
             } else {
                 worker::Response::error(format!("deploy_init: {}", e.message), 500)
             }
         }
     }
+}
+
+/// The `Retry-After` of a funnel that failed transiently: an operator, or
+/// `impresspress deploy`, may run it again at once. Nothing in the Worker
+/// holds a backoff for the funnel, which always builds a fresh runtime.
+const FUNNEL_RETRY_AFTER_SECS: &str = "1";
+
+/// The status of a funnel whose boot ran to its report: 200 when everything
+/// succeeded; 503 when every failure in it may clear on a fresh attempt
+/// ([`BootReport::failed_transiently`] — a database outage, or a migration
+/// the invocation's D1 call budget refused, which the next attempt resumes);
+/// 500 when anything failed in a way a retry cannot fix.
+fn report_status(report: &BootReport) -> u16 {
+    if report.ok {
+        200
+    } else if report.failed_transiently() {
+        503
+    } else {
+        500
+    }
+}
+
+/// The response for a funnel whose boot ran to `report`: `body` (the report,
+/// or the prepare envelope) with [`report_status`]'s status, and on a 503 the
+/// `Retry-After` every 503 the Worker returns carries.
+fn report_response(report: &BootReport, body: String) -> worker::Result<worker::Response> {
+    let status = report_status(report);
+    let mut response = worker::Response::ok(body)?.with_status(status);
+    if status == 503 {
+        response
+            .headers_mut()
+            .set("Retry-After", FUNNEL_RETRY_AFTER_SECS)?;
+    }
+    Ok(response)
 }
 
 /// Why the deploy funnel failed, and whether a retry may cure it, kept from
@@ -487,13 +524,85 @@ async fn probe_password_hasher(
 mod tests {
     use std::rc::Rc;
 
+    use impresspress_core::builder::{BlockInitOutcome, BootReport, StepOutcome};
     use impresspress_password::protocol::{self, Outcome};
+    use wafer_run::InitError;
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    use super::probe_password_hasher;
+    use super::{probe_password_hasher, report_response};
     use crate::{
         crypto_service::test_support::FakeHasher, environment::test_support::empty_environment,
     };
+
+    fn report(grants: StepOutcome, seed: StepOutcome, blocks: Vec<BlockInitOutcome>) -> BootReport {
+        let ok = grants.ok && seed.ok && blocks.iter().all(|b| b.ok);
+        BootReport {
+            sealed: true,
+            grants,
+            seed,
+            blocks,
+            degraded: Vec::new(),
+            ok,
+        }
+    }
+
+    /// `report`'s response has `status`, `retry_after`, and the body given.
+    fn assert_answer(report: &BootReport, status: u16, retry_after: Option<&str>) {
+        let response = report_response(report, "the report".to_string()).expect("a response");
+        assert_eq!(response.status_code(), status, "{report:?}");
+        assert_eq!(
+            response
+                .headers()
+                .get("Retry-After")
+                .expect("headers")
+                .as_deref(),
+            retry_after,
+            "{report:?}"
+        );
+    }
+
+    /// The funnel answers a report by its class: 200 when it succeeded, 503
+    /// when every failure may clear on a retry (a migration the call budget
+    /// refused, the seed and the later blocks refused the same way), and 500
+    /// as soon as one failure cannot.
+    #[wasm_bindgen_test]
+    fn the_funnel_answers_a_transient_report_503_and_a_fault_500() {
+        let budget = || InitError::Transient("call budget exhausted".into());
+        let ok = report(
+            StepOutcome::succeeded(),
+            StepOutcome::succeeded(),
+            vec![BlockInitOutcome::succeeded("impresspress/admin")],
+        );
+        assert_answer(&ok, 200, None);
+
+        let transient = report(
+            StepOutcome::succeeded(),
+            StepOutcome::failed("call budget exhausted".into(), true),
+            vec![
+                BlockInitOutcome::failed("impresspress/admin", &budget()),
+                BlockInitOutcome::succeeded("impresspress/router"),
+                BlockInitOutcome::failed("impresspress/auth-ui", &budget()),
+            ],
+        );
+        assert_answer(&transient, 503, Some("1"));
+
+        let one_fault = report(
+            StepOutcome::failed("no such table".into(), false),
+            StepOutcome::failed("call budget exhausted".into(), true),
+            vec![BlockInitOutcome::failed("impresspress/admin", &budget())],
+        );
+        assert_answer(&one_fault, 500, None);
+
+        let permanent_block = report(
+            StepOutcome::succeeded(),
+            StepOutcome::succeeded(),
+            vec![BlockInitOutcome::failed(
+                "impresspress/admin",
+                &InitError::Permanent("bad config".into()),
+            )],
+        );
+        assert_answer(&permanent_block, 500, None);
+    }
 
     /// The probe reaches the hasher through the binding, one request to one
     /// of the shards, and through nothing else (that the shard count is the

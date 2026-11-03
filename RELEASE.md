@@ -19,6 +19,29 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### `/_deploy/prepare` answers 503 when every failure may clear on a retry
+
+**What changes.** A deploy funnel whose boot failed used to answer 500
+whatever the cause. It now answers **503 with `Retry-After`** when every
+failure in its report is transient (D1 unreachable, or the invocation's D1
+call budget refused a migration part-way; the migration ledger lets the next
+attempt resume), and 500 when anything needs fixing. Each failed step and
+block in the report carries `"transient": true` when it is one; the field is
+absent otherwise, so the report's schema version is unchanged.
+
+- `impresspress deploy` says a 503 prepare failed transiently, that nothing
+  was promoted, and to run the deploy again.
+- On a fresh database under a small `IMPRESSPRESS_D1_CALLS_PER_INVOCATION`,
+  prepare used to answer `500 deploy_init: read block_settings: … no such
+  table`: the cold read spent the budget and its table-existence probe was
+  refused, and the probe's error was dropped. It now answers
+  `503 … call budget exhausted …`. The same holds for the WRAP-grants and
+  variables reads.
+- A migration the budget refused, whose ledger re-read the budget refused
+  too, made admin's `Init` fail permanently (its `ResourceExhausted` lost
+  the call-budget detail code). It is transient now, like the file's own
+  refusal.
+
 ### The SQL dialect is `IMPRESSPRESS_DB_TYPE`, set by the runtime; a stored `WAFER_RUN_SHARED__DATABASE__BACKEND` row is no longer read
 
 **What changes.** The dialect every block migrates in (and the admin
