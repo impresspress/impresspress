@@ -166,16 +166,34 @@ export async function armedWindowMs(deployment, since) {
 }
 
 /**
- * Whether a request's D1 calls include a runtime-build attempt. A build over
- * a failing D1 reads the variables table (its first touch introspects it),
- * and after the failed read probes whether the table exists, to tell a fresh
- * database from an outage (`impresspress-core`'s variables snapshot,
- * `read_unfiltered`): that probe is the build's mark.
+ * Whether a request's D1 calls include a failed check of the backend: a read
+ * that failed, followed by the probe of whether its table exists, to tell a
+ * fresh database from an outage (`impresspress-core`'s `read_unfiltered`,
+ * `block_settings::load`). That is what each retry after a window sends
+ * during an outage, whether it got as far as the gate (the variables read
+ * the runtime cache makes before it builds anything) or failed at the dynamic
+ * path's `block_settings` read before it: a retry, not a build. Whether a
+ * runtime was assembled is the invocation's `d1_cost` line ([`buildsSince`]).
  */
-export function attemptedBuild(calls) {
+export function probedBackend(calls) {
   return calls.some((call) =>
     call.statements.some((sql) => sql.startsWith("SELECT EXISTS(SELECT 1 FROM sqlite_master")),
   );
+}
+
+/**
+ * The `build=` of every `metric=d1_cost` line since `since` (a `mark()`),
+ * once the log has settled, leaving out `none` (an invocation that only read
+ * rows). `prepared` and `dynamic` mean a runtime was assembled — the costly
+ * part, failed or not — and `gate` an attempt that assembled nothing
+ * (`impresspress-cloudflare`'s `BuildKind`).
+ */
+export async function buildsSince(deployment, since) {
+  await deployment.settleLogs();
+  return deployment
+    .d1Costs(since)
+    .map((cost) => cost.build)
+    .filter((build) => build !== "none");
 }
 
 /**

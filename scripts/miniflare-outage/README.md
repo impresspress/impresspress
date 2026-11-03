@@ -77,3 +77,8 @@ for cold isolates, `setMode()` for the outage, `hold()`/`release()` to keep D1
 calls in flight, `fetchCounted()` for a request with its D1 and KV calls,
 `logLine()` for the Worker's console, and `smoke()` for the CLI's
 pre-promotion smoke. It fails by throwing.
+
+Count runtime builds from the `d1_cost` lines (`buildsSince()` in
+`scenarios/common.mjs`), never from D1 calls: since the D1 gate, a retry
+over a failing D1 sends the same failed read and probe a build did
+(`probedBackend()`) and assembles nothing (`build=gate`).

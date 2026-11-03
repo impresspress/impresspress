@@ -6,12 +6,14 @@
 // 3. on a cold isolate, the site's pages and `/b/static/` serve 200 and the
 //    D1 route answers 503 + Retry-After: wafer-run's fixed refusal text and a
 //    reference, the cause (D1's text) only in the Worker's log under it;
-// 4. 50 requests paced over several windows: at most one runtime-build attempt per retry window,
-//    each the failed variables read plus its `EXISTS` probe (two D1 calls,
-//    plan note 2026-11-01); a request that builds nothing sends D1 at most its
-//    audit row;
-// 6. toggle off: the D1 route recovers by the first rebuild after the
-//    window, and nothing is rebuilt inside it. The window ends no later than
+// 4. 50 requests paced over several windows: at most one retry per retry
+//    window, each the gate's failed variables read plus its `EXISTS` probe
+//    (two D1 calls, plan note 2026-11-01) and no build at all (`d1_cost`
+//    `build=gate`: the gate stops a retry before assembly, CPU-GATE review);
+//    a request that retries nothing sends D1 at most its audit row;
+// 6. toggle off: the D1 route recovers by the first retry after the
+//    window, whose gate now passes so it rebuilds, and nothing is rebuilt
+//    inside it. The window ends no later than
 //    the last refusal's answer plus its `Retry-After` (the ceiling of what
 //    was left), so no request sent after that instant may be answered from
 //    inside it.
@@ -27,7 +29,8 @@ import {
   assertCauseLogged,
   assertRefused,
   assertServed,
-  attemptedBuild,
+  buildsSince,
+  probedBackend,
   AUTH_UI,
   QUOTA_CAUSE,
   pollUntil,
@@ -84,24 +87,31 @@ export default {
     }
     assert.equal(new Set(refs).size, refs.length, "every refusal has a reference of its own");
     for (const ref of refs) await assertCauseLogged(d, ref, QUOTA_CAUSE, mark);
-    const attempts = answers.filter((a) => attemptedBuild(a.d1Calls));
-    // The window starts at 1 s and doubles after each failed attempt, so k
-    // attempts after the cold one need at least 2^(k-1) - 1 s between them.
+    const retries = answers.filter((a) => probedBackend(a.d1Calls));
+    // The window starts at 1 s and doubles after each failed retry, so k
+    // retries after the cold build need at least 2^(k-1) - 1 s between them.
     const bound = 1 + Math.floor(Math.log2(spanS + 1)) + 1;
     assert.ok(
-      attempts.length <= bound,
-      `${attempts.length} build attempts in ${spanS.toFixed(1)} s; at most ${bound} fit the retry windows`,
+      retries.length <= bound,
+      `${retries.length} retries in ${spanS.toFixed(1)} s; at most ${bound} fit the retry windows`,
     );
-    assert.ok(attempts.length >= 1, `the burst spans a window end (${spanS.toFixed(1)} s)`);
-    for (const a of attempts) {
+    assert.ok(retries.length >= 1, `the burst spans a window end (${spanS.toFixed(1)} s)`);
+    for (const a of retries) {
       const reads = a.d1Calls.filter((c) => !c.statements[0].startsWith("SELECT CASE WHEN NOT EXISTS"));
-      assert.equal(reads.length, 2, `a build attempt sends the variables read and its probe: ${JSON.stringify(a.d1Calls)}`);
+      assert.equal(reads.length, 2, `a retry sends the variables read and its probe: ${JSON.stringify(a.d1Calls)}`);
+      assert.equal(a.built, false, `a retry over a failing D1 builds nothing (${a.cacheOutcome})`);
+      assert.equal(a.cacheOutcome, "gated", "the retry's request reports its check");
     }
-    for (const a of answers.filter((a) => !attemptedBuild(a.d1Calls))) {
-      assert.ok(a.d1Calls.length <= 1, `a request that built nothing sent ${JSON.stringify(a.d1Calls)}`);
+    assert.deepEqual(
+      await buildsSince(d, mark),
+      retries.map(() => "gate"),
+      "every retry in the outage is a gate check: no runtime is assembled after the cold build",
+    );
+    for (const a of answers.filter((a) => !probedBackend(a.d1Calls))) {
+      assert.ok(a.d1Calls.length <= 1, `a request that retried nothing sent ${JSON.stringify(a.d1Calls)}`);
     }
     console.log(
-      `     burst: ${BURST} requests in ${spanS.toFixed(1)} s, ${attempts.length} build attempt(s), ` +
+      `     burst: ${BURST} requests in ${spanS.toFixed(1)} s, ${retries.length} gated retr(ies), ` +
         `${answers.reduce((n, a) => n + a.d1Calls.length, 0)} D1 calls in all`,
     );
 

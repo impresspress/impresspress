@@ -5,6 +5,7 @@
 import budgetRehearsal from "./budget-rehearsal.mjs";
 import dynamicPath from "./dynamic-path.mjs";
 import deploySmoke from "./deploy-smoke.mjs";
+import gateOutage from "./gate-outage.mjs";
 import healthBlockInit from "./health-block-init.mjs";
 import healthDegraded from "./health-degraded.mjs";
 import healthFailed from "./health-failed.mjs";
@@ -18,6 +19,7 @@ import stalePlan from "./stale-plan.mjs";
 export default [
   preparedWaferSite,
   preparedImpresspressSite,
+  gateOutage,
   permanentFault,
   dynamicPath,
   stalePlan,

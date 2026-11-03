@@ -16,6 +16,11 @@
 //   (its first request per cold isolate goes dynamic). The dynamic boot
 //   spends far more, so at the live check's value every route is 503, the
 //   static site file included, until a much larger budget.
+// - **stale plan (dynamic, then U-B1)**: the final version after an admin
+//   save moved the KV config stamp. Its cold isolate goes dynamic, whose
+//   check of D1 fails under the budget, so request 1 is a 503 and builds
+//   nothing (the D1 gate, CPU-GATE review M1); request 2, inside the window,
+//   hydrates the stale plan and serves the static site file 200.
 // - **deploy**: `/_deploy/prepare` itself runs under the budget, so a deploy
 //   that carries the lowered var fails at prepare: a 503 with `Retry-After`,
 //   every failure in it the spent budget (transient), never the 500 a fault
@@ -41,6 +46,7 @@ import {
   assertRefused,
   assertUnavailable,
   AUTH_UI,
+  buildsSince,
   staticAssetPath,
 } from "./common.mjs";
 
@@ -193,6 +199,27 @@ export default {
       }
       assert.ok(budgetLogged >= 1, `${label} ${VAR}=${LIVE_CHECK_VALUE}: the spent budget is logged under a reference`);
     }
+
+    // The stale-plan row at the live check's value: request 1 is a 503 that
+    // assembled nothing, request 2 serves the static site file from the
+    // stale plan's hydrate, the isolate's one build.
+    await d.start("final", { vars: { [VAR]: String(LIVE_CHECK_VALUE) } });
+    await d.bumpConfigStamp();
+    await d.restart({ vars: { [VAR]: String(LIVE_CHECK_VALUE) } });
+    const staleMark = d.mark();
+    const staleFirst = await d.fetch(routes[site]);
+    const staleSecond = await d.fetch(routes[site]);
+    console.log(
+      `     stale plan at ${VAR}=${LIVE_CHECK_VALUE}, ${routes[site]}: request 1 ${branch(staleFirst)}, ` +
+        `request 2 ${branch(staleSecond)}`,
+    );
+    assertUnavailable(staleFirst, `stale plan ${VAR}=${LIVE_CHECK_VALUE} request 1 ${routes[site]}`);
+    assert.equal(staleSecond.status, 200, `stale plan ${VAR}=${LIVE_CHECK_VALUE} request 2 ${routes[site]}`);
+    assert.deepEqual(
+      await buildsSince(d, staleMark),
+      ["gate", "prepared"],
+      "request 1 assembled nothing; request 2 hydrated the stale plan",
+    );
 
     // A deploy under the live check's value fails at prepare, transiently:
     // every failure in the funnel is the spent budget, which a fresh
