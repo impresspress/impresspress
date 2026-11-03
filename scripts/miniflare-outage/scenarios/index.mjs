@@ -3,6 +3,7 @@
 // optionally `vars`, Worker vars for every version it deploys), added below.
 
 import budgetRehearsal from "./budget-rehearsal.mjs";
+import dynamicGate from "./dynamic-gate.mjs";
 import dynamicPath from "./dynamic-path.mjs";
 import deploySmoke from "./deploy-smoke.mjs";
 import gateOutage from "./gate-outage.mjs";
@@ -22,6 +23,7 @@ export default [
   gateOutage,
   permanentFault,
   dynamicPath,
+  dynamicGate,
   stalePlan,
   budgetRehearsal,
   healthDegraded,

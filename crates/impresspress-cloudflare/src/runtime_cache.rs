@@ -582,7 +582,7 @@ fn arm_window(now: u64, cause: WindowCause) -> RetryWindow {
             retries = failures,
             since_ms = window.armed_at_ms,
             "the runtime retry window has been armed again and again for minutes: \
-             a lasting outage of the backend, not a passing one"
+             a lasting failure (see `cause`), not a passing one"
         );
     }
     RETRY_WINDOW.with(|cell| cell.set(Some(window)));
@@ -1971,10 +1971,12 @@ async fn build_dynamic_as_owner(
                 return Err(e);
             }
         };
-        // Retried for its health alone: nothing says the config moved, so
-        // the runtime kept after a failed gate is of the current config
-        // (degraded, not stale) and may be healed in place.
+        // Retried for its health alone: nothing says the config moved and
+        // nothing has marked it stale, so the runtime kept after a failed
+        // gate is of the current config (degraded, not stale) and may be
+        // healed in place.
         kept_is_current = !dirty
+            && rt.health.get().stale_since_ms.is_none()
             && rt.config_version.is_none()
             && !dynamic_probe_requires_rebuild(dirty, environment_changed, &rt.version, &probe);
 
@@ -2000,7 +2002,7 @@ async fn build_dynamic_as_owner(
             return Ok((rt, outcome));
         }
         if kept_is_current && heals_in_place(&rt) {
-            return heal_or_gate(build_guard, io, timer, rt).await;
+            return heal_or_gate(build_guard, io, timer, rt, &probe, now).await;
         }
         tracing::info!(old = %rt.version, new = %probe.observed(), dirty, environment_changed, healthy, "config version, Worker environment, local state or health changed; rebuilding runtime");
         (probe.into_dynamic_version(), true, false)
@@ -2156,8 +2158,15 @@ async fn gated_hydrate(
         .map_err(Unbuilt::Failed)
 }
 
-/// The dynamic path's attempt: the D1 handle, `block_settings`, the gate, the
+/// The dynamic path's attempt: the D1 handle, the gate, `block_settings`, the
 /// build.
+///
+/// The gate is the attempt's first D1 read. A warm retry reads
+/// `block_settings` through to D1 (`read_through`, past the KV row cache),
+/// so with that read first a database-wide outage failed there, before the
+/// gate, and a runtime of the current config was marked stale for a check
+/// that built nothing (PR #282 review M1). After a gate that passed, a failed
+/// `block_settings` read is a backend failing in part: a failed rebuild.
 ///
 /// Any failed gate builds nothing, a cold isolate's included (CPU-GATE review
 /// M1): a dynamic boot reads the WRAP grants first (`GrantSource::Database`,
@@ -2177,11 +2186,11 @@ async fn gated_dynamic_build(
             bump_on_write: true,
         })
         .map_err(Unbuilt::Failed)?;
-    let block_settings = io.read_block_settings(&db).await.map_err(Unbuilt::Failed)?;
     let variables = crate::runtime_build::fresh_variables_snapshot();
     io.read_variables(&db, &variables)
         .await
         .map_err(Unbuilt::Gated)?;
+    let block_settings = io.read_block_settings(&db).await.map_err(Unbuilt::Failed)?;
     let source = BuildSource {
         db,
         block_settings,
@@ -2212,13 +2221,16 @@ fn heals_in_place(rt: &ReadyRuntime) -> bool {
 }
 
 /// The gate, read into `rt`'s own snapshot ([`heals_in_place`]). Answered,
-/// the runtime is healed — no longer degraded, the window cleared — and
-/// served; failed, it is a failed gate like any other.
+/// the runtime is healed — no longer degraded, the window cleared, the
+/// owner's `probe` of the config stamp recorded as a healthy runtime's is —
+/// and served; failed, it is a failed gate like any other.
 async fn heal_or_gate(
     guard: &BuildGuard,
     io: &dyn BuildIo,
     timer: &dyn WaitTimer,
     rt: Rc<ReadyRuntime>,
+    probe: &VersionProbe,
+    now: u64,
 ) -> Result<(Rc<ReadyRuntime>, CacheOutcome), RuntimeBuildError> {
     let read = match io.open_database(crate::kv_cached_db::CacheMode::default()) {
         Ok(db) => io.read_variables(&db, &rt.variables_snapshot).await,
@@ -2236,7 +2248,17 @@ async fn heal_or_gate(
                 kind = rt.kind_label(),
                 "the variables read answered; runtime healed in place, nothing rebuilt"
             );
-            Ok((rt, CacheOutcome::ProbedFresh))
+            // The owner probed the config stamp before healing: record it
+            // as a healthy runtime's probe is, so the next request does not
+            // probe KV again and an unavailable probe widens the window.
+            let outcome = if matches!(probe, VersionProbe::Unavailable) {
+                rt.note_probe_failure(now);
+                CacheOutcome::ProbeFailed
+            } else {
+                rt.note_probe_success(now);
+                CacheOutcome::ProbedFresh
+            };
+            Ok((rt, outcome))
         }
         Err(error) => {
             let failed = FailedBuild::Gate {
@@ -2575,7 +2597,7 @@ async fn build_prepared_as_owner(
         // A runtime of a current plan whose only defect is a failed
         // variables read: one read heals it (CPU-GATE review m3).
         if !dirty && heals_in_place(&rt) {
-            let (rt, outcome) = heal_or_gate(build_guard, io, timer, rt).await?;
+            let (rt, outcome) = heal_or_gate(build_guard, io, timer, rt, &probe, now).await?;
             return Ok(PreparedOwned::Ready(rt, outcome));
         }
         // A degraded runtime of a current plan: hydrate it again, the retry
@@ -3901,7 +3923,17 @@ pub(crate) mod tests {
             _db: &Arc<dyn DatabaseService>,
         ) -> Result<impresspress_core::features::BlockSettings, RuntimeBuildError> {
             self.settings_reads.set(self.settings_reads.get() + 1);
-            Ok(impresspress_core::features::BlockSettings::default())
+            // The same database: an outage fails this read as it fails the
+            // variables read (a warm retry reads it through to D1).
+            match self.variables.get() {
+                Some(crate::test_fakes::VariablesAnswer::Unavailable) => Err(
+                    RuntimeBuildError::classified(true, "read block_settings: D1 down".into()),
+                ),
+                Some(crate::test_fakes::VariablesAnswer::Fault) => Err(
+                    RuntimeBuildError::classified(false, "read block_settings: fault".into()),
+                ),
+                _ => Ok(impresspress_core::features::BlockSettings::default()),
+            }
         }
 
         async fn read_variables(
@@ -4783,8 +4815,8 @@ pub(crate) mod tests {
         assert_eq!(armed.cause, WindowCause::BuildUnavailable);
         assert_eq!(
             (io.settings_reads.get(), io.gates.get()),
-            (1, 1),
-            "block_settings, then the gate"
+            (0, 1),
+            "the gate is the first read, and its failure ends the attempt"
         );
         assert_eq!(
             (io.builds.get(), io.hydrates.get()),
@@ -4825,6 +4857,41 @@ pub(crate) mod tests {
         reset_isolate();
     }
 
+    /// **A warm degraded dynamic runtime whose retry meets the outage stays
+    /// degraded, not stale** (PR #282 review M1): the gate is the attempt's
+    /// first D1 read, so a database-wide outage fails it rather than the
+    /// read-through `block_settings` read, and the retry is a failed gate —
+    /// `Gated`, `GateFailed`, the runtime kept as it was — not a failed
+    /// rebuild that would mark a runtime of the current config stale.
+    #[wasm_bindgen_test]
+    async fn a_warm_degraded_dynamic_runtime_whose_gate_fails_stays_degraded() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.dynamic.set(Ends::Degraded);
+        let (rt, _) = get_or_build_with(&io, &timer)
+            .await
+            .expect("published degraded");
+        let health = rt.health.get();
+        let armed = window().expect("armed");
+        timer.now.set(armed.retry_at_ms);
+
+        backend(&io, VariablesAnswer::Unavailable);
+        let (kept, outcome) = get_or_build_with(&io, &timer).await.expect("kept");
+
+        assert_eq!(outcome, CacheOutcome::Gated);
+        assert!(Rc::ptr_eq(&kept, &rt));
+        assert_eq!(kept.health.get(), health, "degraded, not stale");
+        assert_eq!(window().map(|w| w.cause), Some(WindowCause::GateFailed));
+        assert_eq!(io.builds.get(), 1, "nothing built");
+        assert_eq!(
+            io.settings_reads.get(),
+            1,
+            "only the cold build read block_settings"
+        );
+        reset_isolate();
+    }
+
     /// **A hand-off whose gate fails goes through the failure branch**
     /// (acceptance 5, CPU-GATE review m1): nothing is built, the prepared
     /// runtime is kept and marked stale (its config is older than the
@@ -4856,8 +4923,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             io.settings_reads.get(),
-            1,
-            "the dynamic owner ran to its gate"
+            0,
+            "the dynamic owner read nothing past its failed gate"
         );
         assert!(rt.health.get().stale_since_ms.is_some(), "kept, and stale");
         assert!(DIRTY.with(Cell::get), "DIRTY survives the failed gate");
@@ -5013,9 +5080,29 @@ pub(crate) mod tests {
                 (0, 0, 2),
                 "{prepared}: two reads, no build"
             );
+            assert!(
+                rt.probe_deadline_ms.get() < u64::MAX,
+                "{prepared}: the owner's probe is recorded, a fresh window from now"
+            );
+            let probes = io.probes.get();
             let (_rt, outcome) = get_or_build_with(&io, &timer).await.expect("warm");
             assert_eq!(outcome, CacheOutcome::Hit, "{prepared}");
+            assert_eq!(io.probes.get(), probes, "{prepared}: no second probe");
         }
+
+        // A heal whose probe could not reach KV says so, and backs the next
+        // probe off, as for a healthy runtime.
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        a_runtime_whose_only_defect_is_a_failed_read(None).await;
+        get_or_build_with(&io, &timer).await.expect("served");
+        timer.now.set(window().expect("armed").retry_at_ms);
+        io.probe_unavailable.set(true);
+        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("healed");
+        assert_eq!(outcome, CacheOutcome::ProbeFailed);
+        assert!(rt.health.get().is_healthy());
+        assert_eq!(rt.probe_failures.get(), 1);
         reset_isolate();
     }
 

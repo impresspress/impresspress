@@ -222,7 +222,7 @@ pub(crate) fn fresh_variables_snapshot() -> Arc<VariablesSnapshot> {
 
 /// The retry window's gate: read the variables table into `variables`
 /// through `db`, now — a failure the snapshot remembers is read again
-/// ([`VariablesSnapshot::retry_now`]).
+/// ([`VariablesSnapshot::check_backend`]) — classified for the edge.
 ///
 /// It is the read every degraded block of an outage failed on, and on the
 /// prepared path the build's first D1 contact: moved in front of assembly, it
@@ -242,16 +242,12 @@ pub(crate) async fn read_variables(
     db: &Arc<dyn DatabaseService>,
     variables: &VariablesSnapshot,
 ) -> Result<(), crate::runtime_cache::RuntimeBuildError> {
-    match variables.retry_now(db).await {
-        Ok(_)
-        | Err(impresspress_core::platform_state::variables::UnfilteredReadError::Absent(_)) => {
-            Ok(())
-        }
-        Err(error) => Err(crate::runtime_cache::RuntimeBuildError::classified(
+    variables.check_backend(db).await.map_err(|error| {
+        crate::runtime_cache::RuntimeBuildError::classified(
             error.is_transient(),
             format!("read variables: {error}"),
-        )),
-    }
+        )
+    })
 }
 
 /// Build (but do not seal or boot) the WAFER runtime for a request over what

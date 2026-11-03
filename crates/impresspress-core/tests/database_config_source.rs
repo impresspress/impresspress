@@ -1240,6 +1240,50 @@ async fn retry_now_reads_a_remembered_failure_again() {
     assert_eq!(counting.lists(), lists + 2, "both answered from the memo");
 }
 
+/// **`check_backend` is the Cloudflare gate's read**: a table that does not
+/// exist yet passes and is not remembered (a fresh database is not a failing
+/// one), a failed read is answered and remembered, and a read that answers
+/// fills the snapshot every reader then uses.
+#[tokio::test]
+async fn check_backend_passes_an_absent_table_and_reports_a_failed_read() {
+    let _generation = GENERATION.lock().await;
+    let fresh: Arc<dyn DatabaseService> = Arc::new(D1Shaped::new(
+        wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+            .expect("open in-memory sqlite"),
+        Arc::new(Ledger::default()),
+    ));
+    let snapshot = Clock::default().snapshot(RetryMode::Rebuild);
+    snapshot
+        .check_backend(&fresh)
+        .await
+        .expect("no variables table yet: the check passes");
+    assert!(!snapshot.remembers_a_failure());
+
+    let (counting, shaped, db) = shaped().await;
+    seed(&db, "WAFER_RUN__AUTH__K", "stored").await;
+    let snapshot = Clock::default().snapshot(RetryMode::Rebuild);
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    let error = snapshot
+        .check_backend(&db)
+        .await
+        .expect_err("the outage fails the check");
+    assert!(error.is_transient(), "{error}");
+    assert!(snapshot.remembers_a_failure());
+
+    shaped.clear_fault();
+    snapshot.check_backend(&db).await.expect("D1 is back");
+    let lists = counting.lists();
+    snapshot
+        .read(&db)
+        .await
+        .expect("the check filled the snapshot");
+    assert_eq!(
+        counting.lists(),
+        lists,
+        "read answers from what the check read"
+    );
+}
+
 /// **The remembered failure is judged on the snapshot's own generation**
 /// (#274): a snapshot hosting one deployment among the many a test process
 /// runs sees its deployment's config writes and no one else's — the same

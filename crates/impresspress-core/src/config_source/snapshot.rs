@@ -371,6 +371,23 @@ impl VariablesSnapshot {
         self.read_retrying(db, true).await
     }
 
+    /// Whether the backend answers the variables table now: the Cloudflare
+    /// runtime cache's gate, the read its retry makes before it builds
+    /// anything. [`Self::retry_now`] into this snapshot, so a build handed it
+    /// reads the table through this one read; a table that does not exist yet
+    /// passes (a fresh database before admin's migrations is not a failing
+    /// one, and nothing is remembered for it). Classifying a failure is the
+    /// caller's ([`UnfilteredReadError::is_transient`]).
+    pub async fn check_backend(
+        &self,
+        db: &Arc<dyn DatabaseService>,
+    ) -> Result<(), UnfilteredReadError> {
+        match self.retry_now(db).await {
+            Ok(_) | Err(UnfilteredReadError::Absent(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// [`Self::read`] and [`Self::retry_now`]: `retry_failure` reads a
     /// remembered failure of the current generation again now.
     async fn read_retrying(

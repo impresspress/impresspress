@@ -129,9 +129,7 @@ impl DatabaseConfigSource {
 /// The typed error stays behind either variant (`source`), so a reader of the
 /// [`ConfigError`] can still downcast to the [`UnfilteredReadError`].
 fn config_error(block: &str, error: UnfilteredReadError) -> ConfigError {
-    // The three cases above are `UnfilteredReadError::is_transient`'s; this
-    // source keeps its own reading of `Absent` (retry the block), which that
-    // rule leaves to each reader.
+    // The three cases above are `UnfilteredReadError::is_transient`'s.
     let transient = error.is_transient();
     let block = block.to_string();
     let source = Box::new(error);

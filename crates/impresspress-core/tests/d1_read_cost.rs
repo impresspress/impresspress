@@ -41,7 +41,7 @@
 //!    run after it (its audit row and deferred tasks).
 //! 6. **window retry, gate fails** — the Worker's retry window checking a
 //!    database whose variables table is down before it builds anything
-//!    ([`gate`]): the first check after a publish (a cold schema cache), and
+//!    (`VariablesSnapshot::check_backend`, which `runtime_build::read_variables` calls): the first check after a publish (a cold schema cache), and
 //!    **6b** a later one, which sends the same (the outage fails the
 //!    introspection, so nothing is memoized). Only the variables table is
 //!    read.
@@ -266,7 +266,7 @@ fn identity() -> (String, WaferLockIdentity, PreparedReleaseAssets) {
 /// refuses.
 ///
 /// `gated` runs the request path's gate after the settings, as the Worker's
-/// slot owner does ([`gate`]); the deploy funnel is never gated.
+/// slot owner does (`VariablesSnapshot::check_backend`, which `runtime_build::read_variables` calls); the deploy funnel is never gated.
 async fn build(
     db: &Arc<dyn DatabaseService>,
     prepared: Option<&PreparedRuntimePlan>,
@@ -302,7 +302,8 @@ async fn try_build(
         None => block_settings::load(db).await?,
     };
     if gated {
-        gate(db, &variables)
+        variables
+            .check_backend(db)
             .await
             .expect("the gate reads the variables table");
     }
@@ -372,21 +373,6 @@ async fn try_build(
 /// only by the runtime cache's retry window, never on its own.
 fn workers_snapshot() -> Arc<VariablesSnapshot> {
     Arc::new(VariablesSnapshot::new(RetryMode::Rebuild))
-}
-
-/// The Worker's gate, `runtime_build::read_variables`: the variables table
-/// read into `variables` now — a remembered failure read again — before
-/// anything is assembled, so the build reads the table through it; an
-/// absent table passes. Copied, not called: that function needs the
-/// Worker's crate.
-async fn gate(
-    db: &Arc<dyn DatabaseService>,
-    variables: &VariablesSnapshot,
-) -> Result<(), variables::UnfilteredReadError> {
-    match variables.retry_now(db).await {
-        Ok(_) | Err(variables::UnfilteredReadError::Absent(_)) => Ok(()),
-        Err(error) => Err(error),
-    }
 }
 
 /// `build_runtime`'s order: the database (D1 speaks SQLite) goes into the
@@ -1627,7 +1613,8 @@ async fn run(variant: Variant) -> Run {
     shaped.fail_table(variables::TABLE, Fault::Unavailable);
     let mut first_gate = None;
     for name in [PHASE_GATE_FIRST, PHASE_GATE_AGAIN] {
-        let error = gate(&down, &workers_snapshot())
+        let error = workers_snapshot()
+            .check_backend(&down)
             .await
             .expect_err("the outage fails the gate");
         assert!(error.is_transient(), "{name}: {error}");
@@ -2244,7 +2231,8 @@ async fn a_prepared_build_over_a_failed_gate_sends_the_variables_table_nothing()
     let db: Arc<dyn DatabaseService> = shaped.clone();
     let variables = workers_snapshot();
     shaped.fail_table(variables::TABLE, Fault::Unavailable);
-    gate(&db, &variables)
+    variables
+        .check_backend(&db)
         .await
         .expect_err("the outage fails the gate");
     shaped.clear_fault();
@@ -2303,7 +2291,8 @@ async fn a_failed_gate_costs_a_sliver_of_a_cold_build() {
         shaped.fail_table(variables::TABLE, Fault::Unavailable);
         let down: Arc<dyn DatabaseService> = shaped.clone();
         let started = std::time::Instant::now();
-        gate(&down, &workers_snapshot())
+        workers_snapshot()
+            .check_backend(&down)
             .await
             .expect_err("the outage fails the gate");
         gated = gated.max(started.elapsed());
