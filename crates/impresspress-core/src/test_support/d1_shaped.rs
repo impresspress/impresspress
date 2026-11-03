@@ -174,6 +174,15 @@ pub struct D1Shaped {
     ledger: Arc<Ledger>,
     fault: Mutex<Option<(String, Fault)>>,
     no_rows: Mutex<Option<String>>,
+    /// The invocation's call limit ([`Self::limit_calls`]) and the calls
+    /// sent since it was set.
+    call_limit: Mutex<Option<CallLimit>>,
+}
+
+/// A per-invocation call limit, as the D1 adapter's `spend_call` keeps it.
+struct CallLimit {
+    limit: usize,
+    sent: usize,
 }
 
 impl D1Shaped {
@@ -186,6 +195,7 @@ impl D1Shaped {
             ledger,
             fault: Mutex::new(None),
             no_rows: Mutex::new(None),
+            call_limit: Mutex::new(None),
         }
     }
 
@@ -220,8 +230,35 @@ impl D1Shaped {
         *self.no_rows.lock().unwrap_or_else(|p| p.into_inner()) = Some(sql.to_string());
     }
 
-    /// Statements reach SQLite again.
+    /// From now on, `limit` more calls are sent and every call after them is
+    /// refused with [`DatabaseError::CallBudgetExhausted`] before it is sent
+    /// — not recorded, not run — as the D1 adapter refuses a call past
+    /// `IMPRESSPRESS_D1_CALLS_PER_INVOCATION` (`spend_call`). A whole
+    /// `run_batch`/`run_transaction` is one call, as it is there.
+    pub fn limit_calls(&self, limit: usize) {
+        *self.call_limit.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(CallLimit { limit, sent: 0 });
+    }
+
+    /// Spend one call of the limit, or refuse it as the adapter does.
+    fn spend_call(&self) -> Result<(), DatabaseError> {
+        let mut guard = self.call_limit.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(budget) = guard.as_mut() else {
+            return Ok(());
+        };
+        if budget.sent >= budget.limit {
+            return Err(DatabaseError::CallBudgetExhausted(format!(
+                "this invocation has sent {} D1 calls and may send {}, so this call was not sent",
+                budget.sent, budget.limit
+            )));
+        }
+        budget.sent += 1;
+        Ok(())
+    }
+
+    /// Statements reach SQLite again, and calls are no longer limited.
     pub fn clear_fault(&self) {
+        *self.call_limit.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.fault.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.no_rows.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
@@ -271,6 +308,7 @@ impl D1Shaped {
         carrier: Carrier,
         sent: Vec<Sent>,
     ) -> Result<InFlight<'_>, DatabaseError> {
+        self.spend_call()?;
         let ledger = &*self.ledger;
         let wave = if ledger.in_flight.fetch_add(1, Ordering::SeqCst) == 0 {
             ledger.waves.fetch_add(1, Ordering::SeqCst) + 1
@@ -309,6 +347,40 @@ impl D1Shaped {
         )
         .await
     }
+}
+
+/// A cold isolate over an empty in-memory database — no table at all, a
+/// fresh D1 before any migration — whose call limit runs out exactly when a
+/// `list` of `table` with `opts` has failed: the next call, the loader's
+/// table-existence probe, is refused with
+/// [`DatabaseError::CallBudgetExhausted`].
+///
+/// The limit is measured, not written down: a first cold isolate counts the
+/// calls that failed `list` sends (introspection and the select, several
+/// on a missing table), so the fixture keeps holding when the executor's
+/// cold path changes.
+pub async fn spent_by_a_failed_list(
+    table: &str,
+    opts: &wafer_block::db::ListOptions,
+) -> Arc<D1Shaped> {
+    use wafer_core::interfaces::database::service::DatabaseService;
+
+    let fresh = || {
+        Arc::new(D1Shaped::new(
+            SQLiteDatabaseService::open_in_memory().expect("open in-memory sqlite"),
+            Arc::new(Ledger::default()),
+        ))
+    };
+    let measure = fresh();
+    DatabaseService::list(&*measure, table, opts)
+        .await
+        .expect_err("a list of a missing table fails");
+    let calls = measure.ledger().take().len();
+    assert!(calls > 0, "the failed list sent no call");
+
+    let db = fresh();
+    db.limit_calls(calls);
+    db
 }
 
 #[wafer_block::wafer_async_trait]
@@ -623,6 +695,39 @@ mod tests {
         assert!(DatabaseService::schema_table_exists(&db, "d1_tx_a")
             .await
             .expect("table lookup"));
+    }
+
+    /// Past its limit a call is refused as the D1 adapter refuses it —
+    /// `CallBudgetExhausted`, before it is sent, so it is not recorded — and
+    /// a cleared fault lifts the limit.
+    #[tokio::test]
+    async fn a_call_past_the_limit_is_refused_before_it_is_sent() {
+        let (db, ledger) = shaped();
+        DatabaseService::exec_raw(&*db, "CREATE TABLE t (id TEXT PRIMARY KEY)", &[])
+            .await
+            .expect("create");
+        ledger.take();
+
+        db.limit_calls(2);
+        DatabaseService::count(&*db, "t", &[])
+            .await
+            .expect("call 1");
+        DatabaseService::count(&*db, "t", &[])
+            .await
+            .expect("call 2");
+        let refused = DatabaseService::count(&*db, "t", &[])
+            .await
+            .expect_err("call 3 is past the limit");
+        assert!(
+            matches!(refused, DatabaseError::CallBudgetExhausted(_)),
+            "{refused:?}"
+        );
+        assert_eq!(ledger.take().len(), 2, "the refused call was not sent");
+
+        db.clear_fault();
+        DatabaseService::count(&*db, "t", &[])
+            .await
+            .expect("no limit");
     }
 
     /// A runtime schema mutation is refused, as D1 refuses it, and sends

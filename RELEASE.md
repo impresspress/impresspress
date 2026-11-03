@@ -40,6 +40,36 @@ error code and `Retry-After` are unchanged.
   `tracing` subscriber (below).
 - `request_logs.error_message` holds the sanitized text, with the reference.
 
+### `/_deploy/prepare` answers 503 when every failure may clear on a retry
+
+**What changes.** A deploy funnel whose boot failed used to answer 500
+whatever the cause. It now answers **503 with `Retry-After`** when every
+failure in its report is transient (D1 unreachable, or the invocation's D1
+call budget ran out), and 500 when anything needs fixing. Each failed step and
+block in the report carries `"transient": true` when it is one; the field is
+absent otherwise, so the report's schema version is unchanged.
+
+- `impresspress deploy` says a 503 prepare failed transiently, that nothing
+  was promoted, and to run the deploy again. Migrations a prepare completed
+  are recorded and not re-run, so a retry under a budget that fits each step
+  gets further; a budget too small for one step (under about a dozen calls,
+  the build's cold read and the boot spend it before any migration commits)
+  fails the same way on every retry. Retries that make no progress mean
+  `IMPRESSPRESS_D1_CALLS_PER_INVOCATION` is too low for prepare: raise it, or
+  unset it.
+- On a fresh database under a small `IMPRESSPRESS_D1_CALLS_PER_INVOCATION`,
+  prepare used to answer `500 deploy_init: read block_settings: … no such
+  table`: the cold read spent the budget and its table-existence probe was
+  refused, and the probe's error was dropped. It now answers
+  `503 … call budget exhausted …`. The same holds for the WRAP-grants and
+  variables reads.
+- Admin's `Init` failed permanently when the budget ran out in a migration
+  whose ledger re-read it also refused, or in the shared-variables seed (its
+  read of the table, its writes, its seed-hash stamp): each re-wrapped the
+  refusal without its call-budget detail code, and `ResourceExhausted`
+  without it is permanent. Every one keeps the detail code now, as do the
+  config block's `config.get` and `config.get_many` errors.
+
 ### Cloudflare: framework warnings and errors reach the Worker console
 
 **What changes.** A Worker installed no `tracing` subscriber, so every

@@ -586,19 +586,9 @@ mod tests {
         let plan = plan();
         let report = BootReport {
             sealed: true,
-            grants: StepOutcome {
-                ok: true,
-                error: None,
-            },
-            seed: StepOutcome {
-                ok: true,
-                error: None,
-            },
-            blocks: vec![BlockInitOutcome {
-                block: "impresspress/admin".into(),
-                ok: true,
-                error: None,
-            }],
+            grants: StepOutcome::succeeded(),
+            seed: StepOutcome::succeeded(),
+            blocks: vec![BlockInitOutcome::succeeded("impresspress/admin")],
             degraded: Vec::new(),
             ok: true,
         };

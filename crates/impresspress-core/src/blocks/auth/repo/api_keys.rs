@@ -13,8 +13,11 @@ use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
-use super::{db_failed, internal_error, iso, map_opt_str, map_str, now_iso, parse_iso};
-use crate::db_read::{self, Bound};
+use super::{internal_error, iso, map_opt_str, map_str, now_iso, parse_iso};
+use crate::{
+    blocks::errors::db_failed,
+    db_read::{self, Bound},
+};
 
 pub const TABLE: &str = "wafer_run__auth__api_keys";
 

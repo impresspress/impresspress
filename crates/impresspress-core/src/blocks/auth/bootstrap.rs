@@ -246,7 +246,7 @@ async fn bootstrap_with_token(ctx: &dyn Context, token: &str) -> Result<bool, Wa
 /// `error` prefixed with this step, keeping its code: a WRAP denial on the
 /// redemption route (`auth_ui::api::bootstrap`) is a 403 there, not a 500.
 fn bootstrap_failed(error: WaferError) -> WaferError {
-    super::repo::db_failed("auth bootstrap", error)
+    crate::blocks::errors::db_failed("auth bootstrap", error)
 }
 
 #[cfg(test)]

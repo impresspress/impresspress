@@ -36,8 +36,9 @@ use wafer_block::{
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, WaferError};
 
-use super::{db_failed, now_iso};
+use super::now_iso;
 use crate::{
+    blocks::errors::db_failed,
     db_read::{self, Bound},
     util::{sha256_hex, RecordExt},
 };

@@ -11,8 +11,11 @@ use wafer_block::{
 use wafer_core::clients::database::{self as db, Record, RecordData};
 use wafer_run::{context::Context, WaferError};
 
-use super::{db_failed, internal_error, map_bool, map_opt_str, map_str, now_iso, value_bool};
-use crate::util::{daily_grouped, to_wire_filters, RecordExt};
+use super::{internal_error, map_bool, map_opt_str, map_str, now_iso, value_bool};
+use crate::{
+    blocks::errors::db_failed,
+    util::{daily_grouped, to_wire_filters, RecordExt},
+};
 
 pub const TABLE: &str = "wafer_run__auth__users";
 

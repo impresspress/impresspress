@@ -726,7 +726,8 @@ impl MigrationError {
     /// [`Refusal`]; the database's own classification for a file or a step
     /// that failed (`Unavailable` stays `Unavailable`, so the runtime retries
     /// the `Init`; a call-budget refusal keeps its code and detail
-    /// code); for an undecided file, the ledger read's classification.
+    /// code); for an undecided file, the ledger read's classification, detail
+    /// code included.
     pub fn code(&self) -> ErrorCode {
         match self.kind.as_ref() {
             MigrationErrorKind::Refused(_) => ErrorCode::FailedPrecondition,
@@ -736,11 +737,19 @@ impl MigrationError {
         }
     }
 
+    /// The detail code that goes with [`Self::code`], from the same failure:
+    /// for an undecided file, the ledger read's. A read the invocation's call
+    /// budget refused is the commonest undecided file — the file's own
+    /// transaction was refused for the same reason, and so is the read that
+    /// would decide it — and without the read's detail code its
+    /// `ResourceExhausted` reads as a permanent failure, though a fresh
+    /// invocation decides the file and resumes.
     fn detail_code(&self) -> Option<&str> {
         match self.kind.as_ref() {
             MigrationErrorKind::FileFailed { failure, .. } => failure.detail_code.as_deref(),
             MigrationErrorKind::Step { error, .. } => error.detail_code.as_deref(),
-            MigrationErrorKind::Refused(_) | MigrationErrorKind::Undecided { .. } => None,
+            MigrationErrorKind::Undecided { read, .. } => read.detail_code.as_deref(),
+            MigrationErrorKind::Refused(_) => None,
         }
     }
 
@@ -1412,6 +1421,54 @@ fn is_duplicate_column_error(msg: &str) -> bool {
 mod tests {
     use super::*;
     use crate::platform_state::applied_migrations::Origin;
+
+    /// **A file the call budget left undecided is transient.** Its
+    /// transaction was refused for want of a call, and so was the ledger
+    /// read that would decide it. The `Init` error keeps the read's detail
+    /// code, so it classifies as a fresh invocation may cure it — without it,
+    /// `ResourceExhausted` is the runtime's permanent class, and a deploy
+    /// under a small call budget reported admin's migrations as broken.
+    #[test]
+    fn an_undecided_file_keeps_the_ledger_reads_class() {
+        let budget = || {
+            WaferError::new(
+                ErrorCode::ResourceExhausted,
+                "this invocation has no call left",
+            )
+            .with_detail_code(wafer_block::wire::database::CALL_BUDGET_EXHAUSTED)
+        };
+        let undecided = MigrationError {
+            block: "test/block".to_string(),
+            kind: Box::new(MigrationErrorKind::Undecided {
+                file: "001_init.sql".to_string(),
+                failure: TxFailure::from(budget()),
+                read: StepError::from(budget()),
+            }),
+        };
+        let error = undecided.to_wafer_error();
+        assert_eq!(
+            error.detail_code(),
+            Some(wafer_block::wire::database::CALL_BUDGET_EXHAUSTED)
+        );
+        assert!(wafer_run::init_failure_is_transient(
+            error.code,
+            error.detail_code()
+        ));
+
+        let fault = MigrationError {
+            block: "test/block".to_string(),
+            kind: Box::new(MigrationErrorKind::Undecided {
+                file: "001_init.sql".to_string(),
+                failure: TxFailure::from(budget()),
+                read: StepError::from(WaferError::new(ErrorCode::Internal, "disk image malformed")),
+            }),
+        };
+        let error = fault.to_wafer_error();
+        assert!(!wafer_run::init_failure_is_transient(
+            error.code,
+            error.detail_code()
+        ));
+    }
 
     #[test]
     fn sha256_hex_deterministic() {

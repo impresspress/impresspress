@@ -418,13 +418,10 @@ pub async fn seed_defaults(ctx: &dyn Context) -> Result<(), WaferError> {
     let existing: HashMap<String, _> = variables::list_all(ctx)
         .await
         .map_err(|e| {
-            WaferError::new(
-                e.code,
-                format!(
-                    "seed the shared variables: could not read the variables table, so \
-                     nothing was seeded: {}",
-                    e.message
-                ),
+            crate::blocks::errors::db_failed(
+                "seed the shared variables: could not read the variables table, so nothing \
+                 was seeded",
+                e,
             )
         })?
         .into_iter()
@@ -583,13 +580,10 @@ pub async fn seed_defaults(ctx: &dyn Context) -> Result<(), WaferError> {
     block_settings::upsert_fields(ctx, ADMIN_BLOCK_NAME, patch)
         .await
         .map_err(|e| {
-            WaferError::new(
-                e.code,
-                format!(
-                    "seed the shared variables: every key was seeded, but recording the seed \
-                     (block_settings.seed_defaults_hash) failed: {}",
-                    e.message
-                ),
+            crate::blocks::errors::db_failed(
+                "seed the shared variables: every key was seeded, but recording the seed \
+                 (block_settings.seed_defaults_hash) failed",
+                e,
             )
         })
 }
@@ -597,29 +591,36 @@ pub async fn seed_defaults(ctx: &dyn Context) -> Result<(), WaferError> {
 /// The error for a seed whose writes to `failed` keys failed, of `declared`
 /// keys it attempted.
 ///
-/// Its code is `Unavailable` only when every failure was: then a retry may
-/// clear all of them, and the runtime's retry of a transient `Init` is the
-/// right answer. One write the database refused for any other reason will
-/// not clear by retrying, so its code wins.
+/// Classified by the rule every `Init` failure is
+/// ([`wafer_run::init_failure_is_transient`]): when every failure is
+/// transient — the database unreachable, or the invocation's call budget
+/// spent — a retry may clear all of them, so the error is the first failure
+/// itself (its code and its detail code, which is how the budget's
+/// `ResourceExhausted` reads as transient) with this seed's message. One
+/// write refused for any other reason will not clear by retrying, so the
+/// first such failure is the one carried.
 fn failed_writes(failed: &[(&str, WaferError)], declared: usize) -> WaferError {
-    let code = failed
+    let transient = |e: &WaferError| wafer_run::init_failure_is_transient(e.code, e.detail_code());
+    let carried = failed
         .iter()
-        .map(|(_, e)| e.code)
-        .find(|code| *code != ErrorCode::Unavailable)
-        .unwrap_or(ErrorCode::Unavailable);
+        .map(|(_, e)| e)
+        .find(|e| !transient(e))
+        .or_else(|| failed.first().map(|(_, e)| e))
+        .cloned()
+        .unwrap_or_else(|| WaferError::new(ErrorCode::Internal, "no write failed"));
     let keys = failed
         .iter()
         .map(|(key, e)| format!("{key} ({})", e.message))
         .collect::<Vec<_>>()
         .join("; ");
-    WaferError::new(
-        code,
-        format!(
+    WaferError {
+        message: format!(
             "seed the shared variables: {} of {declared} keys could not be written, and the \
              seed is left unrecorded so the next provisioning build runs it again: {keys}",
             failed.len()
         ),
-    )
+        ..carried
+    }
 }
 
 #[cfg(test)]
@@ -1124,6 +1125,40 @@ mod tests {
                 .is_some(),
             "precondition: the seed's writes landed"
         );
+    }
+
+    /// The seed's error is transient only when every failed write was, so
+    /// the runtime retries a transient `Init` and nothing else — and a write
+    /// the invocation's call budget refused is transient, by its detail code.
+    #[test]
+    fn a_failed_seed_is_transient_only_when_every_write_was() {
+        use wafer_block::wire::database::CALL_BUDGET_EXHAUSTED;
+        let budget = || {
+            WaferError::new(ErrorCode::ResourceExhausted, "no call left")
+                .with_detail_code(CALL_BUDGET_EXHAUSTED)
+        };
+        let transient =
+            |e: &WaferError| wafer_run::init_failure_is_transient(e.code, e.detail_code());
+
+        let spent = failed_writes(
+            &[
+                ("A", budget()),
+                ("B", WaferError::new(ErrorCode::Unavailable, "d1 down")),
+            ],
+            9,
+        );
+        assert_eq!(spent.detail_code(), Some(CALL_BUDGET_EXHAUSTED));
+        assert!(transient(&spent), "{spent:?}");
+
+        let mixed = failed_writes(
+            &[
+                ("A", budget()),
+                ("B", WaferError::new(ErrorCode::InvalidArgument, "refused")),
+            ],
+            9,
+        );
+        assert_eq!(mixed.code, ErrorCode::InvalidArgument);
+        assert!(!transient(&mixed), "{mixed:?}");
     }
 
     /// The seed's error is `Unavailable` only when every failed write was,

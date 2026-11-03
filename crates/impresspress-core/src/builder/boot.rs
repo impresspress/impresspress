@@ -132,6 +132,36 @@ pub struct StepOutcome {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Whether the failure may clear on a fresh attempt — an unreachable
+    /// store, or the invocation's spent database call budget — by the rule
+    /// every `Init` failure is classified with
+    /// ([`wafer_run::init_failure_is_transient`]). Kept from the step's typed
+    /// error, never read back from `error`'s text. `false` on success.
+    ///
+    /// Additive on the wire: written only when `true`, and an absent field
+    /// reads `false`, the class every failure had before it existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub transient: bool,
+}
+
+impl StepOutcome {
+    /// A step that succeeded.
+    pub fn succeeded() -> Self {
+        Self {
+            ok: true,
+            error: None,
+            transient: false,
+        }
+    }
+
+    /// A step that failed with `error`, transiently or not.
+    pub fn failed(error: String, transient: bool) -> Self {
+        Self {
+            ok: false,
+            error: Some(error),
+            transient,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +170,37 @@ pub struct BlockInitOutcome {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Whether the block's `Init` failed transiently ([`InitError::Transient`]).
+    /// See [`StepOutcome::transient`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub transient: bool,
+}
+
+impl BlockInitOutcome {
+    /// `block`'s `Init` succeeded.
+    pub fn succeeded(block: &str) -> Self {
+        Self {
+            block: block.to_string(),
+            ok: true,
+            error: None,
+            transient: false,
+        }
+    }
+
+    /// `block`'s `Init` failed with `error`.
+    pub fn failed(block: &str, error: &InitError) -> Self {
+        Self {
+            block: block.to_string(),
+            ok: false,
+            error: Some(error.to_string()),
+            transient: matches!(error, InitError::Transient(_)),
+        }
+    }
+}
+
+/// `skip_serializing_if` for the `transient` flags.
+fn is_false(flag: &bool) -> bool {
+    !flag
 }
 
 /// Per-step outcome of one [`boot`] call, and the `/_deploy/init` and
@@ -186,6 +247,27 @@ pub struct BootReport {
     pub degraded: Vec<DegradedBlock>,
     /// True iff every step and every block init succeeded.
     pub ok: bool,
+}
+
+impl BootReport {
+    /// Whether this report failed only in ways a fresh attempt may clear:
+    /// it is not `ok`, and every failed step and block `Init` is
+    /// `transient`. What `/_deploy/init|prepare` answers 503 (retry) rather
+    /// than 500 (fix) on — a database outage, or a migration the
+    /// invocation's call budget refused, whose ledger lets the next attempt
+    /// resume where this one stopped.
+    pub fn failed_transiently(&self) -> bool {
+        let steps = [&self.grants, &self.seed]
+            .into_iter()
+            .filter(|step| !step.ok)
+            .map(|step| step.transient);
+        let blocks = self
+            .blocks
+            .iter()
+            .filter(|block| !block.ok)
+            .map(|block| block.transient);
+        !self.ok && steps.chain(blocks).all(|transient| transient)
+    }
 }
 
 /// A block an [`InitPolicy::Serving`] boot published without.
@@ -399,10 +481,7 @@ pub async fn boot(
                     tracing::info!(count = loaded.len(), "registering database WRAP grants");
                     wafer.add_wrap_grants(loaded)?;
                 }
-                StepOutcome {
-                    ok: true,
-                    error: None,
-                }
+                StepOutcome::succeeded()
             }
             Err(e) => {
                 if policy == InitPolicy::Serving {
@@ -410,6 +489,7 @@ pub async fn boot(
                     // (500) stay apart — never classified from a string.
                     return Err(BootError::Grants(e));
                 }
+                let transient = wafer_run::init_failure_is_transient(e.code(), e.detail_code());
                 let error = format!("load the admin-created WRAP grants: {e}");
                 if policy == InitPolicy::Tolerant {
                     tracing::error!(
@@ -417,16 +497,10 @@ pub async fn boot(
                         "booting without the admin-created WRAP grants",
                     );
                 }
-                StepOutcome {
-                    ok: false,
-                    error: Some(error),
-                }
+                StepOutcome::failed(error, transient)
             }
         },
-        GrantSource::PreInstalled(_because) => StepOutcome {
-            ok: true,
-            error: None,
-        },
+        GrantSource::PreInstalled(_because) => StepOutcome::succeeded(),
     };
 
     // 2. Seal.
@@ -444,11 +518,7 @@ pub async fn boot(
     //    complete.
     if names.iter().any(|name| name == admin_id) {
         match wafer.init_block(admin_id).await {
-            Ok(_) => blocks.push(BlockInitOutcome {
-                block: admin_id.to_string(),
-                ok: true,
-                error: None,
-            }),
+            Ok(_) => blocks.push(BlockInitOutcome::succeeded(admin_id)),
             Err(error) => {
                 if policy != InitPolicy::Reported {
                     return Err(BootError::BlockInit {
@@ -456,26 +526,16 @@ pub async fn boot(
                         error,
                     });
                 }
-                blocks.push(BlockInitOutcome {
-                    block: admin_id.to_string(),
-                    ok: false,
-                    error: Some(error.to_string()),
-                });
+                blocks.push(BlockInitOutcome::failed(admin_id, &error));
             }
         }
     }
 
     // 4. Seed + publish.
     let seed = match hooks.seed_after_admin_init(wafer).await {
-        Ok(()) => StepOutcome {
-            ok: true,
-            error: None,
-        },
+        Ok(()) => StepOutcome::succeeded(),
         Err(e) => match policy {
-            InitPolicy::Reported => StepOutcome {
-                ok: false,
-                error: Some(e.to_string()),
-            },
+            InitPolicy::Reported => StepOutcome::failed(e.to_string(), e.is_transient()),
             InitPolicy::Tolerant | InitPolicy::Serving => return Err(BootError::Seed(e)),
         },
     };
@@ -489,11 +549,7 @@ pub async fn boot(
             continue;
         }
         match wafer.init_block(name).await {
-            Ok(_) => blocks.push(BlockInitOutcome {
-                block: name.clone(),
-                ok: true,
-                error: None,
-            }),
+            Ok(_) => blocks.push(BlockInitOutcome::succeeded(name)),
             Err(error) => {
                 match policy {
                     InitPolicy::Serving => {
@@ -522,11 +578,7 @@ pub async fn boot(
                     }
                     InitPolicy::Reported => {}
                 }
-                blocks.push(BlockInitOutcome {
-                    block: name.clone(),
-                    ok: false,
-                    error: Some(error.to_string()),
-                });
+                blocks.push(BlockInitOutcome::failed(name, &error));
             }
         }
     }
@@ -966,6 +1018,36 @@ mod tests {
             !taken(&order).contains(&"test/zeta".to_string()),
             "no block after the failing one may initialize",
         );
+    }
+
+    /// The `transient` flags are additive on the wire: written only when
+    /// set, and a report from a Worker that predates them reads as every
+    /// failure permanent — the class it was answered with.
+    #[test]
+    fn the_transient_flag_is_written_only_when_set() {
+        let transient = BlockInitOutcome::failed("a/b", &InitError::Transient("down".into()));
+        assert_eq!(
+            serde_json::to_value(&transient).unwrap(),
+            serde_json::json!({
+                "block": "a/b",
+                "ok": false,
+                "error": "transient init failure: down",
+                "transient": true,
+            })
+        );
+        let permanent = StepOutcome::failed("bad".into(), false);
+        assert_eq!(
+            serde_json::to_value(&permanent).unwrap(),
+            serde_json::json!({"ok": false, "error": "bad"})
+        );
+        assert_eq!(
+            serde_json::to_value(StepOutcome::succeeded()).unwrap(),
+            serde_json::json!({"ok": true})
+        );
+        let older: BlockInitOutcome =
+            serde_json::from_value(serde_json::json!({"block": "a/b", "ok": false, "error": "x"}))
+                .unwrap();
+        assert!(!older.transient);
     }
 
     /// `Serving` publishes past a block whose `Init` failed **transiently**:
