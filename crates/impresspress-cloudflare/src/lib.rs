@@ -182,10 +182,11 @@ pub fn init_isolate() {
 /// The most verbose `tracing` level a Worker writes to its console: warnings
 /// and errors.
 ///
-/// Those are the framework's failure signals, and what a response's
-/// reference points at: a refused dispatch's cause under its `ref`
-/// (wafer-run), a block a runtime was published without, a request log that
-/// could not be written. `info` and `debug` events fire on every runtime
+/// Those are the framework's failure signals: a block a runtime was
+/// published without, a block whose `Init` keeps failing the same way
+/// (`runtime_health`), and — from the wafer-run that logs a refused
+/// dispatch's cause under the `ref` its body names — that cause. `info` and
+/// `debug` events fire on every runtime
 /// build and many requests ("registering database WRAP grants", cache
 /// outcomes), and on Workers each console line is a Workers Logs event,
 /// which the Free plan meters per day: keeping them would spend that
@@ -2927,19 +2928,17 @@ mod console_tracing_tests {
     /// **A framework `tracing::warn!` reaches the Worker console** once the
     /// isolate is initialized, at its own level; an `info!` does not
     /// (`CONSOLE_TRACING_MAX_LEVEL`). Before, no subscriber was installed and
-    /// every such line — the cause a refused dispatch's `ref` points at —
-    /// was dropped.
+    /// every such line was dropped. The warning carries its fields in the `%`
+    /// shape wafer-run's refusal logs its reference and cause with.
     #[wasm_bindgen_test]
     fn a_framework_warning_reaches_the_worker_console() {
         crate::init_isolate();
         let warn = ConsoleSpy::on("warn");
         let error = ConsoleSpy::on("error");
         let log = ConsoleSpy::on("log");
-        tracing::warn!(
-            correlation_id = "0123456789abcdef",
-            error = "D1 down",
-            "dispatch refused"
-        );
+        // The `%` (Display) field shape wafer-run's refusal uses.
+        let (reference, cause) = ("0123456789abcdef", "D1 down");
+        tracing::warn!(correlation_id = %reference, error = %cause, "dispatch refused");
         tracing::error!("an error line");
         tracing::info!("a routine line");
         let (warned, errored, logged) = (warn.lines(), error.lines(), log.lines());
@@ -2967,9 +2966,16 @@ mod console_tracing_tests {
     fn a_second_install_is_refused_without_a_panic() {
         crate::init_isolate();
         crate::init_isolate();
+        // `init_isolate` installed it: asked before this test installs
+        // anything itself, so a revert of that install fails here and leaves
+        // no subscriber for the console test to pass on.
+        assert!(
+            tracing::dispatcher::has_been_set(),
+            "init_isolate installed no tracing subscriber"
+        );
         assert!(
             !crate::install_console_tracing(),
-            "the first install stands"
+            "a second install must be refused, leaving init_isolate's subscriber in place"
         );
     }
 }

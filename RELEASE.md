@@ -23,8 +23,9 @@ what it did happens on every native boot.
 
 **What changes.** A Worker installed no `tracing` subscriber, so every
 `tracing::warn!`/`error!` from `impresspress-core` and `wafer-run` was
-dropped: a block published without during an outage, an audit row that
-could not be written, a refused dispatch's cause. `init_isolate` now installs
+dropped: a runtime published without a block whose `Init` failed during an
+outage, and a block whose `Init` keeps failing the same way in every runtime
+built for minutes. `init_isolate` now installs
 one that writes **warnings and errors** to the console (`wrangler tail`,
 Workers Logs), each as `target message key=value …`. `info` and `debug`
 framework events stay off: they fire on routine builds and requests, and
