@@ -4603,7 +4603,7 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The gate (CPU-GATE review PR 1): a retry reads the variables table
+    // The gate (see the module docs): a retry reads the variables table
     // before it builds anything.
     // -----------------------------------------------------------------------
 

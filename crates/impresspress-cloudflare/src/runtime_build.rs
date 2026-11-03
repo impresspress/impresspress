@@ -1041,7 +1041,7 @@ mod tests {
     }
 
     /// **The gate's read is classified, and a failure is remembered by the
-    /// snapshot the build would read through** (CPU-GATE review PR 1): an
+    /// snapshot the build would read through** (the retry window's gate): an
     /// outage is `Unavailable` (the window doubles and nothing is built), a
     /// fault is the 500, and either way the snapshot replays the failure to
     /// every config reader, so a cold isolate that builds anyway (Decision 1)

@@ -2227,7 +2227,7 @@ async fn boot_prepared_while_variables_fail(
 }
 
 /// **A cold prepared build handed the gate's failed read sends the variables
-/// table nothing** (CPU-GATE review PR 1, acceptance 8): a cold isolate whose
+/// table nothing** (CPU-GATE review, acceptance 8): a cold isolate whose
 /// gate failed builds anyway (Decision 1) over the snapshot the gate filled,
 /// which replays the failure to every config reader. So the boot publishes
 /// degraded without a second variables statement — even with the database
