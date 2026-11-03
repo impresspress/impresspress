@@ -6,6 +6,16 @@ import { join } from "node:path";
 
 import { sleep } from "../harness.mjs";
 
+/**
+ * What the D1 wrapper's `quota` mode throws: part of the text D1 answered in
+ * the 2026-10-30 outage (`workers/d1-control.mjs`). The cause a refusal's log
+ * line must carry in that mode.
+ */
+export const QUOTA_CAUSE = "exceeded D1's free tier daily row read limit";
+
+/** The block a request to `/b/auth/login` is dispatched to. */
+export const AUTH_UI = "impresspress/auth-ui";
+
 /** The isolate's retry window doubles from 1 s (`RETRY_WINDOW_BASE_MS`) to 60 s. */
 export const WINDOW_BASE_MS = 1_000;
 export const WINDOW_CAP_MS = 60_000;
@@ -30,11 +40,76 @@ export function staticAssetPath(deployment) {
   return `/b/static/${css}`;
 }
 
-/** An outage answer: 503, a `Retry-After` of at least a second, a body a person can read. */
+/**
+ * Text a client must never be sent, because it is the cause and not the
+ * answer: D1's own error text, an `Init` failure as wafer-run words it, a
+ * table name, the call budget's message and its numbers. A cause belongs in
+ * the Worker's log, under the reference the body names.
+ */
+const CAUSE_TEXTS = [
+  /D1_ERROR/i,
+  /SQLITE/i,
+  /no such table/i,
+  /exceeded D1/i,
+  /impresspress__/,
+  /init (transient|permanent) failure/i,
+  /not initialized in this runtime/i,
+  /config (fetch failed|source fault)/i,
+  /call budget/i,
+  /\d+ D1 calls?/i,
+];
+
+/** Fail if `body` carries any of the [`CAUSE_TEXTS`]. */
+export function assertNoCause(body, what) {
+  for (const cause of CAUSE_TEXTS) {
+    assert.ok(!cause.test(body), `${what}: the body carries the cause (${cause}): ${body.slice(0, 300)}`);
+  }
+}
+
+/**
+ * An outage answer: 503, a `Retry-After` of at least a second, a body a
+ * person can read, and none of the cause in it. Holds for every 503 shape:
+ * a refused dispatch (`assertRefused`), the edge's own plain-text body (no
+ * runtime), a stored-config read failing closed, and `/health`'s report.
+ */
 export function assertUnavailable(answer, what) {
   assert.equal(answer.status, 503, `${what}: status (body: ${answer.body.slice(0, 200)})`);
   assert.ok(answer.retryAfter >= 1, `${what}: Retry-After is ${answer.retryAfter}`);
   assert.ok(answer.body.trim().length > 0, `${what}: an empty body`);
+  assertNoCause(answer.body, what);
+}
+
+/**
+ * The refusal of a dispatch to `block`, which wafer-run answers for a block
+ * whose `Init` has not succeeded in this runtime: an outage answer whose body
+ * is exactly `{"error":"Unavailable","message":"block `<block>` is
+ * temporarily unavailable (ref: <16 hex>)"}`. Returns the reference; the
+ * cause is in the log under it (`assertCauseLogged`).
+ */
+export function assertRefused(answer, what, block) {
+  assertUnavailable(answer, what);
+  const body = JSON.parse(answer.body);
+  const reference = /^block `([^`]+)` is temporarily unavailable \(ref: ([0-9a-f]{16})\)$/.exec(
+    body.message ?? "",
+  );
+  assert.ok(reference, `${what}: the message is the fixed refusal text: ${answer.body}`);
+  assert.deepEqual(
+    body,
+    { error: "Unavailable", message: body.message },
+    `${what}: the body is the error and the message only`,
+  );
+  assert.equal(reference[1], block, `${what}: the refusal names the block`);
+  return reference[2];
+}
+
+/**
+ * The Worker's log has one line with `correlation_id=<reference>` that also
+ * carries `cause`: what an operator greps for when a client quotes the
+ * reference.
+ */
+export async function assertCauseLogged(deployment, reference, cause, since = 0) {
+  const line = await deployment.logLine((l) => l.includes(`correlation_id=${reference} `), since);
+  assert.ok(line.includes(cause), `the log line under ${reference} names the cause ${JSON.stringify(cause)}: ${line}`);
 }
 
 /** 200, and the body is the page asked for. */
@@ -43,6 +118,51 @@ export function assertServed(answer, what, contains) {
   if (contains !== undefined) {
     assert.ok(answer.body.includes(contains), `${what}: body lacks ${JSON.stringify(contains)}`);
   }
+}
+
+/**
+ * A `/health` report (IP-C, D1 outage plan I6), checked against its own
+ * contract: `Cache-Control: no-store`; for `ok` a 200 whose body is exactly
+ * `{"status":"ok"}` and no `Retry-After`; for every other status a 503 whose
+ * `Retry-After` is its `retry_in`, at most the longest window, and whose body
+ * names no cause. Returns the parsed body.
+ */
+export function assertHealth(answer, what, status) {
+  assert.equal(answer.headers.get("cache-control"), "no-store", `${what}: Cache-Control`);
+  const body = JSON.parse(answer.body);
+  assert.equal(body.status, status, `${what}: status (${answer.body.slice(0, 300)})`);
+  if (status === "ok") {
+    assert.equal(answer.status, 200, `${what}: HTTP status`);
+    assert.deepEqual(body, { status: "ok" }, `${what}: body`);
+    assert.equal(answer.retryAfter, null, `${what}: no Retry-After`);
+    return body;
+  }
+  assertUnavailable(answer, what);
+  assert.equal(answer.retryAfter, body.retry_in, `${what}: Retry-After is retry_in`);
+  assert.ok(body.retry_in <= WINDOW_CAP_MS / 1000, `${what}: retry_in ${body.retry_in} s is past the longest window`);
+  return body;
+}
+
+/**
+ * The `retry_in` a report answered at some instant of `answer`'s flight may
+ * name, for a window that was armed at some instant of `armedBy`'s flight to
+ * end `windowMs` later (the `retry_in_ms` its "runtime retry window armed"
+ * line logs): whole seconds rounded up, at least 1. Bounds from the two
+ * requests' own clocks, so a correct report is inside them however slow the
+ * run.
+ */
+export function windowRetryIn(armedBy, windowMs, answer) {
+  const secs = (ms) => Math.max(1, Math.ceil(ms / 1000));
+  return {
+    min: secs(armedBy.sentAt + windowMs - answer.doneAt),
+    max: secs(armedBy.doneAt + windowMs - answer.sentAt),
+  };
+}
+
+/** The `retry_in_ms` of the first "runtime retry window armed" line since `since`. */
+export async function armedWindowMs(deployment, since) {
+  const line = await deployment.logLine((l) => l.includes("runtime retry window armed"), since);
+  return Number(/retry_in_ms=(\d+)/.exec(line)[1]);
 }
 
 /**

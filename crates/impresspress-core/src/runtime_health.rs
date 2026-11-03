@@ -47,14 +47,24 @@
 //!   several short runs where the failure is one long one. The `error!` log a
 //!   run writes when it reaches [`PERSISTENT_RUNTIMES`] is what outlives the
 //!   isolate (Workers Logs).
-//! - A failure is identified by the **first** transient text its message
-//!   contains ([`transient_text`](crate::sqlite_text_error::transient_text)).
-//!   So two different texts can share one identity and extend one run (`D1_ERROR:
+//! - A failure is identified by the **first** transient text its `Init`
+//!   error contains ([`transient_text`](crate::sqlite_text_error::transient_text)),
+//!   or by the whole error when it contains none. The backend's text reaches
+//!   the error only when the platform itself read the database, as for a
+//!   config-declaring block whose variables snapshot failed. On that path,
+//!   two different texts can share one identity and extend one run (`D1_ERROR:
 //!   Internal error in D1 DB storage caused object to be reset` and `D1_ERROR:
 //!   internal error; reference = …` are both `D1_ERROR: internal error`), and
-//!   one cause that surfaces as alternating texts (a self-inflicted reset
-//!   seen by one attempt as the reset, by the next as `Network connection
-//!   lost`) restarts its run on each change.
+//!   one cause that surfaces as alternating texts restarts its run on each
+//!   change.
+//! - A block's own `Init` statement, sent through
+//!   `wafer_core::clients::database`, sees only the database handler's
+//!   scrubbed `database temporarily unavailable` (the D1 text is logged, not
+//!   returned). Every transient database failure of that block is therefore
+//!   one identity. Alternating texts extend its run, and so does an unrelated
+//!   transient cause that follows, such as an outage after a self-inflicted
+//!   reset. A run can then span two causes, and its `since` can predate the
+//!   current one.
 
 use std::{cell::Cell, collections::BTreeMap};
 

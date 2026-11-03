@@ -24,7 +24,7 @@
 // local KV behind a wrapper (`workers/kv-ledger.mjs`) that reports each call
 // to the same control Worker.
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,13 +88,32 @@ function checkWorkerBuild() {
   }
 }
 
+const DRIVER = ["run", "--quiet", "--locked", "-p", "impresspress", "--example", "miniflare_deploy", "--"];
+
 /** Run the deploy driver (`miniflare_deploy`), the CLI's own build and packaging. */
 function driver(args) {
-  execFileSync(
-    "cargo",
-    ["run", "--quiet", "--locked", "-p", "impresspress", "--example", "miniflare_deploy", "--", ...args],
-    { cwd: REPO, stdio: "inherit", env: { ...process.env, ...LOADER_ENV } },
-  );
+  execFileSync("cargo", [...DRIVER, ...args], {
+    cwd: REPO,
+    stdio: "inherit",
+    env: { ...process.env, ...LOADER_ENV },
+  });
+}
+
+/**
+ * Run the deploy driver without blocking this process, for a step that sends
+ * requests to the running Worker: Miniflare's log streams are read on this
+ * process's event loop, and a blocked loop would stall a Worker that logs.
+ * Resolves to `{ ok, output }`, its exit status and combined output.
+ */
+function driverAsync(args) {
+  return new Promise((resolve) => {
+    execFile(
+      "cargo",
+      [...DRIVER, ...args],
+      { cwd: REPO, env: { ...process.env, ...LOADER_ENV }, maxBuffer: 16 * 1024 * 1024 },
+      (error, stdout, stderr) => resolve({ ok: error === null, output: `${stdout}${stderr}` }),
+    );
+  });
 }
 
 /**
@@ -272,6 +291,10 @@ export class Deployment {
     this.stage = stage;
     this.startVars = vars;
     this.mf = new Miniflare({
+      // A loopback port of its own, so the CLI's deploy smoke (`smoke()`) can
+      // reach the Worker over HTTP as it reaches a preview URL.
+      host: "127.0.0.1",
+      port: 0,
       workers: [
         worker,
         {
@@ -313,7 +336,7 @@ export class Deployment {
         }
       },
     });
-    await this.mf.ready;
+    this.url = (await this.mf.ready).toString();
     if (!this.r2Seeded) {
       await this.seedR2(bucket.binding);
       this.r2Seeded = true;
@@ -386,6 +409,27 @@ export class Deployment {
     if (answer.status !== 200) throw new Error(await answer.text());
   }
 
+  /**
+   * Hold every D1 call from now on: each waits, before the mode applies,
+   * until `release()`. For a request that has to be in flight while another
+   * is served.
+   */
+  async hold() {
+    const answer = await this.control("/hold", { method: "PUT" });
+    if (answer.status !== 200) throw new Error(await answer.text());
+  }
+
+  /** Let the held D1 calls go on (in the mode then set), and stop holding. */
+  async release() {
+    const answer = await this.control("/release", { method: "PUT" });
+    if (answer.status !== 200) throw new Error(await answer.text());
+  }
+
+  /** How many D1 calls are waiting on `hold()`. */
+  async held() {
+    return (await (await this.control("/calls")).json()).held;
+  }
+
   /** Every D1 call the fixture has made since this process started. */
   async calls() {
     return (await (await this.control("/calls")).json()).calls;
@@ -433,9 +477,37 @@ export class Deployment {
     }
   }
 
-  /** A position in the Worker's log, for `d1Costs(since)`. */
+  /** A position in the Worker's log, for `d1Costs(since)` and `logLine`. */
   mark() {
     return this.logs.length;
+  }
+
+  /**
+   * The first Worker log line since `since` (a `mark()`) that `matches`,
+   * waiting for it: the Worker writes a line before it answers, but its
+   * stream reaches this process later. The deadline only stops a hung run.
+   */
+  async logLine(matches, since = 0, { withinMs = 10_000 } = {}) {
+    const deadline = Date.now() + withinMs;
+    for (;;) {
+      const line = this.logs.slice(since).find(matches);
+      if (line !== undefined) return line;
+      if (Date.now() > deadline) {
+        throw new Error(`no Worker log line matched within ${withinMs} ms\n${this.tail()}`);
+      }
+      await sleep(50);
+    }
+  }
+
+  /**
+   * The CLI's pre-promotion smoke against the running version, as
+   * `impresspress deploy` runs it on the final candidate's preview
+   * (`miniflare_deploy smoke`): the `/health` GET, then the 160-request
+   * concurrency smoke over the config's `deploy_smoke_paths`. Resolves to
+   * `{ ok, output }`; `ok` false is a deploy that stops before promotion.
+   */
+  async smoke() {
+    return driverAsync(["smoke", FIXTURE, this.url, DEPLOY_TOKEN]);
   }
 
   /** The `metric=d1_cost` lines logged since `since` (a `mark()`), parsed. */

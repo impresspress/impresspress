@@ -2663,6 +2663,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "impresspress-cloudflare",
+ "impresspress-core",
  "serde_json",
  "wafer-block",
  "wafer-core",

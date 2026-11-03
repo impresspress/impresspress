@@ -4,6 +4,12 @@
 
 import budgetRehearsal from "./budget-rehearsal.mjs";
 import dynamicPath from "./dynamic-path.mjs";
+import deploySmoke from "./deploy-smoke.mjs";
+import healthBlockInit from "./health-block-init.mjs";
+import healthDegraded from "./health-degraded.mjs";
+import healthFailed from "./health-failed.mjs";
+import healthStale from "./health-stale.mjs";
+import healthStalePlan from "./health-stale-plan.mjs";
 import permanentFault from "./permanent-fault.mjs";
 import preparedImpresspressSite from "./prepared-impresspress-site.mjs";
 import preparedWaferSite from "./prepared-wafer-site.mjs";
@@ -16,4 +22,10 @@ export default [
   dynamicPath,
   stalePlan,
   budgetRehearsal,
+  healthDegraded,
+  healthStale,
+  healthStalePlan,
+  healthFailed,
+  healthBlockInit,
+  deploySmoke,
 ];
