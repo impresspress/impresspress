@@ -643,7 +643,6 @@ async fn respond_flow(
     path: &str,
     cookie: Option<&str>,
 ) -> http_codec::HttpResponseParts {
-    deferred::set_mode(DeferMode::Queued);
     let mut headers = vec![
         ("host", "localhost".to_string()),
         ("accept", "text/html".to_string()),
@@ -653,6 +652,20 @@ async fn respond_flow(
     if let Some(token) = cookie {
         headers.push(("cookie", format!("auth_token={token}")));
     }
+    respond(wafer, db, flow, path, &headers).await
+}
+
+/// A `GET path` with `headers` through `flow`, as the Worker serves it: the
+/// whole response the client receives, then the audit row and the deferred
+/// work the request handed off.
+async fn respond(
+    wafer: &Wafer,
+    db: &Arc<dyn DatabaseService>,
+    flow: &str,
+    path: &str,
+    headers: &[(&str, String)],
+) -> http_codec::HttpResponseParts {
+    deferred::set_mode(DeferMode::Queued);
     let msg = http_codec::build_http_message(
         "GET",
         path,
@@ -2286,6 +2299,157 @@ async fn a_serving_boot_over_a_variables_outage_publishes_degraded() {
         sent.is_empty(),
         "the dispatch ran no Init on `{degraded_block}` — an Init would read its config: {sent:#?}"
     );
+}
+
+/// **A degraded block's 503 tells the client nothing of the cause**, on
+/// every way a client reaches it — a page, an htmx swap and an API call —
+/// and on both of wafer-run's refusal branches. The refusal is the runtime's
+/// (the block's handler never runs), and before wafer-run sanitized it the
+/// body quoted the block's `Init` error — the D1 text, a table name, the
+/// call budget's numbers.
+///
+/// **And the cause is on the console line the body's reference names.** The
+/// framework's `tracing` events are captured through the console subscriber
+/// the Cloudflare Worker installs, at the Worker's own level
+/// (`console_tracing::WORKER_MAX_LEVEL`), so the line asserted is the one
+/// `wrangler tail` shows: an operator holding the client's `(ref: X)` finds
+/// `correlation_id=X` and the D1 cause on one line.
+///
+/// Each request takes a known branch rather than whichever the clock gives
+/// it (the slot's transient backoff is 100 ms after a failed `Init`, doubling):
+/// - **past the backoff** (`not_initialized_error`, the line's
+///   `last_failure=`): the request waits until the slot reports no backoff
+///   left — every request a long-lived degraded runtime refuses;
+/// - **inside the backoff** (`init_error_to_wafer_error`, the line's
+///   `error=`): `init_block` re-fails the `Init` over the still-failing
+///   variables table right before the request, re-arming the backoff — the
+///   branch the first request after a rebuild takes, and the one that leaked
+///   D1's text in the Miniflare harness.
+#[tokio::test]
+async fn a_degraded_block_answers_503_without_its_cause() {
+    let _generation = GENERATION.lock().await;
+    let console: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let sink = Arc::clone(&console);
+    let _console =
+        tracing::subscriber::set_default(impresspress_core::console_tracing::ConsoleTracing::new(
+            impresspress_core::console_tracing::WORKER_MAX_LEVEL,
+            move |_level, line| sink.lock().expect("console lines").push(line),
+        ));
+    let page = vec![
+        ("host", "localhost".to_string()),
+        ("accept", "text/html".to_string()),
+        ("sec-fetch-mode", "navigate".to_string()),
+    ];
+    // A swap is a fetch from the page, never a navigation.
+    let htmx = vec![
+        ("host", "localhost".to_string()),
+        ("accept", "*/*".to_string()),
+        ("sec-fetch-mode", "cors".to_string()),
+        ("hx-request", "true".to_string()),
+    ];
+    let api = vec![
+        ("host", "localhost".to_string()),
+        ("accept", "application/json".to_string()),
+    ];
+    let auth_ui = "impresspress/auth-ui";
+    for (fault, cause) in [
+        (Fault::Unavailable, "injected outage"),
+        (Fault::CallBudgetExhausted, "Too many API requests"),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("d1.sqlite3");
+        let ledger = Arc::new(Ledger::default());
+        let plan = provision(&cold(&path, &ledger)).await;
+
+        let (booted, wafer, db) =
+            boot_prepared_while_variables_fail(&path, &ledger, &plan, fault.clone()).await;
+        let report = booted.expect("an outage publishes degraded");
+        assert!(
+            report.degraded.iter().any(|d| d.block == auth_ui),
+            "{fault:?}: `{auth_ui}` is degraded: {report:?}"
+        );
+
+        for (branch, line_marks) in [
+            (
+                "past the backoff",
+                [
+                    "the block is not initialized in this runtime",
+                    "last_failure=",
+                ],
+            ),
+            (
+                "inside the backoff",
+                ["the block's Init failed transiently", "error="],
+            ),
+        ] {
+            for (shape, headers) in [("page", &page), ("htmx", &htmx), ("api", &api)] {
+                let what = format!("{fault:?} {branch} {shape}");
+                if branch == "past the backoff" {
+                    wait_out_the_backoff(&wafer, auth_ui).await;
+                } else {
+                    wafer
+                        .init_block(auth_ui)
+                        .await
+                        .expect_err("the Init fails again over the failing table");
+                }
+                let response = respond(&wafer, &db, "site-main", "/b/auth/login", headers).await;
+                let body = String::from_utf8_lossy(&response.body);
+                assert_eq!(response.status, 503, "{what}: {body}");
+                for quoted in [
+                    "D1_ERROR",
+                    "injected",
+                    "Too many API requests",
+                    variables::TABLE,
+                    "init transient failure",
+                    "not initialized in this runtime",
+                ] {
+                    assert!(
+                        !body.contains(quoted),
+                        "{what}: the body quotes the cause ({quoted:?}): {body}"
+                    );
+                }
+                let message = serde_json::from_slice::<Value>(&response.body)
+                    .unwrap_or_else(|e| panic!("{what}: a JSON body ({e}): {body}"))["message"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{what}: a message: {body}"))
+                    .to_string();
+                let reference = message
+                    .strip_prefix(&format!(
+                        "block `{auth_ui}` is temporarily unavailable (ref: "
+                    ))
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    .unwrap_or_else(|| panic!("{what}: not the sanitized refusal: {message}"));
+                let lines = console.lock().expect("console lines");
+                assert!(
+                    lines.iter().any(|line| {
+                        line.contains(&format!("correlation_id={reference}"))
+                            && line.contains(auth_ui)
+                            && line_marks.iter().all(|mark| line.contains(mark))
+                            && line.contains(cause)
+                    }),
+                    "{what}: no console line of this branch ({line_marks:?}) names \
+                     `{reference}` and the cause ({cause:?}): {lines:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// Wait until `block`'s slot has no transient backoff left, so the next
+/// dispatch to it takes `InitWait::Refuse`'s "not initialized" branch.
+async fn wait_out_the_backoff(wafer: &Wafer, block: &str) {
+    for _ in 0..200 {
+        match wafer.init_states().get(block) {
+            Some(wafer_run::BlockInitState::Retrying { retry_in, .. }) if retry_in.is_zero() => {
+                return
+            }
+            Some(wafer_run::BlockInitState::Retrying { retry_in, .. }) => {
+                tokio::time::sleep(*retry_in + Duration::from_millis(1)).await;
+            }
+            other => panic!("`{block}` is not retrying: {other:?}"),
+        }
+    }
+    panic!("`{block}`'s backoff never ran out");
 }
 
 /// **A deploy funnel under a spent D1 call budget reports the budget, as a

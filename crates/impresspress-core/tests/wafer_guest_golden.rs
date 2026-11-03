@@ -656,8 +656,8 @@ async fn a_table_without_updated_at_fails_the_blocks_init_by_name() {
         .register_block("site/nostamp", Arc::new(block))
         .expect("register site/nostamp");
     // `start` tolerates a block whose `Init` fails (logged), as the
-    // sandbox's runtime does; the block then answers every call with that
-    // failure.
+    // sandbox's runtime does; the block then refuses every call, and the
+    // cause stays in its slot and the log.
     let wafer = wafer.start().await.expect("start the runtime");
     let answer = wafer
         .run_block(
@@ -676,10 +676,21 @@ async fn a_table_without_updated_at_fails_the_blocks_init_by_name() {
         ),
         Err(error) => format!("{error:?}"),
     };
+    // The refusal a caller gets names the block and a reference, never the
+    // cause (wafer-run logs that under the reference); the block's failed
+    // slot keeps the cause, and it names the table and the column.
     assert!(
-        error.contains("`updated_at`") && error.contains("site__nostamp__subscribers"),
-        "the refusal names the table and the column: {error}"
+        error.contains("block `site/nostamp` failed to initialize (ref: ")
+            && !error.contains("site__nostamp__subscribers"),
+        "the refusal is the sanitized one: {error}"
     );
+    match wafer.init_states().get("site/nostamp") {
+        Some(wafer_run::BlockInitState::Failed { reason }) => assert!(
+            reason.contains("`updated_at`") && reason.contains("site__nostamp__subscribers"),
+            "the Init failure names the table and the column: {reason}"
+        ),
+        other => panic!("`site/nostamp`'s Init must have failed permanently: {other:?}"),
+    }
 }
 
 /// `site/my-shop` and `site/myshop` are two blocks with two sets of tables:
