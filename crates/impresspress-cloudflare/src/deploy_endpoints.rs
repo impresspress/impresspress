@@ -22,7 +22,10 @@ use wafer_core::interfaces::storage::service::StorageService;
 use crate::{
     environment::{packaged_prepared_runtime_plan, CfEnvironment},
     kv_cached_db, request_services, runner,
-    runtime_build::{boot_deploy_runtime, build_runtime},
+    runtime_build::{
+        boot_deploy_runtime, build_runtime, fresh_variables_snapshot, open_build_database,
+        read_block_settings, BuildSource,
+    },
     services::{make_kv_backend, make_r2_storage_service},
 };
 
@@ -98,21 +101,38 @@ where
     // Fresh runtime (never the request cache) with run_migrations forced on,
     // so slot-cached pre-migration outcomes can't leak into the funnel.
     let out = async {
-        let mut built = build_runtime(
+        let db = open_build_database(
             &env,
             &environment,
             calls,
-            &request_config,
-            None,
-            register_blocks,
-            register_post_build,
-            true,
             kv_cached_db::CacheMode {
                 read_through: true,
                 bump_on_write: false,
             },
         )
-        .await
+        .map_err(|e| FunnelFailure::new(e.is_unavailable(), e))?;
+        let block_settings = read_block_settings(&db)
+            .await
+            .map_err(|e| FunnelFailure::new(e.is_unavailable(), e))?;
+        // A fresh, unread variables snapshot — never one the request path's
+        // gate read: provisioning seeds the table inside this boot (admin's
+        // `Init`), and the config-write generation that seeding bumps is what
+        // makes the snapshot read it afterwards. A read here would also be a
+        // statement the funnel never sent before.
+        let mut built = build_runtime(
+            &env,
+            &environment,
+            &request_config,
+            None,
+            register_blocks,
+            register_post_build,
+            true,
+            BuildSource {
+                db,
+                block_settings,
+                variables: fresh_variables_snapshot(),
+            },
+        )
         .map_err(|e| FunnelFailure::new(e.is_unavailable(), e))?;
         let report = boot_deploy_runtime(&mut built)
             .await

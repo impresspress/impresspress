@@ -83,6 +83,14 @@ pub enum CacheOutcome {
     /// a stale plan hydrated during an outage included, reports `ColdBuilt` or
     /// `Rebuilt` instead, so `Server-Timing` carries its build.
     Stale,
+    /// The retry window had ended, so this request checked the backend before
+    /// rebuilding anything (one read of the variables table: the Cloudflare
+    /// runtime cache's gate), and the check failed: nothing was built, the
+    /// window was re-armed, and the runtime this isolate already had was
+    /// served, still not current. Distinct from `Stale`, which builds nothing
+    /// and checks nothing, so a `Server-Timing` reader can count the checks an
+    /// outage costs without inferring them.
+    Gated,
 }
 
 impl CacheOutcome {
@@ -96,6 +104,7 @@ impl CacheOutcome {
             Self::ColdBuilt { .. } => "cold-built",
             Self::Waited { .. } => "waited",
             Self::Stale => "stale",
+            Self::Gated => "gated",
         }
     }
 
@@ -107,7 +116,8 @@ impl CacheOutcome {
             | Self::ProbedFresh
             | Self::ProbeFailed
             | Self::Waited { .. }
-            | Self::Stale => None,
+            | Self::Stale
+            | Self::Gated => None,
             Self::Rebuilt { build_ordinal, .. } | Self::ColdBuilt { build_ordinal, .. } => {
                 Some(build_ordinal)
             }
@@ -121,7 +131,8 @@ impl CacheOutcome {
             | Self::ProbedFresh
             | Self::ProbeFailed
             | Self::Waited { .. }
-            | Self::Stale => None,
+            | Self::Stale
+            | Self::Gated => None,
             Self::Rebuilt { duration_ms, .. } | Self::ColdBuilt { duration_ms, .. } => {
                 Some(duration_ms)
             }
@@ -249,6 +260,20 @@ mod tests {
         assert_eq!(
             server_timing_header(CacheOutcome::ProbeFailed),
             r#"cache;desc="probe-failed""#
+        );
+    }
+
+    #[test]
+    fn a_failed_gate_is_a_no_build_outcome_with_its_own_label() {
+        // A retry that checked the backend and built nothing must be told
+        // apart from an in-window `stale` serve, which checked nothing: the
+        // live outage check counts the gate's checks from this label.
+        assert_eq!(CacheOutcome::Gated.as_str(), "gated");
+        assert_eq!(CacheOutcome::Gated.build_ordinal(), None);
+        assert_eq!(CacheOutcome::Gated.build_duration_ms(), None);
+        assert_eq!(
+            server_timing_header(CacheOutcome::Gated),
+            r#"cache;desc="gated""#
         );
     }
 

@@ -1737,6 +1737,35 @@ impl UnfilteredReadError {
             Self::MayBeTruncated { .. } => None,
         }
     }
+
+    /// Whether a later read may succeed, by the one rule every reader of
+    /// this error shares:
+    ///
+    /// - [`Self::Read`]: the database's own error, classified by wafer-run's
+    ///   [`init_failure_is_transient`](wafer_run::init_failure_is_transient)
+    ///   over its code and detail code, the rule a block `Init` that fails the
+    ///   same way is classified by. An outage, an overload, a quota that
+    ///   resets and a spent per-invocation call budget are transient; a
+    ///   malformed query, a constraint, a D1 text nobody has classified as one
+    ///   that clears are not.
+    /// - [`Self::Absent`]: transient. The table does not exist yet, and will
+    ///   once admin's migrations have run.
+    /// - [`Self::MayBeTruncated`]: not. Reading again returns the same page
+    ///   until the table shrinks or the read changes.
+    ///
+    /// What `Absent` *means* is each reader's own decision: the config source
+    /// retries the block, the Cloudflare runtime cache's gate read passes it
+    /// (a fresh database is not a failing one).
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Read(error) => {
+                wafer_run::init_failure_is_transient(error.code(), error.detail_code())
+            }
+            Self::Absent(_) => true,
+            Self::MayBeTruncated { .. } => false,
+        }
+    }
 }
 
 impl std::fmt::Display for UnfilteredReadError {

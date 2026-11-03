@@ -214,6 +214,14 @@ impresspress__admin__storage_access_logs         INTROSPECT    1       8
 impresspress__admin__storage_access_logs         ID-PROBE      1      33
 impresspress__admin__storage_access_logs         WRITE         4       0
 
+## mixed: 6 window retry, gate fails, first after a publish — 2 statements, 2 D1 calls, rows≈5
+impresspress__admin__variables                   INTROSPECT    1       1
+impresspress__admin__variables                   EXISTS        1       4
+
+## mixed: 6b window retry, gate fails again — 2 statements, 2 D1 calls, rows≈5
+impresspress__admin__variables                   INTROSPECT    1       1
+impresspress__admin__variables                   EXISTS        1       4
+
 ## shared: 1b prepared build, bootstrap token forwarded, no account yet — 8 statements, 8 D1 calls, rows≈53
 impresspress__admin__variables                   SCAN          1      18
 impresspress__admin__variables                   INTROSPECT    2      12
@@ -281,3 +289,11 @@ wafer_run__auth__users                           INTROSPECT    3      19
 impresspress__admin__storage_access_logs         INTROSPECT    1       8
 impresspress__admin__storage_access_logs         ID-PROBE      1      33
 impresspress__admin__storage_access_logs         WRITE         4       0
+
+## shared: 6 window retry, gate fails, first after a publish — 2 statements, 2 D1 calls, rows≈5
+impresspress__admin__variables                   INTROSPECT    1       1
+impresspress__admin__variables                   EXISTS        1       4
+
+## shared: 6b window retry, gate fails again — 2 statements, 2 D1 calls, rows≈5
+impresspress__admin__variables                   INTROSPECT    1       1
+impresspress__admin__variables                   EXISTS        1       4

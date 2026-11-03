@@ -39,6 +39,17 @@
 //!    the terms page, `/health`, an authenticated admin page, and a 404. Each
 //!    counts the statements its response waited on and the ones it left to
 //!    run after it (its audit row and deferred tasks).
+//! 6. **window retry, gate fails** — the Worker's retry window checking a
+//!    database whose variables table is down before it builds anything
+//!    ([`gate`]): the first check after a publish (a cold schema cache), and
+//!    **6b** a later one, which sends the same (the outage fails the
+//!    introspection, so nothing is memoized). Only the variables table is
+//!    read.
+//!
+//! Every request-path build runs that gate first (phases 1b, 3, 3b, 4–4c):
+//! it is the read the boot's config-declaring blocks would make, moved in
+//! front of assembly and handed to the build, so those phases send what they
+//! sent before the gate.
 //!
 //! The golden holds, per phase, `(table, class, statements, rows≈)`; verbatim
 //! SQL appears only in failure messages. `BLESS=1` rewrites it. Independent of
@@ -253,26 +264,32 @@ fn identity() -> (String, WaferLockIdentity, PreparedReleaseAssets) {
 /// request-scoped proxies (the config source excepted, see
 /// [`RequestScopedSource`]), the storage is in memory, and the network
 /// refuses.
+///
+/// `gated` runs the request path's gate after the settings, as the Worker's
+/// slot owner does ([`gate`]); the deploy funnel is never gated.
 async fn build(
     db: &Arc<dyn DatabaseService>,
     prepared: Option<&PreparedRuntimePlan>,
     provisioning: bool,
     request_config: &HashMap<String, String>,
     variables: Arc<VariablesSnapshot>,
+    gated: bool,
 ) -> Built {
-    try_build(db, prepared, provisioning, request_config, variables)
+    try_build(db, prepared, provisioning, request_config, variables, gated)
         .await
         .expect("the build's block_settings read")
 }
 
-/// [`build`], answering a failed `block_settings` read — the build's one
-/// database read, as `build_runtime`'s — rather than panicking on it.
+/// [`build`], answering a failed `block_settings` read — the dynamic build's
+/// one read of its own, as `runtime_build::read_block_settings` — rather
+/// than panicking on it.
 async fn try_build(
     db: &Arc<dyn DatabaseService>,
     prepared: Option<&PreparedRuntimePlan>,
     provisioning: bool,
     request_config: &HashMap<String, String>,
     variables: Arc<VariablesSnapshot>,
+    gated: bool,
 ) -> Result<Built, DatabaseError> {
     let settings = match prepared {
         Some(plan) => BlockSettings::from_blocks(
@@ -284,6 +301,11 @@ async fn try_build(
         ),
         None => block_settings::load(db).await?,
     };
+    if gated {
+        gate(db, &variables)
+            .await
+            .expect("the gate reads the variables table");
+    }
     let (mut runtime_config, mut overlay) = structural_runtime_config(StructuralConfigInputs {
         secrets: vec![(JWT_SECRET_KEY, JWT_SECRET.to_string())],
         worker_vars: Vec::new(),
@@ -345,10 +367,26 @@ async fn try_build(
     })
 }
 
-/// The variables snapshot `build_runtime` creates: a failed read is retried
-/// only by rebuilding the runtime, never on its own.
+/// The variables snapshot every Worker build starts from
+/// (`runtime_build::fresh_variables_snapshot`): a failed read is retried
+/// only by the runtime cache's retry window, never on its own.
 fn workers_snapshot() -> Arc<VariablesSnapshot> {
     Arc::new(VariablesSnapshot::new(RetryMode::Rebuild))
+}
+
+/// The Worker's gate, `runtime_build::read_variables`: the variables table
+/// read into `variables` now — a remembered failure read again — before
+/// anything is assembled, so the build reads the table through it; an
+/// absent table passes. Copied, not called: that function needs the
+/// Worker's crate.
+async fn gate(
+    db: &Arc<dyn DatabaseService>,
+    variables: &VariablesSnapshot,
+) -> Result<(), variables::UnfilteredReadError> {
+    match variables.retry_now(db).await {
+        Ok(_) | Err(variables::UnfilteredReadError::Absent(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// `build_runtime`'s order: the database (D1 speaks SQLite) goes into the
@@ -371,7 +409,7 @@ fn install(
 /// Phase 1: the deploy funnel over an empty database, then the prepare
 /// closing sequence; returns the plan.
 async fn provision(db: &Arc<dyn DatabaseService>) -> PreparedRuntimePlan {
-    let mut built = build(db, None, true, &HashMap::new(), workers_snapshot()).await;
+    let mut built = build(db, None, true, &HashMap::new(), workers_snapshot(), false).await;
     let report = boot_deploy_runtime(
         &mut built.wafer,
         db,
@@ -400,7 +438,15 @@ async fn boot_request(
     request_config: &HashMap<String, String>,
 ) -> (Wafer, Arc<RequestScopedSource>, Arc<VariablesSnapshot>) {
     let prepared = (build_kind == RequestBuild::Prepared).then_some(plan);
-    let mut built = build(db, prepared, false, request_config, workers_snapshot()).await;
+    let mut built = build(
+        db,
+        prepared,
+        false,
+        request_config,
+        workers_snapshot(),
+        true,
+    )
+    .await;
     boot_request_runtime(
         &mut built.wafer,
         db,
@@ -1125,6 +1171,8 @@ const PHASE_PREPARED: &str = "4 prepared build";
 const PHASE_STALE_SEED: &str = "3b database build, seed hash stale";
 const PHASE_PASSWORD: &str = "4b prepared build, bootstrap email and password forwarded";
 const PHASE_EMAIL: &str = "4c prepared build, only the bootstrap email forwarded";
+const PHASE_GATE_FIRST: &str = "6 window retry, gate fails, first after a publish";
+const PHASE_GATE_AGAIN: &str = "6b window retry, gate fails again";
 /// Every phase that stands for a cold isolate's build.
 const COLD_BUILDS: [&str; 6] = [
     PHASE_TOKEN,
@@ -1566,6 +1614,52 @@ async fn run(variant: Variant) -> Run {
         phases.push(phase);
     }
 
+    // 6. The retry window's gate on an isolate whose database is down: the
+    //    one read a retry makes before it builds anything. The first after a
+    //    publish meets a cold schema cache (`runtime_cache::store` forgets
+    //    the isolate's). So does every later one: the outage fails the
+    //    introspection itself, which is then not memoized, so each check
+    //    sends the same — the table's primary-key introspection, refused,
+    //    and the existence probe the failed read asks — and stores nothing
+    //    that changes the next.
+    let shaped = Arc::new(D1Shaped::open(&path, Arc::clone(&ledger)));
+    let down: Arc<dyn DatabaseService> = shaped.clone();
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    let mut first_gate = None;
+    for name in [PHASE_GATE_FIRST, PHASE_GATE_AGAIN] {
+        let error = gate(&down, &workers_snapshot())
+            .await
+            .expect_err("the outage fails the gate");
+        assert!(error.is_transient(), "{name}: {error}");
+        let phase = Phase::new(label(name), &ledger.take(), &classifier, String::new());
+        let strays: Vec<String> = phase
+            .statements
+            .iter()
+            .filter(|s| s.table != variables::TABLE)
+            .map(|s| format!("[{} {}] {}", s.class.label(), s.table, s.sql))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "{}: the gate reads the variables table and nothing else: {strays:?}",
+            phase.name
+        );
+        let sent: Vec<(Class, String)> = phase
+            .statements
+            .iter()
+            .map(|s| (s.class, s.sql.clone()))
+            .collect();
+        match &first_gate {
+            None => first_gate = Some(sent),
+            Some(first) => assert_eq!(
+                &sent, first,
+                "{}: a failed gate stores nothing that changes the next one's cost",
+                phase.name
+            ),
+        }
+        phases.push(phase);
+    }
+    shaped.clear_fault();
+
     Run {
         provision,
         phases,
@@ -1876,7 +1970,7 @@ async fn boot_prepared(
     site_shaped: bool,
     variables: Arc<VariablesSnapshot>,
 ) -> (Wafer, Arc<VariablesSnapshot>) {
-    let mut built = build(db, Some(plan), false, &HashMap::new(), variables).await;
+    let mut built = build(db, Some(plan), false, &HashMap::new(), variables, true).await;
     if site_shaped {
         make_site_shaped(&mut built.wafer).await;
     }
@@ -2035,7 +2129,17 @@ async fn admin_init_reads_no_stored_config_and_a_config_declaring_block_reads_fi
     let plan = provision(&cold(&path, &ledger)).await;
 
     let db = cold(&path, &ledger);
-    let mut built = build(&db, Some(&plan), false, &HashMap::new(), workers_snapshot()).await;
+    // Ungated: this attributes the boot's own reads to the `Init` that sends
+    // them, which a gate made before assembly would answer from its memo.
+    let mut built = build(
+        &db,
+        Some(&plan),
+        false,
+        &HashMap::new(),
+        workers_snapshot(),
+        false,
+    )
+    .await;
     built.wafer.seal().await.expect("seal");
     ledger.take();
 
@@ -2098,12 +2202,16 @@ async fn boot_prepared_while_variables_fail(
 ) {
     let shaped = Arc::new(D1Shaped::open(path, Arc::clone(ledger)));
     let db: Arc<dyn DatabaseService> = shaped.clone();
+    // Ungated, so the failure is met by the boot's own first read: what a
+    // cold isolate's degraded publish boots over, the gate having failed the
+    // same way just before.
     let mut built = build(
         &db,
         Some(plan),
         false,
         &HashMap::new(),
         Arc::new(VariablesSnapshot::new(RetryMode::Rebuild)),
+        false,
     )
     .await;
     shaped.fail_table(variables::TABLE, fault);
@@ -2116,6 +2224,97 @@ async fn boot_prepared_while_variables_fail(
     )
     .await;
     (booted, built.wafer, db)
+}
+
+/// **A cold prepared build handed the gate's failed read sends the variables
+/// table nothing** (CPU-GATE review PR 1, acceptance 8): a cold isolate whose
+/// gate failed builds anyway (Decision 1) over the snapshot the gate filled,
+/// which replays the failure to every config reader. So the boot publishes
+/// degraded without a second variables statement — even with the database
+/// back by then, which proves it is the memo answering, not the outage.
+#[tokio::test]
+async fn a_prepared_build_over_a_failed_gate_sends_the_variables_table_nothing() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    let shaped = Arc::new(D1Shaped::open(&path, Arc::clone(&ledger)));
+    let db: Arc<dyn DatabaseService> = shaped.clone();
+    let variables = workers_snapshot();
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    gate(&db, &variables)
+        .await
+        .expect_err("the outage fails the gate");
+    shaped.clear_fault();
+    assert!(reads_variables(&ledger.take()), "the gate read the table");
+
+    let mut built = build(&db, Some(&plan), false, &HashMap::new(), variables, false).await;
+    let report = boot_request_runtime(
+        &mut built.wafer,
+        &db,
+        &built.block_settings,
+        built.config.clone(),
+        RequestBuild::Prepared,
+    )
+    .await
+    .expect("a cold isolate publishes degraded");
+    let trips = ledger.take();
+    assert!(
+        !report.degraded.is_empty(),
+        "the config readers were refused by the remembered failure"
+    );
+    assert!(
+        !reads_variables(&trips),
+        "the build sent the variables table a statement of its own: {trips:#?}"
+    );
+}
+
+/// **A failed gate costs a sliver of the build it stops** (CPU-GATE review
+/// m4 (i)): the retry window's check of a database that is down — the one
+/// read a retry makes before it builds anything, here the worst case, the
+/// first after a publish, with a cold schema cache — takes under 2 % of a
+/// cold prepared build in the same process. A ratio, so the runner's speed
+/// cancels: Workers cannot measure their own CPU (`performance.now()` is
+/// frozen), and the live tail's `cpuTime` stays the number that matters. A
+/// build is the best of three, a gate the worst of five, so noise can only
+/// make the test fail later than the truth would.
+#[tokio::test]
+async fn a_failed_gate_costs_a_sliver_of_a_cold_build() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    let mut build = Duration::MAX;
+    for _ in 0..3 {
+        let db = cold(&path, &ledger);
+        let started = std::time::Instant::now();
+        let (wafer, _, _) = boot_request(&db, RequestBuild::Prepared, &plan, &HashMap::new()).await;
+        build = build.min(started.elapsed());
+        drop(wafer);
+    }
+
+    let mut gated = Duration::ZERO;
+    for _ in 0..5 {
+        let shaped = Arc::new(D1Shaped::open(&path, Arc::clone(&ledger)));
+        shaped.fail_table(variables::TABLE, Fault::Unavailable);
+        let down: Arc<dyn DatabaseService> = shaped.clone();
+        let started = std::time::Instant::now();
+        gate(&down, &workers_snapshot())
+            .await
+            .expect_err("the outage fails the gate");
+        gated = gated.max(started.elapsed());
+    }
+    ledger.take();
+
+    println!("cold prepared build {build:?}, failed gate {gated:?}");
+    assert!(
+        gated * 50 < build,
+        "a failed gate took {gated:?}, not under 2 % of a cold prepared build's {build:?}"
+    );
 }
 
 /// The blocks of `wafer` that declare config keys, by registered name.
@@ -2497,7 +2696,7 @@ async fn a_funnel_under_a_spent_call_budget_reports_it_transiently() {
     ));
     shaped.limit_calls(FUNNEL_CALLS_PAST_THE_BUILD);
     let db: Arc<dyn DatabaseService> = shaped.clone();
-    let mut built = build(&db, None, true, &HashMap::new(), workers_snapshot()).await;
+    let mut built = build(&db, None, true, &HashMap::new(), workers_snapshot(), false).await;
     let report = boot_deploy_runtime(
         &mut built.wafer,
         &db,
@@ -2550,16 +2749,16 @@ async fn no_call_budget_fails_the_funnel_permanently() {
         ));
         shaped.limit_calls(budget);
         let db: Arc<dyn DatabaseService> = shaped.clone();
-        let mut built = match try_build(&db, None, true, &HashMap::new(), workers_snapshot()).await
-        {
-            Ok(built) => built,
-            Err(error) => {
-                if !wafer_run::init_failure_is_transient(error.code(), error.detail_code()) {
-                    permanent.push(format!("{budget}: build: {error}"));
+        let mut built =
+            match try_build(&db, None, true, &HashMap::new(), workers_snapshot(), false).await {
+                Ok(built) => built,
+                Err(error) => {
+                    if !wafer_run::init_failure_is_transient(error.code(), error.detail_code()) {
+                        permanent.push(format!("{budget}: build: {error}"));
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
         let report = boot_deploy_runtime(
             &mut built.wafer,
             &db,

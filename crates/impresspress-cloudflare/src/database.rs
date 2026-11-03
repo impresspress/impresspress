@@ -266,23 +266,37 @@ pub struct D1CallCount {
     spends_reservation: bool,
 }
 
-/// Which request-path runtime build ran in an invocation: the two lifecycles
-/// `runtime_cache` builds by.
+/// Which request-path runtime work ran in an invocation: a build by one of
+/// the two lifecycles `runtime_cache` builds by, or only the reads an attempt
+/// makes before it assembles anything.
+///
+/// The last one noted wins ([`D1CallCount::note_build`] overwrites). An
+/// attempt is noted `Gate` when it opens its D1 handle and its kind when its
+/// build starts, so `build=prepared|dynamic` on a `d1_cost` line always means
+/// a runtime was assembled — the ~320 ms of CPU — failed or not, and
+/// `build=gate` means it was not. During an outage the first is an isolate's
+/// one cold build, the second each retry window's check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildKind {
     /// A runtime hydrated from the packaged prepared plan.
     Prepared,
     /// A runtime built from D1's settings and grants.
     Dynamic,
+    /// An attempt that assembled nothing: the retry window's gate (one read
+    /// of the variables table) failed, or a read before it did (the dynamic
+    /// path's `block_settings`, the D1 binding), or the gate healed the
+    /// cached runtime in place.
+    Gate,
 }
 
 impl BuildKind {
-    /// The word the `d1_cost` line and `runtime_cache`'s `kind` log field
-    /// name the lifecycle by.
+    /// The word the `d1_cost` line names it by; for the two lifecycles, also
+    /// the word `runtime_cache`'s `kind` log field uses.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Prepared => "prepared",
             Self::Dynamic => "dynamic",
+            Self::Gate => "gate",
         }
     }
 }
@@ -403,9 +417,10 @@ impl D1CallCount {
         self.tally.cost()
     }
 
-    /// Record that this invocation ran a `kind` runtime build. Called by
-    /// `runtime_cache` as the build starts, so a build that fails still names
-    /// the rows it read.
+    /// Record that this invocation ran a `kind` runtime build, or the gate
+    /// before one. Called by `runtime_cache` as each starts, so a build that
+    /// fails still names the rows it read. It overwrites: the last one noted
+    /// is the one the `d1_cost` line names ([`BuildKind`]).
     pub fn note_build(&self, kind: BuildKind) {
         self.tally.built.set(Some(kind));
     }

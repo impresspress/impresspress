@@ -350,6 +350,34 @@ impl VariablesSnapshot {
         &self,
         db: &Arc<dyn DatabaseService>,
     ) -> Result<Arc<VariablesRows>, UnfilteredReadError> {
+        self.read_retrying(db, false).await
+    }
+
+    /// [`Self::read`], except that a remembered failure is read again now,
+    /// whatever the [`RetryMode`] says. A loaded snapshot is answered from the
+    /// memo with no query, exactly as `read` answers it.
+    ///
+    /// For the owner of a [`RetryMode::Rebuild`] snapshot, at its own retry
+    /// time, when the failed read is the only thing wrong with the runtime
+    /// that holds it: every block initialized, and a later request's read
+    /// failed (a passing D1 error, or one request's spent call budget). One
+    /// read heals that runtime; rebuilding it would cost a whole runtime for
+    /// the same read. A success or a failure is stored as `read` stores it, so
+    /// every reader of the snapshot sees the outcome.
+    pub async fn retry_now(
+        &self,
+        db: &Arc<dyn DatabaseService>,
+    ) -> Result<Arc<VariablesRows>, UnfilteredReadError> {
+        self.read_retrying(db, true).await
+    }
+
+    /// [`Self::read`] and [`Self::retry_now`]: `retry_failure` reads a
+    /// remembered failure of the current generation again now.
+    async fn read_retrying(
+        &self,
+        db: &Arc<dyn DatabaseService>,
+        retry_failure: bool,
+    ) -> Result<Arc<VariablesRows>, UnfilteredReadError> {
         let generation = self.generation.current();
         let failures_before = match self.load() {
             State::Loaded {
@@ -357,7 +385,10 @@ impl VariablesSnapshot {
                 rows,
             } if loaded_at == generation => return Ok(rows),
             State::Failed(failure) => {
-                if failure.generation == generation && !self.retry_is_due(&failure) {
+                if failure.generation == generation
+                    && !retry_failure
+                    && !self.retry_is_due(&failure)
+                {
                     return Err(failure.error.clone());
                 }
                 failure.failures

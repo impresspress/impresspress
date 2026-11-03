@@ -41,12 +41,21 @@
 //!
 //! - A block that swallows its database errors at `Init` reports `ready`.
 //!   Only a block whose `Init` fails loudly is listed.
-//! - A run ([`RetryStreak`]) and the episode's `rebuilds` live in one
+//! - A run ([`RetryStreak`]) and the episode's `retries` live in one
 //!   isolate. Cloudflare evicts isolates often, and a new one starts its
 //!   runs again at `runtimes: 1`, so a monitor polling across isolates sees
-//!   several short runs where the failure is one long one. The `error!` log a
-//!   run writes when it reaches [`PERSISTENT_RUNTIMES`] is what outlives the
-//!   isolate (Workers Logs).
+//!   several short runs where the failure is one long one. What outlives the
+//!   isolate (Workers Logs) is two `error!` lines: the episode's, once its
+//!   window has been armed [`PERSISTENT_RETRIES`] times (a lasting outage,
+//!   whether or not anything was rebuilt), and a run's, once it reaches
+//!   [`PERSISTENT_RUNTIMES`] (a block failing the same way in every runtime
+//!   built, which a gate that passes and a rebuild that degrades again
+//!   produce: a block causing its own failure).
+//! - A runtime's runs move only when a runtime is published. During a
+//!   database-wide outage Cloudflare's retry window checks the backend with
+//!   one read before it rebuilds anything, and a failed check publishes
+//!   nothing, so each block's `runtimes` and `since` stay those of the last
+//!   runtime built while `retries` counts on.
 //! - A failure is identified by the **first** transient text its message
 //!   contains ([`transient_text`](crate::sqlite_text_error::transient_text)).
 //!   So two different texts can share one identity and extend one run (`D1_ERROR:
@@ -143,11 +152,26 @@ impl RetryStreaks {
 /// 8: the retry window doubles from 1 s and is capped at 60 s, so the 8th
 /// runtime is published about 1+2+4+8+16+32+60 ≈ 2 minutes after the first.
 /// D1's resets, overloads and lost connections clear within seconds, so a run
-/// that long is not a blip: it is a lasting outage (worth an `error!` anyway)
-/// or a block causing its own failure (plan I2g), which `warn!` alone hid.
-/// Lower, and an ordinary reset storm would log errors; much higher, and a
-/// self-inflicted reset goes unflagged for most of an isolate's life.
+/// that long is not a blip. A runtime is published per window only while the
+/// backend answers the window's check (Cloudflare's gate read): the block's
+/// own `Init` is what keeps failing, the case `warn!` alone hid — a block
+/// causing its own failure (plan I2g), such as a query that makes D1 reset.
+/// A database-wide outage publishes nothing per window and is logged by the
+/// episode instead ([`PERSISTENT_RETRIES`]). Lower, and an ordinary reset
+/// storm would log errors; much higher, and a self-inflicted reset goes
+/// unflagged for most of an isolate's life.
 pub const PERSISTENT_RUNTIMES: u32 = 8;
+
+/// How many times in a row a platform that retries by rebuilding must arm its
+/// retry window — after a build that published degraded or failed, or after a
+/// check of the backend that failed — before it logs the episode at `error!`,
+/// once ([`RetryEpisode::retries`]).
+///
+/// 8, for [`PERSISTENT_RUNTIMES`]'s reason: about two minutes of windows, far
+/// past what D1's passing errors last. It is the lasting-outage line (a quota
+/// spent until midnight UTC, a database that will not come back), which a
+/// block's run cannot carry when no runtime is published per window.
+pub const PERSISTENT_RETRIES: u32 = 8;
 
 impl RetryStreak {
     /// Whether this run has just reached [`PERSISTENT_RUNTIMES`] — true for
@@ -171,11 +195,15 @@ pub struct RetryEpisode {
     /// When the window was first armed: when this run of failed or degraded
     /// builds began.
     pub since_ms: u64,
-    /// When the next rebuild may run.
+    /// When the next retry may run: a check of the backend, and a rebuild if
+    /// it answers.
     pub retry_at_ms: u64,
-    /// Consecutive builds that armed it, the first included (a cold build or
-    /// a hydrate as well as a rebuild): at least 1.
-    pub rebuilds: u32,
+    /// How many times in a row the window has been armed, the first included:
+    /// by a build that published degraded or failed (a cold build or a
+    /// hydrate as well as a rebuild), or by a check of the backend that failed
+    /// and built nothing. At least 1. It counts retries, not runtimes: a
+    /// database-wide outage arms it once a window with no build at all.
+    pub retries: u32,
     /// The last of them failed permanently: the runtime serving was built
     /// before it, and the next rebuild is likely to fail the same way.
     pub failed: bool,
@@ -257,7 +285,7 @@ pub struct UnavailableBlock {
 
 /// The `/health` report. Serializes to its body: `{"status":"ok"}` when
 /// healthy, otherwise the status with `since` (when known), `retry_in`,
-/// `rebuilds` (on a rebuilding platform) and `unavailable`.
+/// `retries` (on a rebuilding platform) and `unavailable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HealthReport {
     pub status: HealthStatus,
@@ -270,10 +298,10 @@ pub struct HealthReport {
     /// The `Retry-After` seconds, at least 1; `None` when `ok`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_in: Option<u32>,
-    /// [`RetryEpisode::rebuilds`]: the builds that armed the window, the
-    /// first included.
+    /// [`RetryEpisode::retries`]: how many times in a row the retry window
+    /// has been armed, the first included.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rebuilds: Option<u32>,
+    pub retries: Option<u32>,
     /// The blocks that do not serve, by name; `None` when `ok`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<Vec<UnavailableBlock>>,
@@ -353,7 +381,7 @@ impl HealthReport {
                 status: HealthStatus::Ok,
                 since: None,
                 retry_in: None,
-                rebuilds: None,
+                retries: None,
                 unavailable: None,
             };
         };
@@ -365,7 +393,7 @@ impl HealthReport {
             status,
             since: since_ms.and_then(rfc3339),
             retry_in: Some(retry_in),
-            rebuilds: platform.episode.map(|episode| episode.rebuilds),
+            retries: platform.episode.map(|episode| episode.retries),
             unavailable: Some(unavailable),
         }
     }
@@ -464,7 +492,7 @@ mod tests {
             episode: Some(RetryEpisode {
                 since_ms: NOW - 600_000,
                 retry_at_ms: NOW + 41_200,
-                rebuilds: 7,
+                retries: 7,
                 failed: false,
             }),
             degraded_since_ms: Some(NOW - 30_000),
@@ -481,7 +509,7 @@ mod tests {
                 "status": "degraded",
                 "since": "2027-01-15T07:50:00.000Z",
                 "retry_in": 42,
-                "rebuilds": 7,
+                "retries": 7,
                 "unavailable": [{"block": "b", "class": "retrying", "retry_in": 42}],
             })
         );
@@ -510,7 +538,7 @@ mod tests {
             episode: Some(RetryEpisode {
                 since_ms: NOW - 5_000,
                 retry_at_ms: NOW + 1_000,
-                rebuilds: 2,
+                retries: 2,
                 failed: false,
             }),
             degraded_since_ms: Some(NOW - 2_000),
@@ -525,7 +553,7 @@ mod tests {
                 "status": "stale",
                 "since": "2027-01-15T07:59:55.000Z",
                 "retry_in": 1,
-                "rebuilds": 2,
+                "retries": 2,
                 "unavailable": [{"block": "b", "class": "retrying", "retry_in": 1}],
             })
         );
@@ -539,7 +567,7 @@ mod tests {
             episode: Some(RetryEpisode {
                 since_ms: NOW - 3_000,
                 retry_at_ms: NOW + 4_000,
-                rebuilds: 3,
+                retries: 3,
                 failed: true,
             }),
             stale_since_ms: Some(NOW - 9_000),
@@ -553,7 +581,7 @@ mod tests {
                 "status": "failed",
                 "since": "2027-01-15T07:59:57.000Z",
                 "retry_in": 4,
-                "rebuilds": 3,
+                "retries": 3,
                 "unavailable": [],
             })
         );
@@ -648,14 +676,14 @@ mod tests {
     /// The window has ended and the rebuild it allows has not run yet (the
     /// first request after it owns the rebuild; others are served the cached
     /// runtime meanwhile): `retry_in` falls back to the slots' backoff, or 1,
-    /// never `retry_at - now` underflowed; `since` and `rebuilds` stay.
+    /// never `retry_at - now` underflowed; `since` and `retries` stay.
     #[test]
     fn an_elapsed_window_awaiting_its_rebuild_times_nothing() {
         let platform = PlatformHealth {
             episode: Some(RetryEpisode {
                 since_ms: NOW - 90_000,
                 retry_at_ms: NOW - 2_000,
-                rebuilds: 4,
+                retries: 4,
                 failed: false,
             }),
             degraded_since_ms: Some(NOW - 30_000),
@@ -672,7 +700,7 @@ mod tests {
                 "status": "degraded",
                 "since": "2027-01-15T07:58:30.000Z",
                 "retry_in": 3,
-                "rebuilds": 4,
+                "retries": 4,
                 "unavailable": [
                     {"block": "b", "class": "retrying", "retry_in": 1},
                     {"block": "c", "class": "retrying", "retry_in": 3},

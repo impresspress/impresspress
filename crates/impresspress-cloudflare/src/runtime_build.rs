@@ -115,62 +115,39 @@ pub(crate) async fn boot_request_runtime(
     .await
 }
 
-/// Build (but do not seal or boot) the WAFER runtime for a request: wire the
-/// D1/KV/R2/crypto/network/logger services, run the consumer's block
-/// registrations, and build + config-snapshot the runtime.
+/// What a build reads before it assembles anything, and the handle it reads
+/// through: everything [`build_runtime`] takes from the database.
 ///
-/// `force_run_migrations` inserts `IMPRESSPRESS_RUN_MIGRATIONS=1` into the config
-/// snapshot — set only by the `/_deploy/init` endpoint to force a migration
-/// pass. Migrations on CF run exclusively through that funnel (both a
-/// production deploy and local `impresspress serve --target cloudflare` POST it);
-/// the normal request path always passes `false` and never migrates.
-///
-/// `cache_mode` selects KV row-cache read-through and write-bump behavior for
-/// this runtime's DB handle.
-///
-/// Missing-table tolerance is an invariant here: on a first-ever deploy
-/// `/_deploy/init` builds this runtime BEFORE any migration has run, so every
-/// read this window makes must tolerate a not-yet-created table, or first
-/// deploys deadlock before migrations can create the tables. Each read owns
-/// that tolerance at its own definition, and says how:
-/// `platform_state::block_settings::load` (this function's eager read),
-/// `platform_state::wrap_grants::load` (the funnel's `GrantSource::Database`),
-/// and `DatabaseConfigSource::load_for_block` (reached only after admin's
-/// `Init` has created the variables table, for the reason `boot` gives at its
-/// admin-first step). `migration_helper::read_state` reads the config
-/// snapshot, not the database.
-// Nine arguments. The captured environment is deliberately a parameter rather
-// than something re-derived from `env` here: reading a var twice per request is
-// exactly what `CfEnvironment` exists to stop, and a function that could reach
-// for `env.var` on its own would put that back. The invocation's D1 statement
-// count is one for the same reason: it is created once at the Worker entry and
-// only travels.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the captured environment travels as a parameter so nothing here can \
-              re-read `env.var` per request"
-)]
-pub(crate) async fn build_runtime<F, G>(
+/// The request path's slot owner fills it in `runtime_cache`, one step at a
+/// time, so that it can stop before the expensive part: the D1 handle
+/// ([`open_build_database`]), the dynamic path's `block_settings`
+/// ([`read_block_settings`]; a prepared build takes them from its plan,
+/// [`plan_block_settings`]), and the variables table ([`read_variables`],
+/// the retry window's gate). The deploy funnel fills it with a fresh,
+/// unread snapshot: provisioning seeds the table inside its own boot.
+pub(crate) struct BuildSource {
+    /// This request's D1 handle, the one every read of the build goes
+    /// through: the gate's read and the build's must see one call budget and
+    /// one schema memo.
+    pub(crate) db: Arc<dyn DatabaseService>,
+    pub(crate) block_settings: impresspress_core::features::BlockSettings,
+    /// The runtime's variables snapshot (see [`BuiltRuntime::variables_snapshot`]):
+    /// already read by the gate on the request path, so the build sends the
+    /// table no statement of its own; or failed by it, so every config
+    /// reader of the runtime answers unavailable, as a cold isolate's
+    /// degraded publish needs.
+    pub(crate) variables: Arc<VariablesSnapshot>,
+}
+
+/// This request's D1 handle, with the KV row cache in `cache_mode`, for one
+/// build. Binding lookups only: nothing is sent. A missing binding is a
+/// fault.
+pub(crate) fn open_build_database(
     env: &worker::Env,
     environment: &CfEnvironment,
     calls: &crate::database::D1CallCount,
-    request_config: &HashMap<String, String>,
-    prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
-    register_blocks: F,
-    register_post_build: G,
-    force_run_migrations: bool,
     cache_mode: kv_cached_db::CacheMode,
-) -> Result<BuiltRuntime, crate::runtime_cache::RuntimeBuildError>
-where
-    F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
-    G: FnOnce(
-        &mut wafer_run::Wafer,
-        Arc<dyn StorageService>,
-    ) -> Result<(), Box<dyn std::error::Error>>,
-{
-    use crate::runtime_cache::RuntimeBuildError;
-
-    // 1. Construct D1 service (with KV cache) first — env vars live in D1.
+) -> Result<Arc<dyn DatabaseService>, crate::runtime_cache::RuntimeBuildError> {
     let (db, _kv, _batch_db) = make_kv_cached_database_service_with_backend(
         env,
         environment,
@@ -180,55 +157,153 @@ where
         calls,
     )
     .map_err(|e| {
-        RuntimeBuildError::Fault(format!(
+        crate::runtime_cache::RuntimeBuildError::Fault(format!(
             "DB/KV bindings (D1={:?}, KV={:?}): {e}",
             runner::D1_BINDING,
             runner::KV_BINDING
         ))
     })?;
+    Ok(db)
+}
 
-    // 2. Load block settings (enablement + migration state) eagerly —
-    //    the only database read this build issues itself. The per-block
-    //    env-config pre-load is gone; the config source resolves declared
-    //    config keys later, on first init of a block that declares any,
-    //    from ONE unfiltered read of the whole variables table grouped by
-    //    `block` in memory. block_settings still needs an eager load
-    //    because the ImpresspressRouter consumes the enablement map up front
-    //    when wiring routes (it can't defer to a per-block init event).
-    // A missing table that the probe confirms absent (a fresh database) is
-    // no rows, not an error (`block_settings::load`'s doc). An error here is
-    // a failed read — a D1 outage, corruption — or a cold start the read
-    // could not confirm: on a fresh database whose table-existence probe was
-    // refused (D1 unreachable, or this invocation's call budget spent by the
-    // cold list), it is the probe's transient error
-    // (`platform_state::unresolved_read_error`), not the list's
-    // `no such table`. Propagate rather than fabricate "every block
-    // enabled": the runtime build fails, so no requests are served with a
-    // fabricated all-enabled snapshot. Classified by the shared transient
-    // rule: an outage or a spent call budget is a 503 (the retry window, or
-    // the operator, retries), anything else a 500. Usually answered from the
-    // KV row cache, so it reaches D1 only on a miss.
-    let block_settings = if let Some(plan) = prepared_plan {
-        impresspress_core::features::BlockSettings::from_blocks(
-            plan.structure
-                .block_settings
-                .iter()
-                .map(|(name, state)| (name.clone(), state.clone()))
-                .collect(),
-        )
-    } else {
-        impresspress_core::platform_state::block_settings::load(&db)
-            .await
-            .map_err(|e| {
-                RuntimeBuildError::classified(
-                    wafer_run::init_failure_is_transient(e.code(), e.detail_code()),
-                    format!("read block_settings: {e}"),
-                )
-            })?
-    };
+/// Load block settings (enablement + migration state) eagerly, for a
+/// dynamic build and the deploy funnel: the router consumes the enablement
+/// map up front when wiring routes, so it cannot wait for a block's `Init`.
+/// Usually answered from the KV row cache, so it reaches D1 only on a miss.
+///
+/// A missing table that the probe confirms absent (a fresh database) is no
+/// rows, not an error (`block_settings::load`'s doc). An error here is a
+/// failed read — a D1 outage, corruption — or a cold start the read could
+/// not confirm: on a fresh database whose table-existence probe was refused
+/// (D1 unreachable, or this invocation's call budget spent by the cold list),
+/// it is the probe's transient error (`platform_state::unresolved_read_error`),
+/// not the list's `no such table`. Propagated rather than fabricated into
+/// "every block enabled", so no request is served with a fabricated
+/// all-enabled snapshot. Classified by the shared transient rule: an outage
+/// or a spent call budget is a 503 (the retry window, or the operator,
+/// retries), anything else a 500.
+pub(crate) async fn read_block_settings(
+    db: &Arc<dyn DatabaseService>,
+) -> Result<impresspress_core::features::BlockSettings, crate::runtime_cache::RuntimeBuildError> {
+    impresspress_core::platform_state::block_settings::load(db)
+        .await
+        .map_err(|e| {
+            crate::runtime_cache::RuntimeBuildError::classified(
+                wafer_run::init_failure_is_transient(e.code(), e.detail_code()),
+                format!("read block_settings: {e}"),
+            )
+        })
+}
 
-    // The rest is assembly over bindings and config this request already
-    // holds: nothing in it reaches a backend, so whatever fails is a fault.
+/// A prepared build's block settings: the plan's, imported, never read.
+pub(crate) fn plan_block_settings(
+    plan: &impresspress_core::PreparedRuntimePlan,
+) -> impresspress_core::features::BlockSettings {
+    impresspress_core::features::BlockSettings::from_blocks(
+        plan.structure
+            .block_settings
+            .iter()
+            .map(|(name, state)| (name.clone(), state.clone()))
+            .collect(),
+    )
+}
+
+/// A build's variables snapshot, unread: the one every request-path build and
+/// the deploy funnel start from.
+///
+/// `Rebuild`: the snapshot never retries a failed read on its own. The
+/// runtime cache's retry window does — by reading it again through
+/// [`read_variables`] before it rebuilds anything, and by rebuilding — so an
+/// outage costs about one failed read per isolate per window rather than one
+/// per window plus one per backoff step.
+pub(crate) fn fresh_variables_snapshot() -> Arc<VariablesSnapshot> {
+    Arc::new(VariablesSnapshot::new(RetryMode::Rebuild))
+}
+
+/// The retry window's gate: read the variables table into `variables`
+/// through `db`, now — a failure the snapshot remembers is read again
+/// ([`VariablesSnapshot::retry_now`]).
+///
+/// It is the read every degraded block of an outage failed on, and on the
+/// prepared path the build's first D1 contact: moved in front of assembly, it
+/// tells the slot owner whether the backend is back before it spends a whole
+/// runtime (about 320 ms of CPU on Cloudflare) finding out. A snapshot it
+/// fills is the one the build then reads through, so the table is read once
+/// per attempt, as before the gate. It is never answered from KV
+/// (`cache_key`'s `read_key` keeps the unfiltered variables read off the row
+/// cache), so it cannot pass on a stale copy while the build would fail.
+///
+/// - `Ok` when the table was read, or does not exist yet: a fresh database
+///   before admin's migrations is not a failing one, and the build's own
+///   reads handle it as they always have.
+/// - `Unavailable` for a transient failure, `Fault` for a permanent one, by
+///   [`UnfilteredReadError::is_transient`](impresspress_core::platform_state::variables::UnfilteredReadError::is_transient).
+pub(crate) async fn read_variables(
+    db: &Arc<dyn DatabaseService>,
+    variables: &VariablesSnapshot,
+) -> Result<(), crate::runtime_cache::RuntimeBuildError> {
+    match variables.retry_now(db).await {
+        Ok(_)
+        | Err(impresspress_core::platform_state::variables::UnfilteredReadError::Absent(_)) => {
+            Ok(())
+        }
+        Err(error) => Err(crate::runtime_cache::RuntimeBuildError::classified(
+            error.is_transient(),
+            format!("read variables: {error}"),
+        )),
+    }
+}
+
+/// Build (but do not seal or boot) the WAFER runtime for a request over what
+/// `source` already read: wire the KV-cached D1 handle and this request's
+/// R2/crypto/network/logger services, run the consumer's block registrations,
+/// and build + config-snapshot the runtime. Synchronous: it reaches no
+/// backend, so whatever fails here is a fault.
+///
+/// `force_run_migrations` inserts `IMPRESSPRESS_RUN_MIGRATIONS=1` into the config
+/// snapshot — set only by the `/_deploy/init` endpoint to force a migration
+/// pass. Migrations on CF run exclusively through that funnel (both a
+/// production deploy and local `impresspress serve --target cloudflare` POST it);
+/// the normal request path always passes `false` and never migrates.
+///
+/// Missing-table tolerance is an invariant of the reads around it: on a
+/// first-ever deploy `/_deploy/init` builds this runtime BEFORE any migration
+/// has run, so every read this window makes must tolerate a not-yet-created
+/// table, or first deploys deadlock before migrations can create the tables.
+/// Each read owns that tolerance at its own definition, and says how:
+/// `platform_state::block_settings::load` ([`read_block_settings`]),
+/// `platform_state::wrap_grants::load` (the funnel's `GrantSource::Database`),
+/// [`read_variables`] (an absent table passes), and
+/// `DatabaseConfigSource::load_for_block` (reached only after admin's `Init`
+/// has created the variables table, for the reason `boot` gives at its
+/// admin-first step). `migration_helper::read_state` reads the config
+/// snapshot, not the database.
+// Eight arguments. The captured environment is deliberately a parameter
+// rather than something re-derived from `env` here: reading a var twice per
+// request is exactly what `CfEnvironment` exists to stop, and a function that
+// could reach for `env.var` on its own would put that back.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the captured environment travels as a parameter so nothing here can \
+              re-read `env.var` per request"
+)]
+pub(crate) fn build_runtime<F, G>(
+    env: &worker::Env,
+    environment: &CfEnvironment,
+    request_config: &HashMap<String, String>,
+    prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
+    register_blocks: F,
+    register_post_build: G,
+    force_run_migrations: bool,
+    source: BuildSource,
+) -> Result<BuiltRuntime, crate::runtime_cache::RuntimeBuildError>
+where
+    F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
+    G: FnOnce(
+        &mut wafer_run::Wafer,
+        Arc<dyn StorageService>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
     assemble_runtime(
         env,
         environment,
@@ -237,14 +312,13 @@ where
         register_blocks,
         register_post_build,
         force_run_migrations,
-        db,
-        block_settings,
+        source,
     )
-    .map_err(|e| RuntimeBuildError::Fault(e.to_string()))
+    .map_err(|e| crate::runtime_cache::RuntimeBuildError::Fault(e.to_string()))
 }
 
-/// [`build_runtime`] after its one database read: the config surfaces, the
-/// services, the consumer's registrations and `build()`. Synchronous.
+/// [`build_runtime`]'s body: the config surfaces, the services, the
+/// consumer's registrations and `build()`.
 #[expect(
     clippy::too_many_arguments,
     reason = "build_runtime's own arguments, passed on; see its note"
@@ -257,8 +331,7 @@ fn assemble_runtime<F, G>(
     register_blocks: F,
     register_post_build: G,
     force_run_migrations: bool,
-    db: Arc<dyn DatabaseService>,
-    block_settings: impresspress_core::features::BlockSettings,
+    source: BuildSource,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>>
 where
     F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
@@ -267,6 +340,11 @@ where
         Arc<dyn StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
+    let BuildSource {
+        db,
+        block_settings,
+        variables: variables_snapshot,
+    } = source;
     // 3. The structural half of both config surfaces — see
     //    `structural_runtime_config`, which is where every key and its reason
     //    now lives.
@@ -310,17 +388,12 @@ where
     let (config_installed, cfg_svc) = install_config_surfaces(runtime_config)?;
 
     // 5. ConfigSource: see `request_config_source`. Over the runtime's
-    //    variables snapshot, created here because the source is consulted
-    //    while blocks initialize — before the config block, which the builder
-    //    hands the same snapshot, is guaranteed to be. The runtime keeps it
-    //    (`BuiltRuntime::variables_snapshot`), so a rebuild starts clean.
-    //
-    //    `Rebuild`: the snapshot never retries a failed read on its own. The
-    //    runtime cache's retry window does, by rebuilding the runtime (and a
-    //    published runtime whose snapshot remembers a failure arms it), so an
-    //    outage costs about one failed read per isolate per window rather
-    //    than one per window plus one per backoff step.
-    let variables_snapshot = Arc::new(VariablesSnapshot::new(RetryMode::Rebuild));
+    //    variables snapshot, which the source reads while blocks initialize —
+    //    before the config block, which the builder hands the same snapshot,
+    //    is guaranteed to be. The runtime keeps it
+    //    (`BuiltRuntime::variables_snapshot`); every build gets a new one
+    //    ([`BuildSource::variables`], see [`fresh_variables_snapshot`]), so a
+    //    rebuild starts clean.
     let cfg_source = request_config_source(db.clone(), overlay, variables_snapshot.clone());
     let services = request_services::RequestServices::new(
         environment,
@@ -938,11 +1011,11 @@ mod tests {
         wasm_bindgen::JsCast::unchecked_into::<worker::Env>(env)
     }
 
-    /// **`build_runtime`'s one database read is classified** (D1 outage plan
-    /// I4, addendum m1): a dynamic build whose `block_settings` read meets a
-    /// D1 outage is `Unavailable` — a 503 the retry window retries — and one
-    /// meeting a fault is the 500, by the shared transient rule. It used to
-    /// be `?`-boxed into the opaque 500 either way.
+    /// **A dynamic build's `block_settings` read is classified** (D1 outage
+    /// plan I4, addendum m1): one that meets a D1 outage is `Unavailable` — a
+    /// 503 the retry window retries — and one meeting a fault is the 500, by
+    /// the shared transient rule. It used to be `?`-boxed into the opaque 500
+    /// either way.
     #[wasm_bindgen_test]
     async fn the_block_settings_read_is_classified() {
         for (text, unavailable) in [
@@ -952,24 +1025,142 @@ mod tests {
             let env = env_whose_d1_answers(text);
             let environment = CfEnvironment::capture(&env);
             let calls = crate::database::D1CallCount::new();
-            let built = build_runtime(
+            let db = open_build_database(
                 &env,
                 &environment,
                 &calls,
-                &HashMap::new(),
-                None,
-                Ok,
-                |_, _| Ok(()),
-                false,
                 kv_cached_db::CacheMode::default(),
             )
-            .await;
-            let Err(error) = built else {
+            .expect("the bindings resolve");
+            let Err(error) = read_block_settings(&db).await else {
                 panic!("{text}: the read failed, so the build must");
             };
             assert_eq!(error.is_unavailable(), unavailable, "{text}: {error}");
             assert!(error.to_string().contains("block_settings"), "{error}");
         }
+    }
+
+    /// **The gate's read is classified, and a failure is remembered by the
+    /// snapshot the build would read through** (CPU-GATE review PR 1): an
+    /// outage is `Unavailable` (the window doubles and nothing is built), a
+    /// fault is the 500, and either way the snapshot replays the failure to
+    /// every config reader, so a cold isolate that builds anyway (Decision 1)
+    /// sends the table no second statement.
+    #[wasm_bindgen_test]
+    async fn the_gate_read_is_classified_and_remembered() {
+        for (text, unavailable) in [
+            ("D1_ERROR: Network connection lost.", true),
+            ("D1_ERROR: no such column: block: SQLITE_ERROR", false),
+        ] {
+            let env = env_whose_d1_answers(text);
+            let environment = CfEnvironment::capture(&env);
+            let calls = crate::database::D1CallCount::new();
+            let db = open_build_database(
+                &env,
+                &environment,
+                &calls,
+                kv_cached_db::CacheMode::default(),
+            )
+            .expect("the bindings resolve");
+            let variables = fresh_variables_snapshot();
+            let Err(error) = read_variables(&db, &variables).await else {
+                panic!("{text}: the read failed, so the gate must");
+            };
+            assert_eq!(error.is_unavailable(), unavailable, "{text}: {error}");
+            assert!(error.to_string().contains("read variables"), "{error}");
+            assert!(variables.remembers_a_failure(), "{text}");
+        }
+    }
+
+    /// **A table that does not exist yet passes the gate** (CPU-GATE review
+    /// m2): a fresh database before admin's migrations is not a failing one.
+    /// The snapshot remembers nothing, so the build's own reads see the table
+    /// as they always have.
+    #[wasm_bindgen_test]
+    async fn an_absent_variables_table_passes_the_gate() {
+        let log = js_sys::Array::new();
+        let db = request_database(absent_variables_d1(&log), Arc::default());
+        let variables = fresh_variables_snapshot();
+
+        read_variables(&db, &variables)
+            .await
+            .expect("an absent table is not a failure");
+
+        assert!(!variables.remembers_a_failure());
+        assert!(
+            statements(&log)
+                .iter()
+                .any(|sql| sql.contains("sqlite_master")),
+            "the gate asked whether the table exists: {:?}",
+            statements(&log)
+        );
+    }
+
+    /// **The gate fills the snapshot the build then reads through**: its one
+    /// read is the build's read, moved, so resolving config afterwards sends
+    /// the table nothing (`d1_read_cost`'s cold phases are unchanged).
+    #[wasm_bindgen_test]
+    async fn a_passed_gate_is_the_builds_one_variables_read() {
+        let log = js_sys::Array::new();
+        let db = request_database(variables_d1(&log, VARIABLES), Arc::default());
+        let variables = fresh_variables_snapshot();
+
+        read_variables(&db, &variables)
+            .await
+            .expect("the table reads");
+        let gate = statements(&log).len();
+        let source = request_config_source(db.clone(), HashMap::new(), variables.clone());
+        let auth = source
+            .load_for_block(
+                "wafer-run/auth",
+                &[wafer_block::ConfigVar::new("WAFER_RUN__AUTH__A", "doc", "")],
+            )
+            .await
+            .expect("auth resolves");
+
+        assert_eq!(auth.get("WAFER_RUN__AUTH__A"), Some("from-d1"));
+        assert_eq!(
+            statements(&log).len(),
+            gate,
+            "the build's config reads went through the gate's read"
+        );
+    }
+
+    /// A D1 binding over a database with no variables table: a list of it
+    /// fails `no such table`, and the existence probe answers 0. Every
+    /// statement is pushed onto `log`.
+    fn absent_variables_d1(log: &js_sys::Array) -> worker::D1Database {
+        let handle = js_sys::Function::new_with_args(
+            "log",
+            "const meta = { rows_read: 0, rows_written: 0, changes: 0 };
+            return {
+                prepare(sql) {
+                    const stmt = {
+                        params: [],
+                        bind(...params) { stmt.params = params; return stmt; },
+                        all() {
+                            log.push(JSON.stringify([sql, stmt.params]));
+                            if (sql.includes('sqlite_master')) {
+                                return Promise.resolve({ success: true,
+                                    results: [{ present: 0 }], meta });
+                            }
+                            if (sql.includes('pragma_table_info')) {
+                                return Promise.resolve({ success: true, results: [], meta });
+                            }
+                            return Promise.reject(new Error(
+                                'D1_ERROR: no such table: impresspress__admin__variables: SQLITE_ERROR'));
+                        },
+                        run() { return stmt.all(); },
+                        raw() { return Promise.reject(new Error('read through all()')); },
+                    };
+                    return stmt;
+                },
+                batch() { return Promise.reject(new Error('no batch here')); },
+            };",
+        )
+        .call1(&wasm_bindgen::JsValue::NULL, log)
+        .expect("the fake D1 builds");
+        wasm_bindgen::JsCast::unchecked_into::<worker::D1Database>(handle)
     }
 
     /// A D1 binding over a migrated variables table holding `rows` (a JS
