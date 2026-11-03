@@ -1,0 +1,16 @@
+{
+  "name": "impresspress-miniflare-outage",
+  "private": true,
+  "description": "End-to-end D1 outage scenarios for impresspress-cloudflare on the real worker::Env path, under Miniflare",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "miniflare": "4.20260730.0",
+    "smol-toml": "1.9.1"
+  }
+}

@@ -1,0 +1,49 @@
+[package]
+name = "impresspress-miniflare-fixture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Worker the Miniflare D1-outage harness deploys: impresspress as a wafer-site-shaped or an impresspress-site deployment"
+publish = false
+
+# A Cloudflare consumer in the shape `impresspress build/deploy --target
+# cloudflare` expects (a cdylib with `#[event(fetch)]` handing every request to
+# `impresspress_cloudflare::run_with_config`), built by the harness through the
+# CLI's own build and packaging code (`crates/impresspress/examples/
+# miniflare_deploy.rs`). wasm32-only, so not a default member (see the root
+# manifest). One build serves both shapes; the `MINIFLARE_FIXTURE_SHAPE` Worker
+# var picks one (`src/lib.rs`).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# The CLI builds with `--no-default-features --features target-cloudflare`.
+target-cloudflare = [
+    "dep:impresspress-cloudflare",
+    "dep:wafer-run",
+    "dep:wafer-block",
+    "dep:wafer-core",
+    "dep:async-trait",
+    "dep:serde_json",
+    "dep:worker",
+    "dep:wasm-bindgen",
+]
+
+[dependencies]
+# Only the always-on core blocks (admin, auth, auth-ui, email, system): the
+# outage scenarios need a stored-config route (`/b/auth/login`) and nothing
+# that a feature block adds.
+impresspress-cloudflare = { path = "../../../crates/impresspress-cloudflare", optional = true, default-features = false }
+wafer-run = { workspace = true, optional = true }
+wafer-block = { workspace = true, optional = true }
+wafer-core = { workspace = true, optional = true }
+# `wafer_block::wafer_async_trait` expands to `async_trait`, which the caller
+# names.
+async-trait = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+worker = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+
+[lints]
+workspace = true
