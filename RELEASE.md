@@ -23,18 +23,26 @@ what it did happens on every native boot.
 
 **What changes.** A cold request that finds another request building the
 isolate's runtime waits for it, re-checking on a timer. It re-checked every
-25 ms for up to 10 s, and each check costs about a quarter of a millisecond
+25 ms for up to 10 s, and each check cost about a quarter of a millisecond
 of CPU on Workers, so a second of waiting spent the Free plan's whole 10 ms
 budget; such waiters were a third of the requests Cloudflare killed in the
 2026-11-03 outage check. It now re-checks after 25, 50, 100, then every
-200 ms (about 4 ms of CPU for the longest wait), and answers **503 with
-`Retry-After`** (at least the retry window's remaining time) once it has
-waited 3 s and the build is still running. A build that takes longer than
-that is one whose request Cloudflare stopped; the slot is freed by its lease
-(5 or 10 s), for a later request.
+200 ms (about 4 ms of CPU for the longest wait), and once it has waited 3 s
+with the build still running it answers **503 with `Retry-After`**: the time
+left until the build slot can be taken over (its owner's 5 or 10 s lease),
+and at least the retry window's remaining time.
 
-**Who has to act.** No one. A client may see a 503 + `Retry-After` during a
-cold start where it used to wait up to 10 s, or be cut off by Cloudflare.
+A build still running after 3 s is usually one whose request Cloudflare
+stopped (a prepared cold build takes 0.9–1.5 s), but it can also be a slow
+dynamic build (one has been measured at 8.4 s) or one held up by a slow
+backend. A request whose wait crosses a stopped owner's lease takes over
+the slot and builds.
+
+**Who has to act.** No one. During a cold start, a client may see a 503 +
+`Retry-After` where it used to wait up to 10 s (or, on the Free plan, be cut
+off by Cloudflare). On a plan with a higher CPU limit, concurrent cold
+requests during a dynamic build longer than 3 s now get that 503 at about
+3.2 s instead of being served when the build finishes.
 
 ### Cloudflare: a retry checks D1 before it rebuilds; `/health` says `retries`
 
