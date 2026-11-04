@@ -607,9 +607,8 @@ impl TestContext {
     /// enforce it explicitly.
     ///
     /// NOT from registration order, which never drove it: `block_names()` is
-    /// sorted, and since `blocks::register_admin` took over from the
-    /// zero-arg manifest, admin in fact registers *after* every manifest
-    /// block.
+    /// sorted, and admin in fact registers *after* every zero-arg manifest
+    /// block (`blocks::application_blocks` lists it after them).
     pub async fn with_auth() -> Self {
         Self::with_admin().await.with_auth_added().await
     }
@@ -1614,6 +1613,21 @@ impl TestContext {
             .expect("seed env vars at boot");
     }
 
+    /// The declarations this fixture's boot seeds from: what a production
+    /// runtime registers — every application block this build compiles in
+    /// (`blocks::all_block_infos`) — plus the blocks the test registered,
+    /// which take precedence where a test re-registers one under the same
+    /// name.
+    fn seed_declarations(&self) -> Vec<Arc<wafer_run::BlockInfo>> {
+        let mut declarations: Vec<Arc<wafer_run::BlockInfo>> = crate::blocks::all_block_infos()
+            .into_iter()
+            .filter(|info| !self.block_infos.iter().any(|own| own.name == info.name))
+            .map(Arc::new)
+            .collect();
+        declarations.extend(self.block_infos.iter().cloned());
+        declarations
+    }
+
     /// [`Self::seed_env_vars`] without the `expect`, for a test that is about
     /// the seeder's behaviour WHEN THE DATABASE FAILS.
     ///
@@ -1627,9 +1641,13 @@ impl TestContext {
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect();
-        crate::platform_state::variables::seed_and_load(&self.db_service, &owned, &self.block_infos)
-            .await
-            .map(|_| ())
+        crate::platform_state::variables::seed_and_load(
+            &self.db_service,
+            &owned,
+            &self.seed_declarations(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// [`Self::boot_config_service`], then layer `adapter_values` onto BOTH
@@ -1645,7 +1663,7 @@ impl TestContext {
         let mut vars = crate::platform_state::variables::seed_and_load(
             &self.db_service,
             &[],
-            &self.block_infos,
+            &self.seed_declarations(),
         )
         .await
         .expect("seed and load variables at boot");

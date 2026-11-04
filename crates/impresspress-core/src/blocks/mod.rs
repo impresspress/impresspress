@@ -65,119 +65,142 @@ pub mod userportal;
 #[cfg(feature = "block-vector")]
 pub mod vector;
 
-/// The single `(feature-cfg, name, constructor)` manifest of impresspress feature
-/// blocks whose constructors take **no arguments** (every `impresspress/*` block
-/// except the three special cases below).
+/// The single `(feature-cfg, constructor)` manifest of impresspress feature
+/// blocks whose constructors take **no arguments**.
 ///
-/// This macro is the one place enumerating that block set. It generates, from
-/// the same entries:
+/// It generates [`application_blocks`], the one list of the application
+/// blocks this build compiles in — these, then the three whose constructors
+/// take an argument ([`ApplicationBlockArgs`]): `impresspress/admin` (the
+/// live `BlockSettings` handle), `impresspress/llm` (an
+/// `Arc<dyn ProviderAdmin>`) and `impresspress/fastembed` (the embedder's
+/// model cache directory). Everything that enumerates the application blocks
+/// derives from that list:
 ///
-/// - [`all_block_infos`] — `.info()` over every entry (config-var discovery,
-///   inspector route granularity, the route/auth policy table);
-/// - [`register_feature_blocks`] — `register_block(name, Arc::new(Ctor::new()))`
-///   over every entry, called from `ImpresspressBuilder::register` (behind
-///   `build`) on **both** native and wasm32. It answers the names it registered, which start the prepared
-///   plan's application block inventory: a runtime build reads that inventory
-///   from its own registrations, never from [`all_block_infos`].
+/// - [`register_application_blocks`] — registers each on a runtime and
+///   answers its name, which is where a prepared plan's application block
+///   inventory comes from (`ImpresspressBuilder::register`);
+/// - [`all_block_infos`] — `.info()` over each, built with
+///   [`ApplicationBlockArgs::declarative`]: config-var discovery, the
+///   inspector route table, the route/auth policy table, and a seed before a
+///   runtime exists.
 ///
-/// Replaces the three formerly hand-synced lists (per-block `register_static_block!`
-/// linkme sites on native, the `register_all_static_blocks` wasm32 list, and
-/// the `all_block_infos` push list) — audit findings #12/#13. A block is now
-/// added in exactly one place.
+/// Replaces the formerly hand-synced lists (per-block `register_static_block!`
+/// linkme sites on native, the `register_all_static_blocks` wasm32 list, the
+/// `all_block_infos` push list, and the explicit admin/llm/fastembed
+/// registrations beside them) — audit findings #12/#13. A block is added in
+/// exactly one place.
 ///
 /// Each entry's `cfg` gates the block on its `block-*` Cargo feature; the
 /// dual-target blocks compile with no `cfg` (always on).
 ///
-/// Special cases stay **out** of the manifest and are registered explicitly by
-/// `ImpresspressBuilder::build`, because their constructors are not zero-argument:
-/// `impresspress/llm` (`Arc<dyn ProviderAdmin>`, via [`register_llm`]),
-/// `wafer-run/auth` (framework `AuthBlock` wrapping `AuthServiceImpl`, via
-/// [`register_auth`]), `impresspress/transformers-embed` (injected
-/// `Arc<dyn EmbeddingService>`) and `impresspress/fastembed` (the embedder's
-/// model cache directory). `llm`'s `BlockInfo` is still added to
-/// [`all_block_infos`] below via a `NoopProviderAdmin` handle, and
-/// `fastembed`'s via an empty cache path (info is declarative and never
-/// drives the provider surface or loads a model).
+/// Not application blocks, and so not here: `wafer-run/auth` (the framework
+/// `AuthBlock` over `AuthServiceImpl`, via [`register_auth`]) and
+/// `impresspress/transformers-embed` (over an embedding service the browser
+/// injects).
 macro_rules! feature_block_manifest {
     ( $( $(#[$cfg:meta])? $ctor:path ),+ $(,)? ) => {
-        /// `BlockInfo` for every zero-arg impresspress feature block, plus the
-        /// two registered outside the manifest whose declarative `info()`
-        /// still belongs in the discovery set: `impresspress/admin`
-        /// (constructed unwired — see [`register_admin`]) and
-        /// `impresspress/llm` (constructed with a `NoopProviderAdmin`).
-        ///
-        /// Used by `collect_all_config_vars()` to discover declared config
-        /// variables, by the inspector route table, and by the routing/auth
-        /// policy, before block registration runs.
-        pub fn all_block_infos() -> Vec<wafer_run::BlockInfo> {
-            use wafer_run::Block as _;
-            #[cfg(any(test, feature = "test-support"))]
-            note_block_set_sweep();
-            let mut infos: Vec<wafer_run::BlockInfo> = Vec::new();
-            $(
-                $(#[$cfg])?
-                infos.push(<$ctor>::new().info());
-            )+
-
-            // `impresspress/admin` is registered separately (its ctor takes
-            // the runtime's live `BlockSettings` handle — see
-            // [`register_admin`]), but its declarative `info()` belongs in the
-            // discovery set exactly as it did when it sat in the manifest:
-            // this set feeds `collect_all_config_vars()`, the inspector route
-            // table and the routing/auth policy, none of which care about the
-            // handle. The unwired `new()` is therefore the right constructor
-            // here, and the wrong one for registration.
-            infos.push(admin::AdminBlock::new().info());
-
-            // `impresspress/llm` is registered separately (its ctor takes
-            // `Arc<dyn ProviderAdmin>`), but its declarative `info()` belongs
-            // in the discovery set. A no-op provider-admin handle suffices.
-            #[cfg(feature = "block-llm")]
-            infos.push(
-                llm::LlmBlock::new(std::sync::Arc::new(llm::provider_admin::NoopProviderAdmin))
-                    .info(),
-            );
-
-            // `impresspress/fastembed` is registered separately (its ctor
-            // takes the builder's model cache directory). `info()` loads no
-            // model, so the directory it is given here is never read. Native
-            // only: `block-fastembed` pulls ONNX Runtime and is never enabled
-            // on wasm32.
-            #[cfg(feature = "block-fastembed")]
-            infos.push(fastembed::FastembedBlock::new(std::path::PathBuf::new()).info());
-
-            infos
-        }
-
-        /// Register every zero-arg impresspress feature block on the runtime.
-        ///
-        /// Called from `ImpresspressBuilder::register` (behind `build` and
-        /// `build_with_plan_exporter`) on **both** native and wasm32 —
-        /// there is no longer a native (linkme) / wasm32 (manual list) split.
-        /// The `impresspress/llm`, `wafer-run/auth` and
-        /// `impresspress/transformers-embed` blocks are registered explicitly by
-        /// the builder afterwards (non-zero-arg constructors).
-        ///
-        /// Answers the names it registered, in registration order: the
-        /// builder's application block inventory starts from them.
-        pub fn register_feature_blocks(
-            wafer: &mut wafer_run::Wafer,
-        ) -> Result<Vec<&'static str>, wafer_run::RuntimeError> {
+        /// Every application block this build compiles in, constructed with
+        /// `args`, by the name it registers under: the one list
+        /// [`register_application_blocks`] and [`all_block_infos`] derive
+        /// from. See the manifest's doc.
+        pub fn application_blocks(
+            args: &ApplicationBlockArgs,
+        ) -> Vec<(&'static str, std::sync::Arc<dyn wafer_run::Block>)> {
             use std::sync::Arc;
-            let mut registered = Vec::new();
+            let mut blocks: Vec<(&'static str, Arc<dyn wafer_run::Block>)> = Vec::new();
             $(
                 $(#[$cfg])?
-                {
-                    wafer.register_block(
-                        <$ctor>::BLOCK_NAME,
-                        Arc::new(<$ctor>::new()),
-                    )?;
-                    registered.push(<$ctor>::BLOCK_NAME);
-                }
+                blocks.push((<$ctor>::BLOCK_NAME, Arc::new(<$ctor>::new())));
             )+
-            Ok(registered)
+            // Its constructor takes the same `Arc<RwLock<BlockSettings>>` the
+            // router reads as `Arc<dyn FeatureConfig>`, so the block toggle
+            // updates the snapshot the router reads per request instead of
+            // only writing the table.
+            blocks.push((
+                admin::ADMIN_BLOCK_ID,
+                Arc::new(admin::AdminBlock::with_block_settings(args.block_settings.clone())),
+            ));
+            #[cfg(feature = "block-llm")]
+            blocks.push((
+                llm::LlmBlock::BLOCK_NAME,
+                Arc::new(llm::LlmBlock::new(args.provider_admin.clone())),
+            ));
+            // Native only: `block-fastembed` pulls ONNX Runtime and is never
+            // enabled on wasm32.
+            #[cfg(feature = "block-fastembed")]
+            blocks.push((
+                fastembed::FastembedBlock::BLOCK_NAME,
+                Arc::new(fastembed::FastembedBlock::new(args.model_cache_dir.clone())),
+            ));
+            blocks
         }
     };
+}
+
+/// What the application blocks whose constructors take an argument are
+/// constructed with; see [`application_blocks`].
+pub struct ApplicationBlockArgs {
+    /// `impresspress/admin`'s live settings handle, shared with the router.
+    pub block_settings: std::sync::Arc<std::sync::RwLock<crate::features::BlockSettings>>,
+    /// `impresspress/llm`'s provider-management handle: the concrete
+    /// `ProviderLlmService` with the `llm` feature, `NoopProviderAdmin`
+    /// without it.
+    #[cfg(feature = "block-llm")]
+    pub provider_admin: std::sync::Arc<dyn llm::provider_admin::ProviderAdmin>,
+    /// Where `impresspress/fastembed` caches its model.
+    #[cfg(feature = "block-fastembed")]
+    pub model_cache_dir: std::path::PathBuf,
+}
+
+impl ApplicationBlockArgs {
+    /// Arguments for reading declarations only: no `info()` reads any of
+    /// them (admin's handle, a provider handle that manages nothing, a model
+    /// directory that is never opened), so the declarations are the ones a
+    /// registered block reports.
+    pub fn declarative() -> Self {
+        Self {
+            block_settings: std::sync::Arc::default(),
+            #[cfg(feature = "block-llm")]
+            provider_admin: std::sync::Arc::new(llm::provider_admin::NoopProviderAdmin),
+            #[cfg(feature = "block-fastembed")]
+            model_cache_dir: std::path::PathBuf::new(),
+        }
+    }
+}
+
+/// `BlockInfo` for every application block this build compiles in
+/// ([`application_blocks`], constructed declaratively), before any runtime
+/// exists.
+///
+/// Used by `collect_all_config_vars()` to discover declared config
+/// variables, by the inspector route table and the routing/auth policy, and
+/// by a test fixture standing in for a runtime's registrations. A runtime
+/// reads its own blocks' declarations from its registrations
+/// (`Wafer::block_infos()`), never from here.
+pub fn all_block_infos() -> Vec<wafer_run::BlockInfo> {
+    #[cfg(any(test, feature = "test-support"))]
+    note_block_set_sweep();
+    application_blocks(&ApplicationBlockArgs::declarative())
+        .iter()
+        .map(|(_, block)| block.info())
+        .collect()
+}
+
+/// Register every application block ([`application_blocks`], constructed
+/// with `args`) on the runtime, and answer their names, in registration
+/// order: a prepared plan's application block inventory.
+///
+/// Called from `ImpresspressBuilder::register` on **both** native and wasm32.
+pub fn register_application_blocks(
+    wafer: &mut wafer_run::Wafer,
+    args: &ApplicationBlockArgs,
+) -> Result<Vec<&'static str>, wafer_run::RuntimeError> {
+    let mut registered = Vec::new();
+    for (name, block) in application_blocks(args) {
+        wafer.register_block(name, block)?;
+        registered.push(name);
+    }
+    Ok(registered)
 }
 
 feature_block_manifest! {
@@ -216,8 +239,8 @@ thread_local! {
 /// constructing every feature block again — and the request-path tests
 /// assert that a build adds none. Two kinds of use count:
 ///
-/// - every call of `all_block_infos()`, directly or through a wrapper such
-///   as [`block_enabled_defaults`];
+/// - every call of `all_block_infos()`, directly or through any function
+///   that calls it;
 /// - every read of `config_vars`' declared-key memo, a process-wide set built
 ///   from `all_block_infos()` once. A read counts whether or not it is the
 ///   one that builds the memo: on a cold process (a new Worker isolate) the
@@ -283,15 +306,17 @@ pub fn static_asset_bytes(logical: &str) -> Option<&'static [u8]> {
 }
 
 /// The `(block_name, default_enabled)` pairs the boot-time enablement seed
-/// writes into `impresspress__admin__block_settings`.
+/// writes into `impresspress__admin__block_settings`, for the blocks
+/// `infos` declares — a runtime's registered declarations
+/// (`Wafer::block_infos()`), consumer blocks included.
 ///
 /// Derived, not listed: a block declares whether an operator may turn it off
 /// (`can_disable`) and what it ships as (`default_enabled`) in its own
 /// `info()`, and this is the only place those declarations are collected.
 /// Passed to [`crate::platform_state::block_settings::load_and_seed`] by each
-/// target's boot path (the CLI, the Cloudflare deploy-init hook, the browser
-/// config loader), which is what keeps the planner itself free of any
-/// dependency on the block registry.
+/// target's seeding (native's after registration, the Cloudflare deploy
+/// funnel's hook, the browser's boot hook), which is what keeps the planner
+/// itself free of any dependency on the block registry.
 ///
 /// Three consequences of the `can_disable` filter, each deliberate:
 ///
@@ -309,16 +334,9 @@ pub fn static_asset_bytes(logical: &str) -> Option<&'static [u8]> {
 ///   `.can_disable(true)` would reintroduce that, which is why the reason is
 ///   recorded here rather than in a name-matching special case.
 /// - **The set follows the build.** Each entry of the block manifest is
-///   `#[cfg]`-gated, so a bundle compiled without `block-tickets` seeds no
-///   `tickets` row. That block is not registered in such a build either, so
-///   its routes 404 whether the row says enabled or not.
-pub fn block_enabled_defaults() -> Vec<(String, bool)> {
-    enabled_defaults_from(&all_block_infos())
-}
-
-/// The rule behind [`block_enabled_defaults`], over an explicit slice so it can
-/// be exercised on constructed `BlockInfo`s rather than only on whatever the
-/// current feature set happens to register.
+///   `#[cfg]`-gated, so a bundle compiled without `block-tickets` registers
+///   no `tickets` block and seeds no row for it; its routes 404 whether a row
+///   says enabled or not.
 pub fn enabled_defaults_from<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
     infos: &[B],
 ) -> Vec<(String, bool)> {
@@ -376,73 +394,6 @@ pub fn all_block_migrations() -> Vec<&'static crate::migration_helper::BlockMigr
         #[cfg(feature = "block-vector")]
         &vector::migrations::MIGRATIONS,
     ]
-}
-
-/// Register the admin feature block with the WAFER runtime.
-///
-/// `AdminBlock` is not in the feature-block manifest because its production
-/// constructor takes the runtime's live enablement snapshot — the same
-/// `Arc<RwLock<BlockSettings>>` the builder hands the router as its
-/// `Arc<dyn FeatureConfig>`. Call this from `ImpresspressBuilder::build()` in
-/// place of a manifest entry.
-///
-/// That handle is what makes the block toggle take effect without a restart.
-/// `routing::route_to_block` reads the snapshot on every request, so the
-/// toggle updates it after persisting the row; the manifest's zero-arg
-/// `AdminBlock::new()` would leave the field at `Default` — a private
-/// snapshot nothing reads — and the toggle would reach the table and stop
-/// there. `tests/autoreg_smoke.rs` pins that admin is NOT in the manifest so
-/// that cannot regress silently.
-///
-/// Answers the name it registered.
-pub fn register_admin(
-    w: &mut wafer_run::Wafer,
-    block_settings: std::sync::Arc<std::sync::RwLock<crate::features::BlockSettings>>,
-) -> Result<&'static str, wafer_run::RuntimeError> {
-    w.register_block(
-        admin::ADMIN_BLOCK_ID,
-        std::sync::Arc::new(admin::AdminBlock::with_block_settings(block_settings)),
-    )?;
-    Ok(admin::ADMIN_BLOCK_ID)
-}
-
-/// Register the LLM feature block with the WAFER runtime.
-///
-/// LlmBlock is not in the feature-block manifest because its constructor takes
-/// `Arc<dyn ProviderAdmin>`. Call this after the LLM service router is
-/// registered in `ImpresspressBuilder::build()`.
-///
-/// `provider_admin` is the provider-management seam: the concrete
-/// `ProviderLlmService` on native (`feature = "llm"`) or a `NoopProviderAdmin`
-/// on wasm32 (where the browser configures providers inside its own
-/// `BrowserLlmService`).
-#[cfg(feature = "block-llm")]
-///
-/// Answers the name it registered.
-pub fn register_llm(
-    w: &mut wafer_run::Wafer,
-    provider_admin: std::sync::Arc<dyn llm::provider_admin::ProviderAdmin>,
-) -> Result<&'static str, wafer_run::RuntimeError> {
-    w.register_block(
-        llm::LlmBlock::BLOCK_NAME,
-        std::sync::Arc::new(llm::LlmBlock::new(provider_admin)),
-    )?;
-    Ok(llm::LlmBlock::BLOCK_NAME)
-}
-
-/// Register `impresspress/fastembed`, caching its model under
-/// `model_cache_dir`. Not in the zero-arg manifest because its constructor
-/// takes that directory. Answers the name it registered.
-#[cfg(feature = "block-fastembed")]
-pub fn register_fastembed(
-    w: &mut wafer_run::Wafer,
-    model_cache_dir: &std::path::Path,
-) -> Result<&'static str, wafer_run::RuntimeError> {
-    w.register_block(
-        fastembed::FastembedBlock::BLOCK_NAME,
-        std::sync::Arc::new(fastembed::FastembedBlock::new(model_cache_dir)),
-    )?;
-    Ok(fastembed::FastembedBlock::BLOCK_NAME)
 }
 
 /// Register the framework `wafer-run/auth` block — wafer-core's `AuthBlock`

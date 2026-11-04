@@ -1114,7 +1114,9 @@ impl wafer_run::Block for ConsumerBlock {
 /// Cloudflare deploy funnel and the browser do: a consumer block registered
 /// on the builder, and one registered on the built runtime, each get their
 /// declared enablement default and their auto-generated secret by the time
-/// `build_native_runtime` hands the runtime back to boot.
+/// `build_native_runtime` hands the runtime back to boot. The builder's
+/// blocks are seeded and published before the post-build hook runs, so the
+/// hook already reads `default_enabled(false)` honoured.
 #[tokio::test]
 async fn native_seeds_consumer_blocks_declarations() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1125,6 +1127,8 @@ async fn native_seeds_consumer_blocks_declarations() {
     let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
         .await
         .expect("construct sqlite database service");
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let seen_by_post_build = Arc::clone(&seen);
     let hooks = AppHooks {
         register_blocks: Box::new(|builder| {
             Ok(builder.extra_block(
@@ -1135,7 +1139,15 @@ async fn native_seeds_consumer_blocks_declarations() {
                 )),
             ))
         }),
-        register_post_build: Box::new(|wafer, _storage| {
+        register_post_build: Box::new(move |wafer, _storage| {
+            let published = wafer
+                .config_snapshot()
+                .get(impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY)
+                .map(|json| {
+                    impresspress_core::features::BlockSettings::state_for(json, "example/consumer")
+                        .enabled
+                });
+            *seen_by_post_build.lock().expect("lock") = Some(published);
             wafer.register_block(
                 "example/late",
                 Arc::new(ConsumerBlock(
@@ -1155,6 +1167,11 @@ async fn native_seeds_consumer_blocks_declarations() {
     )
     .await
     .expect("build impresspress runtime");
+    assert_eq!(
+        *seen.lock().expect("lock"),
+        Some(Some(false)),
+        "the post-build hook reads the builder's consumer block as seeded: off"
+    );
 
     let stored = impresspress_core::platform_state::block_settings::load(&database)
         .await

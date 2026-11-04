@@ -378,7 +378,7 @@ mod boot_hook_tests {
     }
 
     /// One block that ships enabled. Held here rather than taken from
-    /// `blocks::block_enabled_defaults()` so the fixture proves the same thing
+    /// `blocks::enabled_defaults_from(&all_block_infos())` so the fixture proves the same thing
     /// in every feature build: this crate's default feature set has no
     /// `can_disable` block at all, so the real defaults list is empty there and
     /// a seeding call over it would write nothing for a reason that has nothing
@@ -472,7 +472,7 @@ mod boot_hook_tests {
     ///
     /// Note which build catches a regression here. This crate's DEFAULT
     /// feature set enables no `can_disable` block, so
-    /// `blocks::block_enabled_defaults()` is empty and a seeding hook wired
+    /// `blocks::enabled_defaults_from(&all_block_infos())` is empty and a seeding hook wired
     /// back onto the request path would write nothing in that build and keep
     /// this green. The `--features full` lane is where it fails, which is why
     /// CI now runs this suite twice.

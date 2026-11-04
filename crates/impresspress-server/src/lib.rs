@@ -307,19 +307,27 @@ pub async fn build_native_runtime(
     // has registered them, below, from the same set Cloudflare and the
     // browser seed from.
     let env_vars = filter_to_declared_keys(app_env.clone());
-    let vars = impresspress_core::platform_state::variables::seed_environment_and_load(
+    impresspress_core::platform_state::variables::seed_environment_and_jwt_secret(
         &database, &env_vars,
     )
-    .await
-    .map_err(|e| anyhow!("seed and load variables: {e}"))?;
-    tracing::info!(vars = vars.len(), "variables loaded from database");
+    .await;
 
-    // 6. Extract JWT secret and feature config from variables. An empty
-    // JWT secret would silently fail-open every token verification; bail
-    // explicitly so the operator sees the misconfiguration at boot.
-    let jwt_secret = vars
-        .get(impresspress_core::blocks::auth::JWT_SECRET_KEY)
-        .cloned()
+    // 6. Read the three values `build()` takes — the JWT secret, CORS origins
+    // and CSP — by key; the full set is loaded once, after the declared
+    // secrets are seeded, below. An empty JWT secret would silently fail-open
+    // every token verification; bail explicitly so the operator sees the
+    // misconfiguration at boot.
+    let read = |key: &'static str| {
+        let database = database.clone();
+        async move {
+            impresspress_core::platform_state::variables::find_by_key(&database, key)
+                .await
+                .map(|row| row.map(|row| row.value))
+                .map_err(|e| anyhow!("read variable `{key}`: {e}"))
+        }
+    };
+    let jwt_secret = read(impresspress_core::blocks::auth::JWT_SECRET_KEY)
+        .await?
         .ok_or_else(|| {
             anyhow!(
                 "missing required variable `{}` — auto-generation should seed this; \
@@ -333,14 +341,12 @@ pub async fn build_native_runtime(
             impresspress_core::blocks::auth::JWT_SECRET_KEY
         ));
     }
-    // What is stored now; seeded towards the registered blocks' defaults
-    // after registration, below. A read error here is always a genuine
-    // operational failure (backend outage/corruption) — `block_settings::load`
-    // never fabricates "every block enabled" out of one. Bail rather than
-    // boot with a security-relevant setting silently defaulted open.
-    let features = impresspress_core::platform_state::block_settings::load(&database)
-        .await
-        .map_err(|e| anyhow!("load block settings: {e}"))?;
+    let cors_allowed_origins = read(impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY)
+        .await?
+        .unwrap_or_default();
+    let csp_directives = read(impresspress_core::config_vars::CSP_DIRECTIVES_KEY)
+        .await?
+        .unwrap_or_else(|| impresspress_core::config_vars::DEFAULT_CSP_DIRECTIVES.to_string());
 
     // `IMPRESSPRESS_REQUEST_LOG`: an operational flag read straight from the
     // process env. It is an infrastructure key
@@ -381,28 +387,16 @@ pub async fn build_native_runtime(
         )
         .both(
             impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY,
-            vars.get(impresspress_core::config_vars::CORS_ALLOWED_ORIGINS_KEY)
-                .cloned()
-                .unwrap_or_default(),
+            cors_allowed_origins,
         )
         .both(
             impresspress_core::config_vars::CSP_DIRECTIVES_KEY,
-            vars.get(impresspress_core::config_vars::CSP_DIRECTIVES_KEY)
-                .cloned()
-                .unwrap_or_else(|| {
-                    impresspress_core::config_vars::DEFAULT_CSP_DIRECTIVES.to_string()
-                }),
-        )
-        // Fan-out block_settings so consumer blocks (e.g. userportal) can read
-        // enablement state via `ctx.config_get` without re-querying the
-        // `block_settings` table per request.
-        .both(
-            impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
-            features.to_config_json(),
+            csp_directives,
         )
         // Not a config value — a fact about the target. This is the one build
-        // that hands `variables::seed_and_load` a real process environment
-        // (Cloudflare never calls it, the browser calls it with `&[]`), so it
+        // that seeds a real process environment
+        // (`variables::seed_environment_and_jwt_secret`; Cloudflare seeds none,
+        // the browser calls `seed_and_load` with `&[]`), so it
         // is the one that publishes the marker the admin Variables page reads
         // before offering to hand a key back to that environment. Absent means
         // "no", so no other target has to remember to say anything — and
@@ -468,7 +462,7 @@ pub async fn build_native_runtime(
 
     // The blocks' declared keys resolve from the variables table, then from the
     // process environment. The table wins where it holds a row: the env loop in
-    // `seed_and_load` has already applied the precedence for every key
+    // `seed_environment_and_jwt_secret` has already applied the precedence for every key
     // impresspress declares. The environment answers the keys only wafer-run's
     // own service blocks declare — the `WAFER_RUN__NETWORK__*` limits — which
     // `filter_to_declared_keys` keeps out of the table (they are operator
@@ -487,7 +481,6 @@ pub async fn build_native_runtime(
         .crypto(crypto)
         .network(impresspress_native::make_fetch_network_service())
         .logger(impresspress_native::make_tracing_logger())
-        .block_settings(features)
         .wrap_grants(db_grants)
         // Hand the SQLite path to the builder so the `native-embedding`
         // feature can open a dedicated connection for `SqliteVecService`.
@@ -501,40 +494,83 @@ pub async fn build_native_runtime(
         .map_err(|e| anyhow!("register the application's blocks: {e}"))?;
     let block_settings_handle = builder.block_settings_handle();
     let mut wafer = builder.build().context("build impresspress runtime")?;
+
+    // Seed from the runtime's registered declarations — consumer blocks
+    // included — as the Cloudflare deploy funnel and the browser boot do:
+    // the secrets they declare, then the enablement defaults they declare
+    // (the #222 hash-gate), published onto the router's handle and both
+    // config surfaces (where `BLOCK_SETTINGS_CONFIG_KEY` first appears).
+    // Before the post-build hook, so no consumer hook and no config surface
+    // ever sees enablement that has not been seeded.
+    let registered = wafer.block_infos();
+    impresspress_core::platform_state::variables::seed_auto_generated(&database, &registered).await;
+    seed_and_publish_block_settings(
+        &mut wafer,
+        &database,
+        &config_service,
+        &block_settings_handle,
+        &registered,
+    )
+    .await?;
+
     (hooks.register_post_build)(&mut wafer, storage)
         .map_err(|e| anyhow!("register the application's post-build blocks: {e}"))?;
 
-    // Seed from the runtime's registered declarations — consumer and
-    // post-build blocks included — as the Cloudflare deploy funnel and the
-    // browser boot do: the secrets they declare, then the enablement
-    // defaults they declare (the #222 hash-gate). Before boot, so every
-    // block's `Init` sees both.
-    let declarations = wafer.block_infos();
-    let vars = impresspress_core::platform_state::variables::seed_declared_and_load(
-        &database,
-        &declarations,
-    )
-    .await
-    .map_err(|e| anyhow!("seed the declared secrets: {e}"))?;
+    // The blocks the post-build hook added, seeded the same way before boot:
+    // their secrets, and — if any of them can be switched off — the
+    // enablement defaults again, now over every registered block.
+    let all = wafer.block_infos();
+    let added: Vec<_> = all
+        .iter()
+        .filter(|info| !registered.iter().any(|before| before.name == info.name))
+        .cloned()
+        .collect();
+    if added.iter().any(|info| info.can_disable) {
+        seed_and_publish_block_settings(
+            &mut wafer,
+            &database,
+            &config_service,
+            &block_settings_handle,
+            &all,
+        )
+        .await?;
+    }
+    // The one full load, after every declared secret is seeded: what every
+    // block's `Init` resolves its declared config from.
+    let vars =
+        impresspress_core::platform_state::variables::seed_declared_and_load(&database, &added)
+            .await
+            .map_err(|e| anyhow!("seed the declared secrets: {e}"))?;
+    tracing::info!(vars = vars.len(), "variables loaded from database");
     let mut block_config =
         impresspress_core::platform_state::variables::usable_env_exports(app_env);
     block_config.extend(vars);
     config_source.publish(block_config);
+
+    Ok(wafer)
+}
+
+/// Seed `block_settings` towards the defaults `declarations` declare (the
+/// #222 hash-gate) and publish the result onto the router's handle and both
+/// config surfaces. A read error is always a genuine operational failure
+/// (backend outage/corruption) — `block_settings::load_and_seed` never
+/// fabricates "every block enabled" out of one — so it fails the boot rather
+/// than boot with a security-relevant setting silently defaulted open.
+async fn seed_and_publish_block_settings(
+    wafer: &mut Wafer,
+    database: &Arc<dyn DatabaseService>,
+    config_service: &Arc<dyn wafer_core::interfaces::config::service::ConfigService>,
+    handle: &Arc<std::sync::RwLock<impresspress_core::features::BlockSettings>>,
+    declarations: &[Arc<wafer_run::BlockInfo>],
+) -> anyhow::Result<()> {
     let features = impresspress_core::platform_state::block_settings::load_and_seed(
-        &database,
-        &impresspress_core::blocks::enabled_defaults_from(&declarations),
+        database,
+        &impresspress_core::blocks::enabled_defaults_from(declarations),
     )
     .await
     .map_err(|e| anyhow!("load block settings: {e}"))?;
-    builder::publish_block_settings(
-        &mut wafer,
-        &config_service,
-        &block_settings_handle,
-        features,
-    )
-    .map_err(|e| anyhow!("publish block settings: {e}"))?;
-
-    Ok(wafer)
+    builder::publish_block_settings(wafer, config_service, handle, features)
+        .map_err(|e| anyhow!("publish block settings: {e}"))
 }
 
 /// Read the password pepper from the process environment (`var` answers

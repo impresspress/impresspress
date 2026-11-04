@@ -59,7 +59,10 @@ wafer-run#482, which carries #478 and #479.
   `prepare_runtime_plan` and `prepare_runtime_plan_with_config_generation` are
   gone: an exporter needs the registered blocks. Call
   `ImpresspressBuilder::build_with_plan_exporter()`, which builds the runtime
-  and answers it with its exporter (error: `PreparedBuildError`).
+  and answers it with its exporter (error: `PreparedBuildError` —
+  `InvalidInput` for what this builder would put in a plan, refused before
+  anything migrates or seeds; `Plan` for a plan that does not fit the
+  compile; `Build` for a runtime that did not build).
 - `apply_prepared_plan` answers an `AppliedPlanBuilder`, which builds only
   through its `build()`. That compares the application blocks it registered
   with the plan's and refuses a mismatch with
@@ -87,13 +90,18 @@ wafer-run#482, which carries #478 and #479.
   `DeployBootHooks::seeding_towards` take them,
   `platform_state::variables::seed_and_load` and `seed_auto_generated` take
   the declarations to generate secrets for, and `blocks::enabled_defaults_from`
-  (the rule behind `block_enabled_defaults`) is public. A target that needs
-  its variables before `build()` runs `variables::seed_environment_and_load`
-  first and `variables::seed_declared_and_load` after registration, as
-  native does; `builder::publish_block_settings` publishes the seeded
-  settings onto the handle and both config surfaces.
-- `blocks::register_admin` and `blocks::register_llm` answer the name they
-  registered, and `blocks::register_fastembed` registers the embedder.
+  is the enablement-defaults rule over them (`blocks::block_enabled_defaults`
+  is gone). A target that needs its variables before `build()` runs
+  `variables::seed_environment_and_jwt_secret` first and
+  `variables::seed_declared_and_load` after registration, as native does;
+  `builder::publish_block_settings` publishes the seeded settings onto the
+  handle and both config surfaces.
+- The application blocks come from one table, `blocks::application_blocks`
+  (the zero-arg manifest, then admin, llm and fastembed, constructed with
+  `blocks::ApplicationBlockArgs`). `blocks::register_application_blocks`
+  registers them and `blocks::all_block_infos` describes them;
+  `blocks::register_feature_blocks`, `register_admin` and `register_llm` are
+  gone.
 - A block or alias an embedder registers after `Wafer::seal()` is refused
   (`RuntimeError::RegisteredAfterSeal`, `AliasError::AfterSeal`) where it
   used to be silently unreachable; impresspress's own hooks, including

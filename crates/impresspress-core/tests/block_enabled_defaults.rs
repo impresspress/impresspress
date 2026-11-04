@@ -39,9 +39,10 @@ const SHIPPED_DEFAULTS_BEFORE_PR2: &[(&str, bool)] = &[
     ("impresspress/userportal", true),
 ];
 
-/// The derived set, read from the function the seed callers use.
+/// The derived set, read through the rule the seed callers use, over the
+/// compiled application blocks.
 fn derived_defaults() -> BTreeMap<String, bool> {
-    impresspress_core::blocks::block_enabled_defaults()
+    impresspress_core::blocks::enabled_defaults_from(&impresspress_core::blocks::all_block_infos())
         .into_iter()
         .collect()
 }

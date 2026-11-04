@@ -2324,8 +2324,8 @@ async fn a_failed_gate_costs_a_sliver_of_a_cold_build() {
 /// through every block's `Init` — read each block's declaration once, at its
 /// registration (wafer-run#478), and every later reader takes the registered
 /// copies. `blocks::block_set_sweeps` counts every use of the block set
-/// `blocks::all_block_infos()` constructs: a call, directly or through a
-/// wrapper (`block_enabled_defaults`), and every read of `config_vars`'
+/// `blocks::all_block_infos()` constructs: a call, directly or through any
+/// function that calls it, and every read of `config_vars`'
 /// declared-key memo — which `provision` below has already built in this
 /// process, so a read here would be the sweep on a cold isolate and is
 /// counted as one. The counter is per thread, and the build and boot here

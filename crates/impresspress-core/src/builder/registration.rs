@@ -87,7 +87,7 @@ impl ImpresspressBuilder {
     /// Register every block, flow and config on a new runtime, ready to seal.
     ///
     /// A builder that imported a prepared plan builds through
-    /// [`super::AppliedPlanBuilder::build_with_plan_exporter`] instead, which
+    /// [`super::AppliedPlanBuilder::build`] instead, which
     /// also holds the registered application blocks to the plan's.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
         self.register().map(|registered| registered.wafer)
@@ -330,40 +330,46 @@ impl ImpresspressBuilder {
         // browser and Worker build.
         register_middleware_blocks(&mut wafer)?;
 
-        // 5a. Register every zero-arg impresspress feature block (`impresspress/*`)
-        // from the single manifest in `crate::blocks`. The same call runs on
-        // native and wasm32 — there is no longer a linkme (native) /
-        // hand-synced-list (wasm32) split. Previously native relied on
-        // per-block `register_static_block!` (linkme) and wasm32 on a separate
-        // `register_all_static_blocks` list; both are gone. The four
-        // non-zero-arg blocks (`fastembed`, `llm`, framework `auth`,
-        // `transformers-embed`) are registered explicitly.
-        let mut application: Vec<String> = crate::blocks::register_feature_blocks(&mut wafer)?
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-
-        // `impresspress/fastembed` caches its model under the embedder's
-        // directory, so it is registered here with it rather than from the
-        // zero-arg manifest.
-        #[cfg(feature = "block-fastembed")]
-        application.push(
-            crate::blocks::register_fastembed(
-                &mut wafer,
-                required_model_cache_dir(self.model_cache_dir.as_deref(), "block-fastembed")?,
-            )?
-            .to_string(),
-        );
-
-        // Admin is registered here rather than from the manifest: its
-        // constructor takes the same `Arc<RwLock<BlockSettings>>` handed to
+        // 5a. Register every application block (`impresspress/*`) from the
+        // one table in `crate::blocks` (`application_blocks`): the zero-arg
+        // feature manifest, then admin, llm and fastembed with the argument
+        // each constructor takes. The same call runs on native and wasm32.
+        //
+        // Admin's argument is the same `Arc<RwLock<BlockSettings>>` handed to
         // the router below as `Arc<dyn FeatureConfig>`, so the block toggle
-        // can update the snapshot the router reads per request instead of
-        // only writing the table. Without it the toggle is inert on native
-        // until the process restarts.
-        application.push(
-            crate::blocks::register_admin(&mut wafer, self.block_settings.clone())?.to_string(),
-        );
+        // updates the snapshot the router reads per request instead of only
+        // writing the table; without it the toggle is inert on native until
+        // the process restarts.
+        //
+        // Llm's is decided by the `llm` feature alone. With it, the concrete
+        // `ProviderLlmService` — already on the router under `"provider"` —
+        // doubles as the provider-admin handle; without it (every wasm32
+        // build, and a native one that asked for `block-llm` alone) the
+        // runtime cannot manage providers and says so through
+        // `NoopProviderAdmin`, whose `manages_providers()` is `false`; the
+        // browser's `LlmService` still arrives through
+        // `ImpresspressBuilder::llm_service` on the router either way.
+        //
+        // Fastembed's is the embedder's model cache directory, refused here if
+        // the build asked for the block and gave none.
+        let args = crate::blocks::ApplicationBlockArgs {
+            block_settings: self.block_settings.clone(),
+            #[cfg(all(feature = "block-llm", feature = "llm"))]
+            provider_admin: provider_llm_svc,
+            #[cfg(all(feature = "block-llm", not(feature = "llm")))]
+            provider_admin: Arc::new(crate::blocks::llm::provider_admin::NoopProviderAdmin),
+            #[cfg(feature = "block-fastembed")]
+            model_cache_dir: required_model_cache_dir(
+                self.model_cache_dir.as_deref(),
+                "block-fastembed",
+            )?
+            .to_path_buf(),
+        };
+        let mut application: Vec<String> =
+            crate::blocks::register_application_blocks(&mut wafer, &args)?
+                .into_iter()
+                .map(str::to_string)
+                .collect();
 
         wafer.add_block_config(
             "wafer-run/inspector",
@@ -384,39 +390,6 @@ impl ImpresspressBuilder {
         //    manifest because its constructor takes `Arc<dyn AuthService>`. The
         //    wrapped AuthServiceImpl holds no Context: each call hands it one.
         crate::blocks::register_auth(&mut wafer)?;
-
-        // 6b. Register LlmBlock — not in the feature-block manifest because its
-        //     constructor takes `Arc<dyn ProviderAdmin>`.
-        //
-        //     The `llm` feature alone decides the handle. With it, the
-        //     concrete `ProviderLlmService` — already on the router under
-        //     `"provider"` — doubles as the provider-admin handle; without it
-        //     the runtime cannot manage providers and says so through
-        //     `NoopProviderAdmin`, whose `manages_providers()` is `false`.
-        //
-        //     This used to be two registration sites split on
-        //     `target_arch`, which was the same decision written twice: the
-        //     wasm32 arm passed the no-op, and `llm` (tokio + reqwest, not
-        //     `Send` on wasm32) can never be on there anyway, so it took the
-        //     `not(feature = "llm")` branch of the arm it was distinguished
-        //     from. A `block-llm`-without-`llm` build — every wasm32 one, and
-        //     a native one that asked for it — reaches the same handle by the
-        //     same line now, and the browser's `LlmService` still arrives
-        //     through `ImpresspressBuilder::llm_service` on the router either
-        //     way.
-        #[cfg(feature = "block-llm")]
-        {
-            use crate::blocks::llm::provider_admin::ProviderAdmin;
-            // `provider_llm_svc` is already registered on the router under
-            // `"provider"` (it was cloned there); this is its last use, so move
-            // rather than clone it into the provider-admin handle.
-            #[cfg(feature = "llm")]
-            let provider_admin: Arc<dyn ProviderAdmin> = provider_llm_svc;
-            #[cfg(not(feature = "llm"))]
-            let provider_admin: Arc<dyn ProviderAdmin> =
-                Arc::new(crate::blocks::llm::provider_admin::NoopProviderAdmin);
-            application.push(crate::blocks::register_llm(&mut wafer, provider_admin)?.to_string());
-        }
 
         // 7. Extra platform-specific blocks
         for (name, block) in self.extra_blocks {

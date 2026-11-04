@@ -7,10 +7,12 @@
 //! must register, on the host target, so a block silently dropped from the
 //! manifest (a missing block at runtime) fails CI here.
 //!
-//! `register_feature_blocks` is called from `ImpresspressBuilder::build()` on BOTH
-//! native and wasm32; there is no longer a link-time linkme step, so a bare
-//! `Wafer::new()` starts with zero `impresspress/*` blocks until the builder runs
-//! it — this test drives `register_feature_blocks` directly.
+//! `register_application_blocks` is called from `ImpresspressBuilder::build()`
+//! on BOTH native and wasm32; there is no longer a link-time linkme step, so a
+//! bare `Wafer::new()` starts with zero `impresspress/*` blocks until the
+//! builder runs it — this test drives `register_application_blocks` directly.
+//! It and `all_block_infos()` both derive from `blocks::application_blocks`,
+//! the one table.
 
 use std::sync::Arc;
 
@@ -34,7 +36,7 @@ const MANIFEST_ZERO_ARG_BLOCKS: &[&str] = &[
 ];
 
 #[test]
-fn register_feature_blocks_installs_exactly_the_manifest_set() {
+fn register_application_blocks_installs_exactly_the_application_set() {
     let mut w = Wafer::new(Arc::new(StaticConfigSource::default()))
         .expect("Wafer::new should succeed with no lockfile present");
 
@@ -43,43 +45,42 @@ fn register_feature_blocks_installs_exactly_the_manifest_set() {
     for name in MANIFEST_ZERO_ARG_BLOCKS {
         assert!(
             !w.has_block(name),
-            "block {name} must NOT be present before register_feature_blocks runs \
+            "block {name} must NOT be present before register_application_blocks runs \
              (no link-time auto-registration anymore)"
         );
     }
 
-    blocks::register_feature_blocks(&mut w).expect("register_feature_blocks should succeed");
+    let registered =
+        blocks::register_application_blocks(&mut w, &blocks::ApplicationBlockArgs::declarative())
+            .expect("register_application_blocks should succeed");
 
     for name in MANIFEST_ZERO_ARG_BLOCKS {
         assert!(
             w.has_block(name),
-            "block {name} must be registered by the feature-block manifest"
+            "block {name} must be registered from the application table"
         );
     }
-
-    // Special cases are NOT in the manifest — their constructors are not
-    // zero-argument, so the builder installs them explicitly afterwards.
-    // Admin's production constructor takes the runtime's live `BlockSettings`
-    // handle, so the manifest's zero-arg `new()` would register a block whose
-    // toggle cannot reach the router's snapshot — inert on native until the
-    // process restarts. `ImpresspressBuilder::build` installs it through
-    // `blocks::register_admin` instead; this pins that it did not drift back.
-    assert!(
-        !w.has_block("impresspress/admin"),
-        "AdminBlock (Arc<RwLock<BlockSettings>>) must not be in the feature-block manifest"
-    );
-    assert!(
-        !w.has_block("impresspress/llm"),
-        "LlmBlock (Arc<dyn ProviderAdmin>) must not be in the feature-block manifest"
-    );
+    // The blocks whose constructors take an argument are in the same table,
+    // constructed with it.
+    assert!(w.has_block("impresspress/admin"));
+    #[cfg(feature = "block-llm")]
+    assert!(w.has_block("impresspress/llm"));
+    #[cfg(feature = "block-fastembed")]
+    assert!(w.has_block("impresspress/fastembed"));
+    // The framework auth block is the runtime's, not an application block.
     assert!(
         !w.has_block("wafer-run/auth"),
-        "framework AuthBlock (Arc<dyn AuthService>) must not be in the feature-block manifest"
+        "framework AuthBlock (Arc<dyn AuthService>) is not an application block"
     );
-    assert!(
-        !w.has_block("impresspress/fastembed"),
-        "FastembedBlock (the model cache directory) must not be in the feature-block manifest"
-    );
+
+    // Registration and discovery read one list: the names registered are the
+    // names `all_block_infos()` describes, in the same order.
+    let described: Vec<String> = blocks::all_block_infos()
+        .into_iter()
+        .map(|info| info.name)
+        .collect();
+    let registered: Vec<String> = registered.into_iter().map(str::to_string).collect();
+    assert_eq!(registered, described);
 }
 
 /// `all_block_infos()` must enumerate the SAME zero-arg manifest set (so

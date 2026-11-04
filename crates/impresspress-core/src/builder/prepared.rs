@@ -30,7 +30,7 @@ use crate::{
 /// [`ImpresspressBuilder::build_with_plan_exporter`], after executing the real
 /// consumer registration closure. The exporter retains the runtime's
 /// structure as a plan stores it — normalized by
-/// [`PreparedRuntimeStructure::normalize`], the one place that decides it —
+/// `PreparedRuntimeStructure::normalize`, the one place that decides it —
 /// plus the shared `BlockSettings` snapshot handle and the deploy-time grants.
 /// After deploy initialization seeds and republishes those settings,
 /// `prepare_runtime_plan()` observes the final snapshot and can return the
@@ -148,7 +148,11 @@ impl PreparedPlanExporter {
 }
 
 /// Why [`ImpresspressBuilder::build_with_plan_exporter`] or
-/// [`AppliedPlanBuilder::build_with_plan_exporter`] produced no runtime.
+/// [`AppliedPlanBuilder::build`] produced no runtime.
+///
+/// The three variants are three different faults, and a caller that reacts
+/// to one must not catch another: only [`Self::Plan`] says a prepared plan
+/// does not fit this compile.
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedBuildError {
     /// The runtime did not build (`ImpresspressBuilder::build`'s error).
@@ -159,10 +163,16 @@ pub enum PreparedBuildError {
     /// source would print the cause twice.
     #[error("builder.build: {0}")]
     Build(wafer_run::RuntimeError),
-    /// The runtime built, but the plan it was asked to hydrate describes
-    /// another application.
+    /// What this builder would put in a plan is invalid — a route, a
+    /// structural block config, a grant, or an application block's
+    /// declaration (no version, no interface, a duplicate) — so no plan could
+    /// describe it. Refused before the deploy funnel migrates or seeds.
+    #[error("invalid plan input: {0}")]
+    InvalidInput(PreparedPlanError),
+    /// The imported plan describes another application: the blocks this
+    /// compile registered are not the plan's.
     #[error(transparent)]
-    Plan(#[from] PreparedPlanError),
+    Plan(PreparedPlanError),
 }
 
 impl From<wafer_run::RuntimeError> for PreparedBuildError {
@@ -174,7 +184,7 @@ impl From<wafer_run::RuntimeError> for PreparedBuildError {
 /// A builder that imported a prepared plan
 /// ([`ImpresspressBuilder::apply_prepared_plan`]).
 ///
-/// It builds only through [`Self::build_with_plan_exporter`], which refuses a
+/// It builds only through [`Self::build`], which refuses a
 /// runtime whose application blocks differ from the plan's, with
 /// [`PreparedPlanError::StructureMismatch`].
 ///
@@ -222,14 +232,15 @@ impl AppliedPlanBuilder {
             application_inventory(&registered.declarations, &registered.application);
         crate::prepared_plan::sort_application_blocks(&mut inventory);
         if inventory != self.application_blocks {
-            return Err(PreparedPlanError::StructureMismatch(
-                "compiled application block inventory does not match".into(),
-            )
-            .into());
+            return Err(PreparedBuildError::Plan(
+                PreparedPlanError::StructureMismatch(
+                    "compiled application block inventory does not match".into(),
+                ),
+            ));
         }
         *handle.write().map_err(|_| {
-            PreparedPlanError::StructureMismatch(
-                "BlockSettings lock poisoned during plan import".into(),
+            wafer_run::RuntimeError::Config(
+                "BlockSettings lock poisoned while installing the plan's settings".into(),
             )
         })? = self.block_settings;
         Ok(registered.wafer)
@@ -286,7 +297,9 @@ impl ImpresspressBuilder {
     pub fn build_with_plan_exporter(
         self,
     ) -> Result<(wafer_run::Wafer, PreparedPlanExporter), PreparedBuildError> {
-        let structure = self.descriptor()?;
+        let structure = self
+            .descriptor()
+            .map_err(PreparedBuildError::InvalidInput)?;
         self.register_with_exporter(structure)
     }
 
@@ -306,6 +319,12 @@ impl ImpresspressBuilder {
         structure.application_blocks =
             application_inventory(&registered.declarations, &registered.application);
         structure.normalize();
+        // The application blocks are validated now that registration has read
+        // them, still before the caller boots — and so before the deploy
+        // funnel migrates or seeds anything.
+        structure
+            .validate()
+            .map_err(PreparedBuildError::InvalidInput)?;
         Ok((
             registered.wafer,
             PreparedPlanExporter {
@@ -372,11 +391,11 @@ impl ImpresspressBuilder {
     ///
     /// Inject the platform services and run the consumer's usual registration
     /// function first, then invoke this method, and build the runtime with
-    /// the returned [`AppliedPlanBuilder::build_with_plan_exporter`] — the only
+    /// the returned [`AppliedPlanBuilder::build`] — the only
     /// way an imported plan builds. The complete route declaration, final
     /// block configs and consumer grants must match the target compile, or
     /// this refuses the plan; the application block inventory must too, which
-    /// `build_with_plan_exporter` checks against the blocks it registers.
+    /// `AppliedPlanBuilder::build` checks against the blocks it registers.
     /// Deployment-owned block settings, non-secret structural configs and
     /// deploy-time grants are then replaced from the plan without external
     /// I/O. Executable block objects and service backends remain those already
@@ -404,7 +423,7 @@ impl ImpresspressBuilder {
         // from: its routes, its final block-config overrides and its
         // consumer-declared WRAP grants. Each is compared as the plan stores
         // it, before any block is constructed. The application block
-        // inventory is compared by `AppliedPlanBuilder::build_with_plan_exporter`,
+        // inventory is compared by `AppliedPlanBuilder::build`,
         // once registration has read it.
         //
         // The rest of the plan is the deployment's, not the compile's, and is
@@ -1023,7 +1042,7 @@ pub(super) mod tests {
         assert!(
             matches!(
                 error,
-                PreparedBuildError::Plan(PreparedPlanError::InvalidField { .. })
+                PreparedBuildError::InvalidInput(PreparedPlanError::InvalidField { .. })
             ),
             "{error:?}"
         );
@@ -1032,6 +1051,67 @@ pub(super) mod tests {
             0,
             "no block was registered"
         );
+    }
+
+    /// A block with no version cannot be in a plan's application inventory.
+    /// The deploy funnel's build refuses it once registration has read the
+    /// declaration — before it hands back a runtime, so before any boot, any
+    /// migration and any seed.
+    #[tokio::test]
+    async fn a_deploy_build_refuses_an_invalid_application_block_before_migrating() {
+        struct Unversioned;
+
+        #[wafer_block::wafer_async_trait]
+        impl wafer_run::Block for Unversioned {
+            fn info(&self) -> wafer_run::BlockInfo {
+                wafer_run::BlockInfo::new("example/unversioned", "", "http-handler@v1", "")
+            }
+            async fn handle(
+                &self,
+                _ctx: &dyn wafer_run::context::Context,
+                _msg: wafer_run::Message,
+                _input: wafer_run::InputStream,
+            ) -> wafer_run::OutputStream {
+                crate::http::ResponseBuilder::new()
+                    .status(200)
+                    .body(Vec::new(), "text/plain")
+            }
+            async fn lifecycle(
+                &self,
+                _ctx: &dyn wafer_run::context::Context,
+                _event: wafer_run::LifecycleEvent,
+            ) -> Result<(), wafer_run::WaferError> {
+                Ok(())
+            }
+        }
+
+        let database: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            Arc::new(
+                wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+                    .expect("open in-memory sqlite"),
+            );
+        let (builder, _config) = serviced_over(
+            ImpresspressBuilder::new().extra_block("example/unversioned", Arc::new(Unversioned)),
+            database.clone(),
+            true,
+        );
+        let Err(error) = builder.build_with_plan_exporter() else {
+            panic!("a block with no version must not reach a plan");
+        };
+        assert!(
+            matches!(
+                error,
+                PreparedBuildError::InvalidInput(PreparedPlanError::InvalidField { .. })
+            ),
+            "{error:?}"
+        );
+        // Test-fixture introspection: the database is as it was given — no
+        // migration created a table.
+        let tables = database
+            .query_raw("SELECT name FROM sqlite_master WHERE type = 'table'", &[])
+            .await
+            .expect("list tables");
+        assert!(tables.is_empty(), "nothing migrated: {tables:?}");
     }
 
     /// A build failure names its cause in its message, once: every caller

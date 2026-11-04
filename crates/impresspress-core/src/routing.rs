@@ -741,7 +741,7 @@ fn route_prefix_matches(prefix: &str, path: &str) -> bool {
 ///
 /// Checks the feature gate and the access tier, then dispatches via
 /// `ctx.call_block` — every impresspress block is registered in the Wafer
-/// registry at boot (`blocks::register_feature_blocks`, `register_llm`,
+/// registry at boot (`blocks::register_application_blocks`,
 /// `register_auth`).
 pub async fn route_to_block<B: std::borrow::Borrow<BlockInfo>>(
     ctx: &dyn Context,

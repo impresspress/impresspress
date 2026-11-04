@@ -313,7 +313,7 @@ pub async fn handle_toggle_feature(
     // mints rows nothing ever reaps and writes rows that must never exist.
     //
     // A REGISTERED block is toggleable only if it declares `can_disable`.
-    // `BlockInfo::new` defaults that to `false` and `blocks::block_enabled_defaults`
+    // `BlockInfo::new` defaults that to `false` and `blocks::enabled_defaults_from`
     // filters the seed on it, so `impresspress/admin`, `impresspress/system`,
     // `impresspress/email`, `auth-ui` and the `wafer-run/*` middleware hold no
     // row at all — `blocks/mod.rs` records that "nothing can create one", and

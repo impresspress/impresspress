@@ -946,7 +946,7 @@ fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -
             //
             // It does NOT make an admin toggle for the inspector work: every
             // writer keys rows by `BlockInfo::name` (`set_enabled` from the
-            // blocks page, `block_enabled_defaults` from the seed), so a row
+            // blocks page, `enabled_defaults_from` from the seed), so a row
             // would be keyed `wafer-run/inspector` and this read would miss
             // it. Moot in practice — `can_disable` defaults to false and the
             // inspector never declares otherwise, so it is seeded no row and
@@ -971,10 +971,10 @@ impl AdminBlock {
     /// macro-generated [`Self::new`] leaves the field at `Default`, i.e. a
     /// private snapshot nothing else reads: correct for the declarative
     /// `info()` callers (grant and endpoint assertions, `all_block_infos`),
-    /// and inert for the toggle. Production therefore registers through
-    /// [`crate::blocks::register_admin`], and `tests/autoreg_smoke.rs` pins
-    /// that admin is NOT in the zero-arg manifest, so an unwired instance
-    /// cannot reach a runtime by accident.
+    /// and inert for the toggle. Production therefore registers it through
+    /// [`crate::blocks::application_blocks`] with the runtime's handle, and
+    /// `tests/autoreg_smoke.rs` pins that admin is NOT in the zero-arg
+    /// manifest, so an unwired instance cannot reach a runtime by accident.
     pub fn with_block_settings(block_settings_handle: Arc<RwLock<BlockSettings>>) -> Self {
         Self {
             block_settings_handle,

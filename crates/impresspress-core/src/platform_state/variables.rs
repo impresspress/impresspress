@@ -1175,26 +1175,26 @@ pub async fn seed_and_load<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
     load_reconciled(db).await
 }
 
-/// [`seed_and_load`] without the declared secrets: the environment and the
-/// auth JWT secret, then the full set loaded back.
+/// [`seed_and_load`]'s first half, for a target that needs its variables
+/// before a runtime exists: the environment's values and the auth JWT secret,
+/// with nothing loaded back.
 ///
-/// For a target that needs its variables before a runtime exists — native's
-/// crypto service and synchronous config snapshot take the JWT secret, CORS
-/// origins and CSP at `build()` — and generates the declared secrets once
-/// the runtime has registered its blocks ([`seed_declared_and_load`]), so it
-/// seeds from the same set the other targets do.
-pub async fn seed_environment_and_load(
+/// Native's crypto service and synchronous config snapshot take the JWT
+/// secret, CORS origins and CSP at `build()`, so it seeds these first, reads
+/// those three keys ([`find_by_key`]), and generates the declared secrets once
+/// the runtime has registered its blocks ([`seed_declared_and_load`]) — from
+/// the same set the other targets seed from, with one full load at the end.
+pub async fn seed_environment_and_jwt_secret(
     db: &Arc<dyn DatabaseService>,
     env_vars: &[(String, String)],
-) -> Result<HashMap<String, String>, String> {
+) {
     seed_environment(db, env_vars).await;
     seed_jwt_secret(db).await;
-    load_reconciled(db).await
 }
 
 /// Generate the secrets `declarations` declare, then load the full set back:
 /// the half of [`seed_and_load`] a target runs once its runtime has
-/// registered its blocks, after [`seed_environment_and_load`].
+/// registered its blocks, after [`seed_environment_and_jwt_secret`].
 pub async fn seed_declared_and_load<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
     db: &Arc<dyn DatabaseService>,
     declarations: &[B],

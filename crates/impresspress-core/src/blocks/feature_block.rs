@@ -16,8 +16,9 @@
 //! (W3-O): it owns the scaffolding so each block file carries only its `info`,
 //! `handle`, and (optional) `lifecycle` expressions. Registration is **not**
 //! generated here — it comes from the single `(feature, name, constructor)`
-//! manifest in [`crate::blocks`] (see `register_feature_blocks` /
-//! `all_block_infos`), so there is exactly one place enumerating the block set.
+//! manifest in [`crate::blocks`] (see `application_blocks`, which
+//! `register_application_blocks` and `all_block_infos` derive from), so there
+//! is exactly one place enumerating the block set.
 //!
 //! # Forms
 //!
