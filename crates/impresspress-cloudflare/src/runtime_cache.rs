@@ -2153,7 +2153,8 @@ impl FailedBuild {
 enum Unbuilt {
     /// The gate's read failed, and nothing was built.
     Gated(RuntimeBuildError),
-    /// A read before the gate, or the build itself, failed.
+    /// A read after the gate passed (the dynamic path's `block_settings`),
+    /// or the build itself, failed.
     Failed(RuntimeBuildError),
 }
 
@@ -5032,6 +5033,46 @@ pub(crate) mod tests {
             1,
             "only the cold build read block_settings"
         );
+        reset_isolate();
+    }
+
+    /// **A runtime already stale is not kept "as it was"**: a dynamic
+    /// runtime marked stale by a failed retry over a moved stamp, whose next
+    /// retry cannot probe KV and fails its gate, is a failed rebuild of stale
+    /// config (`RebuildFailed`), not a current runtime retried for its health
+    /// (`GateFailed`, whose runtime is not stale). It stays stale.
+    #[wasm_bindgen_test]
+    async fn a_stale_dynamic_runtime_whose_gate_fails_stays_a_failed_rebuild() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.dynamic.set(Ends::Degraded);
+        get_or_build_with(&io, &timer)
+            .await
+            .expect("published degraded");
+
+        // The stamp moves and D1 goes down: the retry fails, stale.
+        timer.now.set(window().expect("armed").retry_at_ms);
+        *io.stamp.borrow_mut() = MOVED_GENERATION.to_string();
+        backend(&io, VariablesAnswer::Unavailable);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("kept");
+        assert!(rt.health.get().stale_since_ms.is_some(), "now stale");
+        assert_eq!(window().map(|w| w.cause), Some(WindowCause::RebuildFailed));
+
+        // The next retry cannot probe KV, so nothing says the config moved;
+        // the runtime is stale all the same.
+        timer.now.set(window().expect("armed").retry_at_ms);
+        io.probe_unavailable.set(true);
+        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("kept");
+
+        assert_eq!(
+            outcome,
+            CacheOutcome::Gated,
+            "it checked D1 and built nothing"
+        );
+        assert_eq!(window().map(|w| w.cause), Some(WindowCause::RebuildFailed));
+        assert!(rt.health.get().stale_since_ms.is_some(), "still stale");
+        assert_eq!(io.builds.get(), 1, "nothing built after the cold build");
         reset_isolate();
     }
 

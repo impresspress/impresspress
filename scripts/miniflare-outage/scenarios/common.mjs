@@ -170,10 +170,11 @@ export async function armedWindowMs(deployment, since) {
  * that failed, followed by the probe of whether its table exists, to tell a
  * fresh database from an outage (`impresspress-core`'s `read_unfiltered`,
  * `block_settings::load`). That is what each retry after a window sends
- * during an outage, whether it got as far as the gate (the variables read
- * the runtime cache makes before it builds anything) or failed at the dynamic
- * path's `block_settings` read before it: a retry, not a build. Whether a
- * runtime was assembled is the invocation's `d1_cost` line ([`buildsSince`]).
+ * during an outage: the gate, the variables read the runtime cache makes
+ * first, before anything else and before it builds anything (or, when the
+ * gate passed, a `block_settings` read after it that failed): a retry, not
+ * a build. Whether a runtime was assembled is the invocation's `d1_cost` line
+ * ([`buildsSince`]).
  */
 export function probedBackend(calls) {
   return calls.some((call) =>

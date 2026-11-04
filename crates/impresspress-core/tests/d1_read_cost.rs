@@ -265,8 +265,9 @@ fn identity() -> (String, WaferLockIdentity, PreparedReleaseAssets) {
 /// [`RequestScopedSource`]), the storage is in memory, and the network
 /// refuses.
 ///
-/// `gated` runs the request path's gate after the settings, as the Worker's
-/// slot owner does (`VariablesSnapshot::check_backend`, which `runtime_build::read_variables` calls); the deploy funnel is never gated.
+/// `gated` runs the request path's gate first, before the settings, as the
+/// Worker's slot owner does (`VariablesSnapshot::check_backend`, which
+/// `runtime_build::read_variables` calls); the deploy funnel is never gated.
 async fn build(
     db: &Arc<dyn DatabaseService>,
     prepared: Option<&PreparedRuntimePlan>,
@@ -291,6 +292,12 @@ async fn try_build(
     variables: Arc<VariablesSnapshot>,
     gated: bool,
 ) -> Result<Built, DatabaseError> {
+    if gated {
+        variables
+            .check_backend(db)
+            .await
+            .expect("the gate reads the variables table");
+    }
     let settings = match prepared {
         Some(plan) => BlockSettings::from_blocks(
             plan.structure
@@ -301,12 +308,6 @@ async fn try_build(
         ),
         None => block_settings::load(db).await?,
     };
-    if gated {
-        variables
-            .check_backend(db)
-            .await
-            .expect("the gate reads the variables table");
-    }
     let (mut runtime_config, mut overlay) = structural_runtime_config(StructuralConfigInputs {
         secrets: vec![(JWT_SECRET_KEY, JWT_SECRET.to_string())],
         worker_vars: Vec::new(),

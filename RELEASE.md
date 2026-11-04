@@ -52,9 +52,11 @@ answers; the build then reads the table through that same read, so a retry
 still costs one read of it.
 
 - While D1 stays down nothing is built: the window doubles and the runtime
-  the isolate has keeps serving as it was, degraded (stale only when the
-  config moved, as after an admin change elsewhere). A retry costs one check
-  of D1 (a KV config-stamp probe and the failed read), not a build.
+  the isolate has keeps serving as it was, degraded. It is marked stale when
+  the config moved (an admin change elsewhere), or when D1 failed part-way
+  through a retry whose check passed (a later read of the attempt, such as
+  its block settings or WRAP grants, failed). A retry costs one check of D1
+  (a KV config-stamp probe and the failed read), not a build.
 - A new isolate during an outage builds once, as before: a prepared one
   publishes degraded and serves the static site. A new isolate on the
   dynamic path (an admin change since the deploy) answers its first request
