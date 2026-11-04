@@ -432,9 +432,7 @@ pub struct PreparedRuntimeStructure {
 
 impl PreparedRuntimeStructure {
     pub(crate) fn normalize(&mut self) {
-        self.application_blocks.sort_by(|a, b| {
-            (&a.name, &a.version, &a.interface).cmp(&(&b.name, &b.version, &b.interface))
-        });
+        sort_application_blocks(&mut self.application_blocks);
         for value in self.block_configs.values_mut() {
             canonicalize_json(value);
         }
@@ -534,6 +532,15 @@ impl PreparedRuntimeStructure {
         }
         Ok(())
     }
+}
+
+/// The order a plan stores its application blocks in, `(name, version,
+/// interface)`. [`PreparedRuntimeStructure::normalize`] applies it, and so
+/// does a check comparing a runtime's inventory with a plan's.
+pub(crate) fn sort_application_blocks(blocks: &mut [PreparedBlockImplementation]) {
+    blocks.sort_by(|a, b| {
+        (&a.name, &a.version, &a.interface).cmp(&(&b.name, &b.version, &b.interface))
+    });
 }
 
 /// Versioned, content-addressed deployment artifact.

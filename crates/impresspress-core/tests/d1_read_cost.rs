@@ -187,7 +187,9 @@ impl NetworkService for NoNetwork {
 /// What a built runtime hands the funnels.
 struct Built {
     wafer: Wafer,
-    exporter: PreparedPlanExporter,
+    /// The deploy funnel's plan exporter: a provisioning build's alone, as
+    /// on the Worker, where only `/_deploy/*` exports a plan.
+    exporter: Option<PreparedPlanExporter>,
     block_settings: Arc<RwLock<BlockSettings>>,
     config: Arc<dyn ConfigService>,
     source: Arc<RequestScopedSource>,
@@ -351,14 +353,21 @@ async fn try_build(
     let (wafer, exporter) = match prepared {
         Some(plan) => {
             let (sha, lock, assets) = identity();
-            builder
+            let wafer = builder
                 .apply_prepared_plan(plan, APP_ID, &sha, &lock, &assets)
                 .expect("the plan applies")
-                .build_with_plan_exporter()
+                .build()
+                .expect("the runtime builds");
+            (wafer, None)
         }
-        None => builder.build_with_plan_exporter(),
-    }
-    .expect("the runtime builds");
+        None if provisioning => {
+            let (wafer, exporter) = builder
+                .build_with_plan_exporter()
+                .expect("the runtime builds");
+            (wafer, Some(exporter))
+        }
+        None => (builder.build().expect("the runtime builds"), None),
+    };
     Ok(Built {
         wafer,
         exporter,
@@ -406,12 +415,15 @@ async fn provision(db: &Arc<dyn DatabaseService>) -> PreparedRuntimePlan {
     .await
     .expect("the deploy funnel runs");
     assert!(report.ok, "provisioning must succeed: {report:#?}");
-    seal_prepared_plan(db, &built.exporter)
+    let exporter = built
+        .exporter
+        .as_ref()
+        .expect("a provisioning build exports");
+    seal_prepared_plan(db, exporter)
         .await
         .expect("the plan seals");
     let (sha, lock, assets) = identity();
-    built
-        .exporter
+    exporter
         .prepare_runtime_plan_with_config_generation(APP_ID, sha, "0".repeat(32), lock, assets)
         .expect("the plan exports")
 }
@@ -2316,8 +2328,10 @@ async fn a_failed_gate_costs_a_sliver_of_a_cold_build() {
 /// wrapper (`block_enabled_defaults`), and every read of `config_vars`'
 /// declared-key memo — which `provision` below has already built in this
 /// process, so a read here would be the sweep on a cold isolate and is
-/// counted as one. Before this pin a prepared build swept twice: the plan
-/// import and the plan exporter.
+/// counted as one. The counter is per thread, and the build and boot here
+/// run on the test's own current-thread runtime, so it sees every use they
+/// cause. Before this pin a prepared build swept twice: the plan import and
+/// the plan exporter.
 #[tokio::test]
 async fn a_request_path_build_constructs_no_block_set() {
     let _generation = GENERATION.lock().await;

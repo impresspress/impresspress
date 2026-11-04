@@ -1627,7 +1627,7 @@ impl TestContext {
             .iter()
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect();
-        crate::platform_state::variables::seed_and_load(&self.db_service, &owned)
+        crate::platform_state::variables::seed_and_load(&self.db_service, &owned, &self.block_infos)
             .await
             .map(|_| ())
     }
@@ -1642,9 +1642,13 @@ impl TestContext {
     /// the two: a fixture that can only seed from the table cannot express an
     /// adapter-injected value at all.
     pub async fn boot_config_service_with(&mut self, adapter_values: &[(&str, &str)]) {
-        let mut vars = crate::platform_state::variables::seed_and_load(&self.db_service, &[])
-            .await
-            .expect("seed and load variables at boot");
+        let mut vars = crate::platform_state::variables::seed_and_load(
+            &self.db_service,
+            &[],
+            &self.block_infos,
+        )
+        .await
+        .expect("seed and load variables at boot");
         for (key, value) in adapter_values {
             vars.insert((*key).to_string(), (*value).to_string());
         }

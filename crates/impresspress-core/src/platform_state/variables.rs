@@ -902,20 +902,23 @@ pub enum Wrote {
 }
 
 /// Auto-generate random 32-byte hex secrets for every [`wafer_block::ConfigVar`]
-/// declared with `.auto_generate()` that lacks a row. Shared by all three
-/// targets.
+/// a block in `block_infos` declares with `.auto_generate()` that lacks a
+/// row. Shared by all three targets, which all pass the runtime's registered
+/// declarations (`Wafer::block_infos()`), so a consumer's own blocks are
+/// seeded wherever they run.
 ///
 /// Idempotent: a key that already has a row is left untouched. Per-key
 /// failures are logged and tolerated — operators retain the manual seed
 /// fallback.
 ///
-/// Ordering contract: this MUST run after the admin block's `lifecycle(Init)`
-/// (so migration 002's `block` column exists) and BEFORE the remaining blocks
-/// initialize, on the targets that seed post-admin (Cloudflare, browser) —
-/// which is exactly the slot [`crate::builder::BootHooks::seed_after_admin_init`]
-/// occupies in [`crate::builder::boot`]. Native seeds pre-wafer, so it applies
-/// admin's list itself first, through
-/// [`crate::migration_helper::apply_pending_via_service`].
+/// Ordering contract: this MUST run after the admin block's migrations have
+/// created the table (migration 002's `block` column) and BEFORE the
+/// remaining blocks initialize. Cloudflare and the browser run it after
+/// admin's `lifecycle(Init)`, in the slot
+/// [`crate::builder::BootHooks::seed_after_admin_init`] occupies in
+/// [`crate::builder::boot`]; native applies admin's list itself first,
+/// through [`crate::migration_helper::apply_pending_via_service`], and runs
+/// this right after registration, before boot.
 pub async fn seed_auto_generated<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
     db: &Arc<dyn DatabaseService>,
     block_infos: &[B],
@@ -1158,10 +1161,51 @@ async fn seed_one_secret(
 /// block's `lifecycle(Init)` has run (browser, Cloudflare), or because the
 /// caller ensured it pre-wafer (native). `db.create` does not lazily create
 /// tables.
-pub async fn seed_and_load(
+pub async fn seed_and_load<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
+    db: &Arc<dyn DatabaseService>,
+    env_vars: &[(String, String)],
+    declarations: &[B],
+) -> Result<HashMap<String, String>, String> {
+    seed_environment(db, env_vars).await;
+    // 2. Auto-generate the secrets `declarations` declare — the runtime's
+    //    registered blocks, consumer blocks included — then the auth JWT
+    //    secret.
+    seed_auto_generated(db, declarations).await;
+    seed_jwt_secret(db).await;
+    load_reconciled(db).await
+}
+
+/// [`seed_and_load`] without the declared secrets: the environment and the
+/// auth JWT secret, then the full set loaded back.
+///
+/// For a target that needs its variables before a runtime exists — native's
+/// crypto service and synchronous config snapshot take the JWT secret, CORS
+/// origins and CSP at `build()` — and generates the declared secrets once
+/// the runtime has registered its blocks ([`seed_declared_and_load`]), so it
+/// seeds from the same set the other targets do.
+pub async fn seed_environment_and_load(
     db: &Arc<dyn DatabaseService>,
     env_vars: &[(String, String)],
 ) -> Result<HashMap<String, String>, String> {
+    seed_environment(db, env_vars).await;
+    seed_jwt_secret(db).await;
+    load_reconciled(db).await
+}
+
+/// Generate the secrets `declarations` declare, then load the full set back:
+/// the half of [`seed_and_load`] a target runs once its runtime has
+/// registered its blocks, after [`seed_environment_and_load`].
+pub async fn seed_declared_and_load<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
+    db: &Arc<dyn DatabaseService>,
+    declarations: &[B],
+) -> Result<HashMap<String, String>, String> {
+    seed_auto_generated(db, declarations).await;
+    load_reconciled(db).await
+}
+
+/// Steps 0–1b of [`seed_and_load`]: apply the environment's values to keys
+/// nothing has pinned, and record the one-time transition.
+async fn seed_environment(db: &Arc<dyn DatabaseService>, env_vars: &[(String, String)]) {
     // 0. Has the one-time upgrade transition already run? One indexed lookup,
     //    outside the loop, rather than per key.
     //
@@ -1305,15 +1349,12 @@ pub async fn seed_and_load(
     if !transition_done && !env_vars.is_empty() {
         record_transition(db).await;
     }
+}
 
-    // 2. Auto-generate declared secrets (incl. the auth JWT secret). This
-    //    runs before any runtime exists (native, browser), so the declared
-    //    set is the compiled block set.
-    seed_auto_generated(db, &crate::blocks::all_block_infos()).await;
-    seed_jwt_secret(db).await;
-
-    // 3. Load the full set back, reconciling any row whose stored `sensitive`
-    //    flag disagrees with what its key requires while passing over it.
+/// Step 3 of [`seed_and_load`]: load the full set back, reconciling any row
+/// whose stored `sensitive` flag disagrees with what its key requires while
+/// passing over it.
+async fn load_reconciled(db: &Arc<dyn DatabaseService>) -> Result<HashMap<String, String>, String> {
     let rows = load_rows(db).await?;
     repair_sensitive_flags_in(db, &rows).await;
     Ok(rows
@@ -2705,6 +2746,15 @@ mod boot_tests {
         },
     };
 
+    /// [`seed_and_load`] as a boot runs it: over the compiled block set's
+    /// declarations, which every block these tests read is in.
+    async fn boot_seed(
+        db: &Arc<dyn DatabaseService>,
+        env_vars: &[(String, String)],
+    ) -> Result<HashMap<String, String>, String> {
+        seed_and_load(db, env_vars, &crate::blocks::all_block_infos()).await
+    }
+
     /// A `DatabaseService` with the admin schema applied through the real
     /// migration runner (`test_support::migrate_sqlite`), the
     /// migration-file-runner exception to the no-raw-SQL rule, so the row
@@ -3058,7 +3108,7 @@ mod boot_tests {
             let capture = crate::test_support::MessageCapture::default();
             let vars = {
                 let _guard = tracing::subscriber::set_default(capture.clone());
-                seed_and_load(&db, &env(refused)).await.expect("boot")
+                boot_seed(&db, &env(refused)).await.expect("boot")
             };
             assert_eq!(vars.get(key), None, "{refused:?} must not be seeded");
             assert_eq!(
@@ -3068,11 +3118,11 @@ mod boot_tests {
             );
         }
 
-        let vars = seed_and_load(&db, &env("14")).await.expect("boot");
+        let vars = boot_seed(&db, &env("14")).await.expect("boot");
         assert_eq!(vars.get(key).map(String::as_str), Some("14"));
 
         // A later bad export leaves the good stored value alone.
-        let vars = seed_and_load(&db, &env("0")).await.expect("boot");
+        let vars = boot_seed(&db, &env("0")).await.expect("boot");
         assert_eq!(vars.get(key).map(String::as_str), Some("14"));
     }
 
@@ -3104,7 +3154,7 @@ mod boot_tests {
         // The seeder stores none of the refused three, off the same batch.
         let db = migrated_db().await;
         let batch: Vec<(String, String)> = app_env.into_iter().collect();
-        let vars = seed_and_load(&db, &batch).await.expect("boot");
+        let vars = boot_seed(&db, &batch).await.expect("boot");
         for key in [session, internal, APP_NAME_KEY] {
             assert_eq!(vars.get(key), None, "{key} must not be seeded");
         }
@@ -3123,12 +3173,12 @@ mod boot_tests {
         let env = |v: &str| [(key.to_string(), v.to_string())];
 
         // Boot 1: fresh database, the environment lands. (The original bug.)
-        let vars = seed_and_load(&db, &env("First")).await.expect("boot 1");
+        let vars = boot_seed(&db, &env("First")).await.expect("boot 1");
         assert_eq!(vars.get(key).map(String::as_str), Some("First"));
 
         // Boot 2: the operator changes the export, no admin has touched it, so
         // the environment still wins. (The second half of the original bug.)
-        let vars = seed_and_load(&db, &env("Second")).await.expect("boot 2");
+        let vars = boot_seed(&db, &env("Second")).await.expect("boot 2");
         assert_eq!(vars.get(key).map(String::as_str), Some("Second"));
 
         // An admin edits the row through an admin surface.
@@ -3140,7 +3190,7 @@ mod boot_tests {
         ));
 
         // Boot 3: the export is now inert, whatever it says.
-        let vars = seed_and_load(&db, &env("Third")).await.expect("boot 3");
+        let vars = boot_seed(&db, &env("Third")).await.expect("boot 3");
         assert_eq!(
             vars.get(key).map(String::as_str),
             Some("AdminChoice"),
@@ -3166,7 +3216,7 @@ mod boot_tests {
         let key = ALLOW_SIGNUP_KEY;
         let env = [(key.to_string(), "true".to_string())];
 
-        seed_and_load(&db, &env).await.expect("boot with signup on");
+        boot_seed(&db, &env).await.expect("boot with signup on");
 
         // The incident: an admin turns signup off. This is the settings-form
         // path — `ui::settings_form` → `CONFIG_SET` → `set_by_admin` — which
@@ -3184,7 +3234,7 @@ mod boot_tests {
         // Every later boot: the compose file still says `true`, and signup
         // stays closed.
         for _ in 0..3 {
-            let vars = seed_and_load(&db, &env).await.expect("later boot");
+            let vars = boot_seed(&db, &env).await.expect("later boot");
             assert_eq!(
                 vars.get(key).map(String::as_str),
                 Some("false"),
@@ -3320,7 +3370,7 @@ mod boot_tests {
             .chain(untouched)
             .map(|k| (k.to_string(), format!("env-{k}")))
             .collect();
-        seed_and_load(&db, &env).await.expect("seeded boot");
+        boot_seed(&db, &env).await.expect("seeded boot");
 
         // The admin opens the page, changes one colour, and saves. Every
         // field on the form is posted, including the ones they did not touch
@@ -3352,7 +3402,7 @@ mod boot_tests {
             .chain(untouched)
             .map(|k| (k.to_string(), format!("next-{k}")))
             .collect();
-        let vars = seed_and_load(&db, &next).await.expect("next boot");
+        let vars = boot_seed(&db, &next).await.expect("next boot");
         assert_eq!(
             vars.get(changed).map(String::as_str),
             Some("#ff0000"),
@@ -3423,7 +3473,7 @@ mod boot_tests {
         // left no marker, and the compose file still says `true`.
         raw_insert_unowned(&db, key, "false").await;
 
-        let vars = seed_and_load(&db, &[(key.to_string(), "true".to_string())])
+        let vars = boot_seed(&db, &[(key.to_string(), "true".to_string())])
             .await
             .expect("the boot that ships the fix");
         assert_eq!(
@@ -3438,7 +3488,7 @@ mod boot_tests {
         );
 
         // Every later boot leaves it alone too.
-        let vars = seed_and_load(&db, &[(key.to_string(), "true".to_string())])
+        let vars = boot_seed(&db, &[(key.to_string(), "true".to_string())])
             .await
             .expect("later boot");
         assert_eq!(vars.get(key).map(String::as_str), Some("false"));
@@ -3498,9 +3548,7 @@ mod boot_tests {
             let capture = crate::test_support::MessageCapture::default();
             {
                 let _guard = tracing::subscriber::set_default(capture.clone());
-                seed_and_load(&db, &upgrade_env)
-                    .await
-                    .expect("upgrade boot");
+                boot_seed(&db, &upgrade_env).await.expect("upgrade boot");
             }
             assert_eq!(
                 capture.count_containing("NO EFFECT"),
@@ -3517,7 +3565,7 @@ mod boot_tests {
             );
 
             // The operator adds (or changes) the export afterwards.
-            let vars = seed_and_load(&db, &[(key.to_string(), "true".to_string())])
+            let vars = boot_seed(&db, &[(key.to_string(), "true".to_string())])
                 .await
                 .expect("later boot");
             assert_eq!(
@@ -3545,7 +3593,7 @@ mod boot_tests {
         );
         raw_insert_unowned(&db, key, "sk_live_rotated").await;
 
-        let vars = seed_and_load(&db, &[(key.to_string(), "sk_live_revoked".to_string())])
+        let vars = boot_seed(&db, &[(key.to_string(), "sk_live_revoked".to_string())])
             .await
             .expect("upgrade boot");
         assert_eq!(
@@ -3572,7 +3620,7 @@ mod boot_tests {
         let capture = crate::test_support::MessageCapture::default();
         {
             let _guard = tracing::subscriber::set_default(capture.clone());
-            seed_and_load(&db, &[(key.to_string(), "Foo".to_string())])
+            boot_seed(&db, &[(key.to_string(), "Foo".to_string())])
                 .await
                 .expect("upgrade boot");
         }
@@ -3586,7 +3634,7 @@ mod boot_tests {
         );
 
         // And the environment still governs it on the next boot, gate or no gate.
-        let vars = seed_and_load(&db, &[(key.to_string(), "Bar".to_string())])
+        let vars = boot_seed(&db, &[(key.to_string(), "Bar".to_string())])
             .await
             .expect("next boot");
         assert_eq!(vars.get(key).map(String::as_str), Some("Bar"));
@@ -3615,7 +3663,7 @@ mod boot_tests {
         );
 
         // A boot with no export for that key at all — the ordinary case.
-        seed_and_load(&db, &[(APP_NAME_KEY.to_string(), "Foo".to_string())])
+        boot_seed(&db, &[(APP_NAME_KEY.to_string(), "Foo".to_string())])
             .await
             .expect("upgrade boot");
 
@@ -3647,7 +3695,7 @@ mod boot_tests {
         assert_eq!(declared, "false", "the fixture depends on this declaration");
 
         raw_insert_unowned(&db, key, "false").await;
-        let vars = seed_and_load(&db, &[(key.to_string(), "true".to_string())])
+        let vars = boot_seed(&db, &[(key.to_string(), "true".to_string())])
             .await
             .expect("upgrade boot");
         assert_eq!(
@@ -3758,7 +3806,7 @@ mod boot_tests {
         let key = APP_NAME_KEY;
 
         // Boot 1 runs the transition over an empty table and records the gate.
-        seed_and_load(&db, &[(key.to_string(), "First".to_string())])
+        boot_seed(&db, &[(key.to_string(), "First".to_string())])
             .await
             .expect("boot 1");
 
@@ -3767,7 +3815,7 @@ mod boot_tests {
         let other = PRIMARY_COLOR_KEY;
         raw_insert_unowned(&db, other, "#000000").await;
 
-        let vars = seed_and_load(&db, &[(other.to_string(), "#ff0000".to_string())])
+        let vars = boot_seed(&db, &[(other.to_string(), "#ff0000".to_string())])
             .await
             .expect("boot 2");
         assert_eq!(
@@ -3789,9 +3837,9 @@ mod boot_tests {
         let db = migrated_db().await;
         raw_insert_unowned(&db, APP_NAME_KEY, "Stored").await;
 
-        seed_and_load(&db, &[]).await.expect("first boot");
+        boot_seed(&db, &[]).await.expect("first boot");
         let before = crate::config_generation::writes_noted_on_this_thread();
-        seed_and_load(&db, &[]).await.expect("second boot");
+        boot_seed(&db, &[]).await.expect("second boot");
 
         assert!(
             find_by_key(&db, ENV_PRECEDENCE_TRANSITION_KEY)
@@ -3830,7 +3878,7 @@ mod boot_tests {
             let capture = crate::test_support::MessageCapture::default();
             {
                 let _guard = tracing::subscriber::set_default(capture.clone());
-                seed_and_load(&db, &[(key.to_string(), exported.to_string())])
+                boot_seed(&db, &[(key.to_string(), exported.to_string())])
                     .await
                     .expect("boot");
             }
@@ -3868,7 +3916,7 @@ mod boot_tests {
         let capture = crate::test_support::MessageCapture::default();
         {
             let _guard = tracing::subscriber::set_default(capture.clone());
-            seed_and_load(&db, &env).await.expect("upgrade boot");
+            boot_seed(&db, &env).await.expect("upgrade boot");
         }
 
         // One line per key. The key itself rides on the `key` field rather than
@@ -4011,7 +4059,7 @@ mod boot_tests {
         let capture = crate::test_support::MessageCapture::default();
         {
             let _guard = tracing::subscriber::set_default(capture.clone());
-            seed_and_load(&db, &[(key.to_string(), EXPORTED.to_string())])
+            boot_seed(&db, &[(key.to_string(), EXPORTED.to_string())])
                 .await
                 .expect("upgrade boot");
         }
@@ -4031,7 +4079,7 @@ mod boot_tests {
         let capture = crate::test_support::MessageCapture::default();
         {
             let _guard = tracing::subscriber::set_default(capture.clone());
-            seed_and_load(&db, &[(key.to_string(), EXPORTED.to_string())])
+            boot_seed(&db, &[(key.to_string(), EXPORTED.to_string())])
                 .await
                 .expect("later boot");
         }
@@ -4051,7 +4099,7 @@ mod boot_tests {
             .await
             .expect("seed");
 
-        let vars = seed_and_load(&db, &[(key.to_string(), String::new())])
+        let vars = boot_seed(&db, &[(key.to_string(), String::new())])
             .await
             .expect("seed and load");
         assert_eq!(vars.get(key).map(String::as_str), Some("Impresspress"));
@@ -4074,7 +4122,7 @@ mod boot_tests {
             "the point of this test is a key the suffix rule cannot catch"
         );
 
-        seed_and_load(&db, &[(key.to_string(), "hunter2".to_string())])
+        boot_seed(&db, &[(key.to_string(), "hunter2".to_string())])
             .await
             .expect("seed and load");
 
@@ -4219,7 +4267,7 @@ mod boot_tests {
         raw_insert_unflagged(&db, key, "hunter2").await;
 
         // An empty environment: the operator removed the export.
-        let vars = seed_and_load(&db, &[]).await.expect("boot");
+        let vars = boot_seed(&db, &[]).await.expect("boot");
 
         let row = find_by_key(&db, key).await.expect("list").expect("row");
         assert!(
@@ -4235,7 +4283,7 @@ mod boot_tests {
 
         // Idempotent: a healthy table costs no writes.
         let before = crate::config_generation::writes_noted_on_this_thread();
-        seed_and_load(&db, &[]).await.expect("second boot");
+        boot_seed(&db, &[]).await.expect("second boot");
         assert_eq!(
             before,
             crate::config_generation::writes_noted_on_this_thread(),
@@ -4429,7 +4477,7 @@ mod boot_tests {
         seed_if_absent(&db, APP_NAME_KEY, "Foo", "", "", false)
             .await
             .expect("seed");
-        seed_and_load(&db, &[]).await.expect("boot");
+        boot_seed(&db, &[]).await.expect("boot");
         assert!(
             !find_by_key(&db, APP_NAME_KEY)
                 .await
@@ -4466,7 +4514,7 @@ mod boot_tests {
             ),
             (APP_NAME_KEY.to_string(), "Foo".to_string()),
         ];
-        let vars = seed_and_load(&db, &env).await.expect("seed and load");
+        let vars = boot_seed(&db, &env).await.expect("seed and load");
 
         assert_eq!(vars.get(crate::config_vars::DEPLOY_TOKEN_KEY), None);
         assert_eq!(vars.get("__IMPRESSPRESS_RUNTIME_KIND__"), None);
@@ -4484,10 +4532,10 @@ mod boot_tests {
     async fn re_applying_the_same_environment_writes_nothing() {
         let db = migrated_db().await;
         let env = [(APP_NAME_KEY.to_string(), "Foo".to_string())];
-        seed_and_load(&db, &env).await.expect("first boot");
+        boot_seed(&db, &env).await.expect("first boot");
 
         let before = crate::config_generation::writes_noted_on_this_thread();
-        seed_and_load(&db, &env).await.expect("second boot");
+        boot_seed(&db, &env).await.expect("second boot");
         assert_eq!(
             before,
             crate::config_generation::writes_noted_on_this_thread(),

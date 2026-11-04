@@ -479,9 +479,7 @@ async fn a_prepared_plans_grants_reach_the_sealed_runtime() {
         .apply_prepared_plan(&plan, "app", &build_sha, &lock, &assets)
         .expect("apply prepared plan");
 
-    let (mut wafer, _exporter) = builder
-        .build_with_plan_exporter()
-        .expect("build impresspress runtime");
+    let mut wafer = builder.build().expect("build impresspress runtime");
     boot(
         &mut wafer,
         &NativeBootHooks,
@@ -1076,5 +1074,103 @@ async fn the_block_manifest_declares_every_endpoint_the_native_runtime_publishes
                 .map(|e| format!("{:?} {}", e.method, e.path))
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+/// A consumer block: off by default, and declaring one auto-generated secret.
+struct ConsumerBlock(&'static str, &'static str);
+
+#[wafer_block::wafer_async_trait]
+impl wafer_run::Block for ConsumerBlock {
+    fn info(&self) -> wafer_run::BlockInfo {
+        wafer_run::BlockInfo::new(self.0, "0.1.0", "http-handler@v1", "consumer")
+            .can_disable(true)
+            .default_enabled(false)
+            .config_keys(vec![wafer_run::ConfigVar::new(
+                self.1,
+                "signing secret",
+                "",
+            )
+            .auto_generate()])
+    }
+    async fn handle(
+        &self,
+        _ctx: &dyn wafer_run::context::Context,
+        _msg: Message,
+        _input: InputStream,
+    ) -> wafer_run::OutputStream {
+        wafer_run::OutputStream::respond(Vec::new())
+    }
+    async fn lifecycle(
+        &self,
+        _ctx: &dyn wafer_run::context::Context,
+        _event: wafer_run::LifecycleEvent,
+    ) -> Result<(), wafer_run::WaferError> {
+        Ok(())
+    }
+}
+
+/// Native seeds from the runtime's registered declarations, as the
+/// Cloudflare deploy funnel and the browser do: a consumer block registered
+/// on the builder, and one registered on the built runtime, each get their
+/// declared enablement default and their auto-generated secret by the time
+/// `build_native_runtime` hands the runtime back to boot.
+#[tokio::test]
+async fn native_seeds_consumer_blocks_declarations() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("consumer_seed_test.sqlite3");
+    let storage_root = tmp.path().join("storage");
+    std::fs::create_dir_all(&storage_root).expect("create storage root");
+    let infra = infra_for(&db_path, &storage_root);
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
+        .await
+        .expect("construct sqlite database service");
+    let hooks = AppHooks {
+        register_blocks: Box::new(|builder| {
+            Ok(builder.extra_block(
+                "example/consumer",
+                Arc::new(ConsumerBlock(
+                    "example/consumer",
+                    "EXAMPLE__CONSUMER__SIGNING_SECRET",
+                )),
+            ))
+        }),
+        register_post_build: Box::new(|wafer, _storage| {
+            wafer.register_block(
+                "example/late",
+                Arc::new(ConsumerBlock(
+                    "example/late",
+                    "EXAMPLE__LATE__SIGNING_SECRET",
+                )),
+            )?;
+            Ok(())
+        }),
+    };
+    let _wafer = build_native_runtime(
+        &infra,
+        database.clone(),
+        &HashMap::new(),
+        Default::default(),
+        hooks,
+    )
+    .await
+    .expect("build impresspress runtime");
+
+    let stored = impresspress_core::platform_state::block_settings::load(&database)
+        .await
+        .expect("block settings");
+    for (block, key) in [
+        ("example/consumer", "EXAMPLE__CONSUMER__SIGNING_SECRET"),
+        ("example/late", "EXAMPLE__LATE__SIGNING_SECRET"),
+    ] {
+        assert!(
+            !stored.state(block).enabled,
+            "{block}'s declared default (off) is seeded"
+        );
+        let secret = impresspress_core::platform_state::variables::find_by_key(&database, key)
+            .await
+            .expect("read the secret")
+            .unwrap_or_else(|| panic!("{key} is generated"));
+        assert!(!secret.value.is_empty(), "{key} is generated");
     }
 }

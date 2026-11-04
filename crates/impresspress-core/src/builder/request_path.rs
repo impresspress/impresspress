@@ -488,7 +488,7 @@ fn hook_error(step: &str, e: DatabaseError) -> SeedError {
 /// Publish a freshly loaded `BlockSettings` everywhere the rest of the boot
 /// reads it from: the router's shared handle, and both config surfaces (via
 /// `RuntimeConfig`, so neither can be filled without the other).
-fn publish_block_settings(
+pub fn publish_block_settings(
     wafer: &mut Wafer,
     config: &Arc<dyn ConfigService>,
     handle: &Arc<RwLock<BlockSettings>>,

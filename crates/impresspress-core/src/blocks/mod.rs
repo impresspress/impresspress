@@ -225,7 +225,12 @@ thread_local! {
 ///   still see a request path reach it.
 ///
 /// Per thread, so tests running in parallel do not count each other's
-/// sweeps; a build and boot run on the test's own thread.
+/// sweeps. That is also its limit: a use on another thread is not counted
+/// here. The tests that rely on it build and boot on the test's own thread
+/// (a `#[tokio::test]` current-thread runtime, with no block's `Init`
+/// spawning onto another), so every use they cause is on the thread that
+/// reads the count; a use moved behind `spawn_blocking` or onto a
+/// multi-threaded runtime would escape them.
 ///
 /// It counts the block set, not single reads: a caller that constructs one
 /// block and calls its `info()` is not counted, which is what the counting
@@ -388,14 +393,17 @@ pub fn all_block_migrations() -> Vec<&'static crate::migration_helper::BlockMigr
 /// snapshot nothing reads — and the toggle would reach the table and stop
 /// there. `tests/autoreg_smoke.rs` pins that admin is NOT in the manifest so
 /// that cannot regress silently.
+///
+/// Answers the name it registered.
 pub fn register_admin(
     w: &mut wafer_run::Wafer,
     block_settings: std::sync::Arc<std::sync::RwLock<crate::features::BlockSettings>>,
-) -> Result<(), wafer_run::RuntimeError> {
+) -> Result<&'static str, wafer_run::RuntimeError> {
     w.register_block(
-        admin::ADMIN_BLOCK_ID.to_string(),
+        admin::ADMIN_BLOCK_ID,
         std::sync::Arc::new(admin::AdminBlock::with_block_settings(block_settings)),
-    )
+    )?;
+    Ok(admin::ADMIN_BLOCK_ID)
 }
 
 /// Register the LLM feature block with the WAFER runtime.
@@ -409,14 +417,32 @@ pub fn register_admin(
 /// on wasm32 (where the browser configures providers inside its own
 /// `BrowserLlmService`).
 #[cfg(feature = "block-llm")]
+///
+/// Answers the name it registered.
 pub fn register_llm(
     w: &mut wafer_run::Wafer,
     provider_admin: std::sync::Arc<dyn llm::provider_admin::ProviderAdmin>,
-) -> Result<(), wafer_run::RuntimeError> {
+) -> Result<&'static str, wafer_run::RuntimeError> {
     w.register_block(
         llm::LlmBlock::BLOCK_NAME,
         std::sync::Arc::new(llm::LlmBlock::new(provider_admin)),
-    )
+    )?;
+    Ok(llm::LlmBlock::BLOCK_NAME)
+}
+
+/// Register `impresspress/fastembed`, caching its model under
+/// `model_cache_dir`. Not in the zero-arg manifest because its constructor
+/// takes that directory. Answers the name it registered.
+#[cfg(feature = "block-fastembed")]
+pub fn register_fastembed(
+    w: &mut wafer_run::Wafer,
+    model_cache_dir: &std::path::Path,
+) -> Result<&'static str, wafer_run::RuntimeError> {
+    w.register_block(
+        fastembed::FastembedBlock::BLOCK_NAME,
+        std::sync::Arc::new(fastembed::FastembedBlock::new(model_cache_dir)),
+    )?;
+    Ok(fastembed::FastembedBlock::BLOCK_NAME)
 }
 
 /// Register the framework `wafer-run/auth` block — wafer-core's `AuthBlock`

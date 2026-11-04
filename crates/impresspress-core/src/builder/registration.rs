@@ -78,6 +78,9 @@ pub(super) struct Registered {
     /// The prepared plan's inventory is read for them from the runtime's
     /// registration-time `BlockInfo`s, only where a plan is wanted.
     pub(super) application: Vec<String>,
+    /// The runtime's registered declarations, as registration read them
+    /// (`Wafer::block_infos()` once, shared with the router).
+    pub(super) declarations: Arc<[Arc<wafer_run::BlockInfo>]>,
 }
 
 impl ImpresspressBuilder {
@@ -344,15 +347,13 @@ impl ImpresspressBuilder {
         // directory, so it is registered here with it rather than from the
         // zero-arg manifest.
         #[cfg(feature = "block-fastembed")]
-        {
-            wafer.register_block(
-                crate::blocks::fastembed::FastembedBlock::BLOCK_NAME,
-                Arc::new(crate::blocks::fastembed::FastembedBlock::new(
-                    required_model_cache_dir(self.model_cache_dir.as_deref(), "block-fastembed")?,
-                )),
-            )?;
-            application.push(crate::blocks::fastembed::FastembedBlock::BLOCK_NAME.to_string());
-        }
+        application.push(
+            crate::blocks::register_fastembed(
+                &mut wafer,
+                required_model_cache_dir(self.model_cache_dir.as_deref(), "block-fastembed")?,
+            )?
+            .to_string(),
+        );
 
         // Admin is registered here rather than from the manifest: its
         // constructor takes the same `Arc<RwLock<BlockSettings>>` handed to
@@ -360,8 +361,9 @@ impl ImpresspressBuilder {
         // can update the snapshot the router reads per request instead of
         // only writing the table. Without it the toggle is inert on native
         // until the process restarts.
-        crate::blocks::register_admin(&mut wafer, self.block_settings.clone())?;
-        application.push(crate::blocks::admin::ADMIN_BLOCK_ID.to_string());
+        application.push(
+            crate::blocks::register_admin(&mut wafer, self.block_settings.clone())?.to_string(),
+        );
 
         wafer.add_block_config(
             "wafer-run/inspector",
@@ -413,8 +415,7 @@ impl ImpresspressBuilder {
             #[cfg(not(feature = "llm"))]
             let provider_admin: Arc<dyn ProviderAdmin> =
                 Arc::new(crate::blocks::llm::provider_admin::NoopProviderAdmin);
-            crate::blocks::register_llm(&mut wafer, provider_admin)?;
-            application.push(crate::blocks::llm::LlmBlock::BLOCK_NAME.to_string());
+            application.push(crate::blocks::register_llm(&mut wafer, provider_admin)?.to_string());
         }
 
         // 7. Extra platform-specific blocks
@@ -560,7 +561,7 @@ impl ImpresspressBuilder {
         wafer.register_block(
             crate::blocks::body_limit::BLOCK_NAME,
             Arc::new(crate::blocks::body_limit::BodyLimitBlock::new(
-                block_infos,
+                Arc::clone(&block_infos),
                 extra_routes,
             )),
         )?;
@@ -608,7 +609,11 @@ impl ImpresspressBuilder {
         // `builder::RuntimeConfig`.
         super::config::write_snapshot(&mut wafer, self.config_snapshot);
 
-        Ok(Registered { wafer, application })
+        Ok(Registered {
+            wafer,
+            application,
+            declarations: block_infos,
+        })
     }
 }
 

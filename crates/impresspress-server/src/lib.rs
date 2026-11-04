@@ -300,12 +300,18 @@ pub async fn build_native_runtime(
     .await
     .map_err(|e| anyhow!("apply the admin migrations: {e}"))?;
 
-    // Seed env/auto-gen/JWT variables + run the #222 block-settings hash-gate,
-    // all through the shared `impresspress_core` seeders over the service.
+    // Seed the environment's variables and the JWT secret, through the
+    // shared `impresspress_core` seeders over the service: `build()` needs the
+    // JWT secret, CORS origins and CSP before a runtime exists. The secrets
+    // and enablement defaults the blocks declare are seeded once the runtime
+    // has registered them, below, from the same set Cloudflare and the
+    // browser seed from.
     let env_vars = filter_to_declared_keys(app_env.clone());
-    let vars = impresspress_core::platform_state::variables::seed_and_load(&database, &env_vars)
-        .await
-        .map_err(|e| anyhow!("seed and load variables: {e}"))?;
+    let vars = impresspress_core::platform_state::variables::seed_environment_and_load(
+        &database, &env_vars,
+    )
+    .await
+    .map_err(|e| anyhow!("seed and load variables: {e}"))?;
     tracing::info!(vars = vars.len(), "variables loaded from database");
 
     // 6. Extract JWT secret and feature config from variables. An empty
@@ -327,16 +333,14 @@ pub async fn build_native_runtime(
             impresspress_core::blocks::auth::JWT_SECRET_KEY
         ));
     }
-    // A read error here is always a genuine operational failure (backend
-    // outage/corruption) — `block_settings::load_and_seed` never fabricates
-    // "every block enabled" out of one. Bail rather than boot with a
-    // security-relevant setting silently defaulted open.
-    let features = impresspress_core::platform_state::block_settings::load_and_seed(
-        &database,
-        &impresspress_core::blocks::block_enabled_defaults(),
-    )
-    .await
-    .map_err(|e| anyhow!("load block settings: {e}"))?;
+    // What is stored now; seeded towards the registered blocks' defaults
+    // after registration, below. A read error here is always a genuine
+    // operational failure (backend outage/corruption) — `block_settings::load`
+    // never fabricates "every block enabled" out of one. Bail rather than
+    // boot with a security-relevant setting silently defaulted open.
+    let features = impresspress_core::platform_state::block_settings::load(&database)
+        .await
+        .map_err(|e| anyhow!("load block settings: {e}"))?;
 
     // `IMPRESSPRESS_REQUEST_LOG`: an operational flag read straight from the
     // process env. It is an infrastructure key
@@ -449,13 +453,16 @@ pub async fn build_native_runtime(
     let crypto = impresspress_native::make_jwt_crypto_service(jwt_secret, password_peppers)
         .context("construct crypto service")?;
 
-    let (with_config, ()) = runtime_config.install(
+    let (with_config, config_service) = runtime_config.install(
         ImpresspressBuilder::new()
-            .database(database, infra.db_type)
+            .database(database.clone(), infra.db_type)
             .storage(storage.clone()),
         |map| {
-            let svc = wafer_core::service_blocks::config::EnvConfigService::new();
-            (builder::fill_config_service(Arc::new(svc), map), ())
+            let svc = builder::fill_config_service(
+                Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                map,
+            );
+            (svc.clone(), svc)
         },
     )?;
 
@@ -471,11 +478,12 @@ pub async fn build_native_runtime(
     // seeder would accept take part (`usable_env_exports`), so one it refuses —
     // a blank value, a runtime-owned key, a value its key's declared rule
     // refuses — cannot reach a block's Init this way instead.
-    let mut block_config =
-        impresspress_core::platform_state::variables::usable_env_exports(app_env);
-    block_config.extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+    //
+    // Published after registration (below), once the declared secrets are
+    // seeded: no block's `Init` runs before then.
+    let config_source = Arc::new(impresspress_core::config_source::SharedConfigSource::new());
     let builder = with_config
-        .config_source(Arc::new(wafer_run::StaticConfigSource::new(block_config)))
+        .config_source(config_source.clone())
         .crypto(crypto)
         .network(impresspress_native::make_fetch_network_service())
         .logger(impresspress_native::make_tracing_logger())
@@ -491,9 +499,40 @@ pub async fn build_native_runtime(
         .model_cache_dir(&infra.model_cache_dir);
     let builder = (hooks.register_blocks)(builder)
         .map_err(|e| anyhow!("register the application's blocks: {e}"))?;
+    let block_settings_handle = builder.block_settings_handle();
     let mut wafer = builder.build().context("build impresspress runtime")?;
     (hooks.register_post_build)(&mut wafer, storage)
         .map_err(|e| anyhow!("register the application's post-build blocks: {e}"))?;
+
+    // Seed from the runtime's registered declarations — consumer and
+    // post-build blocks included — as the Cloudflare deploy funnel and the
+    // browser boot do: the secrets they declare, then the enablement
+    // defaults they declare (the #222 hash-gate). Before boot, so every
+    // block's `Init` sees both.
+    let declarations = wafer.block_infos();
+    let vars = impresspress_core::platform_state::variables::seed_declared_and_load(
+        &database,
+        &declarations,
+    )
+    .await
+    .map_err(|e| anyhow!("seed the declared secrets: {e}"))?;
+    let mut block_config =
+        impresspress_core::platform_state::variables::usable_env_exports(app_env);
+    block_config.extend(vars);
+    config_source.publish(block_config);
+    let features = impresspress_core::platform_state::block_settings::load_and_seed(
+        &database,
+        &impresspress_core::blocks::enabled_defaults_from(&declarations),
+    )
+    .await
+    .map_err(|e| anyhow!("load block settings: {e}"))?;
+    builder::publish_block_settings(
+        &mut wafer,
+        &config_service,
+        &block_settings_handle,
+        features,
+    )
+    .map_err(|e| anyhow!("publish block settings: {e}"))?;
 
     Ok(wafer)
 }
@@ -577,11 +616,12 @@ pub async fn boot_native(wafer: &mut Wafer) -> anyhow::Result<builder::BootRepor
     ))
 }
 
-/// Native [`BootHooks`](builder::BootHooks). Native seeds the variables /
-/// block_settings tables pre-wafer (its immutable crypto service and config
-/// snapshot need the values at `build()` time), so — like the Cloudflare hook
-/// after its eager pre-build config reads — there is nothing left to seed once
-/// admin's `Init` has run. The shared `boot` funnel still owns the admin-first
+/// Native [`BootHooks`](builder::BootHooks). Native seeds before boot, in
+/// [`build_native_runtime`]: the environment and the JWT secret before
+/// `build()` (its immutable crypto service and config snapshot need them),
+/// the declared secrets and enablement defaults right after registration,
+/// from the registered declarations. Admin's migrations are applied before
+/// either, so there is nothing left to seed once admin's `Init` has run. The shared `boot` funnel still owns the admin-first
 /// ordering; native only needs an
 /// empty hook — [`builder::BootHooks`] is deliberately not an `Option`, so a
 /// target with nothing to seed says so here rather than by omission — plus the

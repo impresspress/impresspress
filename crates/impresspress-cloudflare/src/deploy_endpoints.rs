@@ -126,7 +126,7 @@ where
             None,
             register_blocks,
             register_post_build,
-            true,
+            crate::runtime_build::BuildPurpose::Deploy,
             BuildSource {
                 db,
                 block_settings,
@@ -138,13 +138,20 @@ where
             .await
             .map_err(|e| FunnelFailure::new(e.is_transient(), format!("boot: {e}")))?;
         let plan_draft = if prepare_plan && report.ok {
-            impresspress_core::builder::seal_prepared_plan(&built.db, &built.plan_exporter)
+            // `BuildPurpose::Deploy` always builds the exporter.
+            let exporter = built.plan_exporter.clone().ok_or_else(|| {
+                FunnelFailure::new(
+                    false,
+                    "the deploy funnel's runtime carries no plan exporter",
+                )
+            })?;
+            impresspress_core::builder::seal_prepared_plan(&built.db, &exporter)
                 .await
                 .map_err(|e| FunnelFailure::new(e.is_transient(), e))?;
             let identity = environment
                 .prepared_runtime_identity()
                 .map_err(|e| FunnelFailure::new(false, e))?;
-            Some((built.plan_exporter.clone(), identity))
+            Some((exporter, identity))
         } else {
             None
         };

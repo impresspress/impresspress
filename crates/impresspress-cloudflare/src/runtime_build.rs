@@ -50,7 +50,9 @@ pub(crate) struct BuiltRuntime {
     /// copies this field; it retains only the Wafer whose service blocks are
     /// stateless forwarding proxies.
     pub(crate) services: std::rc::Rc<request_services::RequestServices>,
-    pub(crate) plan_exporter: impresspress_core::builder::PreparedPlanExporter,
+    /// The deploy funnel's plan exporter; `None` for a runtime built to serve
+    /// ([`BuildPurpose::Serve`]), which exports nothing.
+    pub(crate) plan_exporter: Option<impresspress_core::builder::PreparedPlanExporter>,
     /// Same settings snapshot the router owns. Deploy init updates it after
     /// admin migration + structural seeding so the disposable candidate
     /// runtime validates the exact state ordinary cold builds will read.
@@ -256,11 +258,13 @@ pub(crate) async fn read_variables(
 /// and build + config-snapshot the runtime. Synchronous: it reaches no
 /// backend, so whatever fails here is a fault.
 ///
-/// `force_run_migrations` inserts `IMPRESSPRESS_RUN_MIGRATIONS=1` into the config
-/// snapshot — set only by the `/_deploy/init` endpoint to force a migration
-/// pass. Migrations on CF run exclusively through that funnel (both a
-/// production deploy and local `impresspress serve --target cloudflare` POST it);
-/// the normal request path always passes `false` and never migrates.
+/// `purpose` says which of the two runtimes this is ([`BuildPurpose`]). The
+/// deploy funnel's inserts `IMPRESSPRESS_RUN_MIGRATIONS=1` into the config
+/// snapshot to force a migration pass, and builds the plan exporter.
+/// Migrations on CF run exclusively through that funnel (both a production
+/// deploy and local `impresspress serve --target cloudflare` POST it); the
+/// request path builds to serve, never migrates and exports nothing, so a
+/// plan-only check can never fail a serving build.
 ///
 /// Missing-table tolerance is an invariant of the reads around it: on a
 /// first-ever deploy `/_deploy/init` builds this runtime BEFORE any migration
@@ -290,7 +294,7 @@ pub(crate) fn build_runtime<F, G>(
     prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
     register_blocks: F,
     register_post_build: G,
-    force_run_migrations: bool,
+    purpose: BuildPurpose,
     source: BuildSource,
 ) -> Result<BuiltRuntime, crate::runtime_cache::RuntimeBuildError>
 where
@@ -307,10 +311,21 @@ where
         prepared_plan,
         register_blocks,
         register_post_build,
-        force_run_migrations,
+        purpose,
         source,
     )
     .map_err(|e| crate::runtime_cache::RuntimeBuildError::Fault(e.to_string()))
+}
+
+/// What a [`build_runtime`] is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuildPurpose {
+    /// A runtime that serves requests (a cold build, a rebuild, a prepared
+    /// hydrate): no migration pass, and no plan exporter.
+    Serve,
+    /// The deploy funnel's runtime (`/_deploy/init`, `/_deploy/prepare`):
+    /// migrations forced, and the exporter of the plan it seals.
+    Deploy,
 }
 
 /// [`build_runtime`]'s body: the config surfaces, the services, the
@@ -326,7 +341,7 @@ fn assemble_runtime<F, G>(
     prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
     register_blocks: F,
     register_post_build: G,
-    force_run_migrations: bool,
+    purpose: BuildPurpose,
     source: BuildSource,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>>
 where
@@ -347,7 +362,7 @@ where
     let (mut runtime_config, mut overlay) = structural_runtime_config(structural_config_inputs(
         environment,
         block_settings.to_config_json(),
-        force_run_migrations,
+        purpose == BuildPurpose::Deploy,
     ));
 
     // Explicit application request config reaches the async service surface
@@ -430,21 +445,33 @@ where
             // service map, so blocks can read embedder-provided keys with no
             // I/O. That is immutable configuration data, not a request-derived
             // service handle; Worker-version identity still forces a rebuild
-            // when it changes. The plan exporter's block inventory is read
-            // from the declarations this registration read, not rebuilt.
-            let (mut wafer, plan_exporter) = match (prepared_plan, prepared_identity.as_ref()) {
-                (Some(plan), Some(identity)) => builder
-                    .apply_prepared_plan(
-                        plan,
-                        &identity.application_id,
-                        &identity.application_build_sha256,
-                        &identity.dependency_lock,
-                        &identity.release_assets,
-                    )?
-                    .build_with_plan_exporter()?,
-                (None, None) => builder.build_with_plan_exporter()?,
-                _ => return Err("prepared runtime identity invariant violated".into()),
-            };
+            // when it changes. Only the deploy funnel's runtime builds a plan
+            // exporter, whose block inventory is read from the declarations
+            // this registration read, not rebuilt.
+            let (mut wafer, plan_exporter) =
+                match (purpose, prepared_plan, prepared_identity.as_ref()) {
+                    (BuildPurpose::Serve, Some(plan), Some(identity)) => {
+                        let wafer = builder
+                            .apply_prepared_plan(
+                                plan,
+                                &identity.application_id,
+                                &identity.application_build_sha256,
+                                &identity.dependency_lock,
+                                &identity.release_assets,
+                            )?
+                            .build()?;
+                        (wafer, None)
+                    }
+                    (BuildPurpose::Serve, None, None) => (builder.build()?, None),
+                    (BuildPurpose::Deploy, None, None) => {
+                        let (wafer, exporter) = builder.build_with_plan_exporter()?;
+                        (wafer, Some(exporter))
+                    }
+                    (BuildPurpose::Deploy, Some(_), _) => {
+                        return Err("the deploy funnel builds from registration, not a plan".into())
+                    }
+                    _ => return Err("prepared runtime identity invariant violated".into()),
+                };
 
             // 6a. The consumer receives the scoped storage proxy, never the
             // request's concrete R2 Bucket. A block may safely retain this

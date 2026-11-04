@@ -1655,7 +1655,7 @@ where
             None,
             register_blocks,
             register_post_build,
-            false,
+            crate::runtime_build::BuildPurpose::Serve,
             source,
         )?;
         // One lifecycle: D1 grants before seal, seal, admin first, the request
@@ -2490,7 +2490,7 @@ where
         Some(plan),
         register_blocks,
         register_post_build,
-        false,
+        crate::runtime_build::BuildPurpose::Serve,
         source,
     )?;
 

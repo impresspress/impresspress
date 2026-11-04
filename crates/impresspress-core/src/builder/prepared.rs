@@ -7,7 +7,7 @@
 //! a target with a different feature set cannot silently accept the artifact.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     sync::{Arc, RwLock},
 };
 
@@ -40,7 +40,8 @@ use crate::{
 #[derive(Clone)]
 pub struct PreparedPlanExporter {
     /// Everything but the two live parts below, normalized. Its own
-    /// `block_settings` and `deployment_wrap_grants` are not read.
+    /// `block_settings` and `deployment_wrap_grants` are left empty: export
+    /// fills them from those.
     structure: PreparedRuntimeStructure,
     block_settings: Arc<RwLock<BlockSettings>>,
     deployment_wrap_grants: Arc<RwLock<Vec<PreparedResourceGrant>>>,
@@ -186,15 +187,20 @@ impl From<wafer_run::RuntimeError> for PreparedBuildError {
 /// type exists not to pay. A mismatch therefore costs the registration of
 /// the blocks, never their seal or `Init`.
 pub struct AppliedPlanBuilder {
+    /// The builder, its routes, configs and grants already the plan's.
     builder: ImpresspressBuilder,
-    /// The verified plan's structure, which this runtime is built from and
-    /// its exporter describes.
-    plan: PreparedRuntimeStructure,
+    /// The plan's application block inventory, in a plan's order.
+    application_blocks: Vec<PreparedBlockImplementation>,
+    /// The plan's deployment-owned block settings. Written into the builder's
+    /// shared settings handle only once the inventory has matched, so a plan
+    /// this runtime refuses changes nothing a caller holds.
+    block_settings: BlockSettings,
 }
 
 impl AppliedPlanBuilder {
     /// The settings handle the runtime will be built with; see
-    /// [`ImpresspressBuilder::block_settings_handle`].
+    /// [`ImpresspressBuilder::block_settings_handle`]. It holds the plan's
+    /// settings once [`Self::build`] has succeeded.
     pub fn block_settings_handle(&self) -> Arc<RwLock<BlockSettings>> {
         self.builder.block_settings_handle()
     }
@@ -203,27 +209,36 @@ impl AppliedPlanBuilder {
     /// grants, and refuse it unless the application blocks it registered are
     /// the plan's.
     ///
-    /// The compile's own routes, final configs and grants were compared with
-    /// the plan's by the import, and the plan itself was verified there, so
-    /// nothing is validated again before registration.
-    pub fn build_with_plan_exporter(
-        self,
-    ) -> Result<(wafer_run::Wafer, PreparedPlanExporter), PreparedBuildError> {
-        let expected = self.plan.application_blocks.clone();
-        let (wafer, exporter) = self.builder.register_with_exporter(self.plan)?;
-        if exporter.structure.application_blocks != expected {
+    /// The check runs right after registration — the inventory is not known
+    /// before (see the type's doc) — and before anything a caller shares is
+    /// changed: the plan's block settings reach the shared handle only after
+    /// it passes. The compile's own routes, final configs and grants were
+    /// compared with the plan's by the import, so nothing a plan alone needs
+    /// is validated here.
+    pub fn build(self) -> Result<wafer_run::Wafer, PreparedBuildError> {
+        let handle = self.builder.block_settings_handle();
+        let registered = self.builder.register()?;
+        let mut inventory =
+            application_inventory(&registered.declarations, &registered.application);
+        crate::prepared_plan::sort_application_blocks(&mut inventory);
+        if inventory != self.application_blocks {
             return Err(PreparedPlanError::StructureMismatch(
                 "compiled application block inventory does not match".into(),
             )
             .into());
         }
-        Ok((wafer, exporter))
+        *handle.write().map_err(|_| {
+            PreparedPlanError::StructureMismatch(
+                "BlockSettings lock poisoned during plan import".into(),
+            )
+        })? = self.block_settings;
+        Ok(registered.wafer)
     }
 }
 
 /// The implementations of the application blocks named in `application`, from
-/// the runtime's registration-time declarations. Unsorted: the structure's
-/// [`PreparedRuntimeStructure::normalize`] orders them.
+/// the runtime's registration-time declarations. Unsorted: a plan's order is
+/// [`crate::prepared_plan::sort_application_blocks`].
 ///
 /// `infos` is [`wafer_run::Wafer::block_infos`]: the `BlockInfo` each block's
 /// registration read once, so this reads no block's `info()`.
@@ -282,11 +297,14 @@ impl ImpresspressBuilder {
         mut structure: PreparedRuntimeStructure,
     ) -> Result<(wafer_run::Wafer, PreparedPlanExporter), PreparedBuildError> {
         let block_settings = self.block_settings.clone();
-        let deployment_wrap_grants =
-            Arc::new(RwLock::new(structure.deployment_wrap_grants.clone()));
+        // Moved, not copied: the exporter's structure leaves these empty and
+        // export reads the live copies.
+        let deployment_wrap_grants = Arc::new(RwLock::new(std::mem::take(
+            &mut structure.deployment_wrap_grants,
+        )));
         let registered = self.register()?;
         structure.application_blocks =
-            application_inventory(&registered.wafer.block_infos(), &registered.application);
+            application_inventory(&registered.declarations, &registered.application);
         structure.normalize();
         Ok((
             registered.wafer,
@@ -411,17 +429,15 @@ impl ImpresspressBuilder {
             ));
         }
 
-        let blocks: HashMap<_, _> = plan
-            .structure
-            .block_settings
-            .iter()
-            .map(|(name, state)| (name.clone(), state.clone()))
-            .collect();
-        *self.block_settings.write().map_err(|_| {
-            PreparedPlanError::StructureMismatch(
-                "BlockSettings lock poisoned during plan import".into(),
-            )
-        })? = BlockSettings::from_blocks(blocks);
+        // Not written into the shared settings handle here: that happens
+        // only once `AppliedPlanBuilder::build` has matched the inventory.
+        let block_settings = BlockSettings::from_blocks(
+            plan.structure
+                .block_settings
+                .iter()
+                .map(|(name, state)| (name.clone(), state.clone()))
+                .collect(),
+        );
 
         self.block_configs = plan
             .structure
@@ -472,7 +488,8 @@ impl ImpresspressBuilder {
 
         Ok(AppliedPlanBuilder {
             builder: self,
-            plan: plan.structure.clone(),
+            application_blocks: plan.structure.application_blocks.clone(),
+            block_settings,
         })
     }
 }
@@ -551,6 +568,8 @@ impl From<PreparedRouteAccess> for RouteAccess {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use std::collections::HashMap;
+
     use wafer_core::interfaces::network::service::{
         NetworkError, NetworkService, Request, Response,
     };
@@ -677,14 +696,20 @@ pub(super) mod tests {
         )
     }
 
-    /// The structure an imported plan's runtime exports, built.
+    /// The structure an imported plan's runtime is built from — its routes,
+    /// configs and grants, the inventory it matched, and the settings the
+    /// build left in the shared handle — after building it.
     fn applied_structure(applied: AppliedPlanBuilder) -> PreparedRuntimeStructure {
-        applied
-            .build_with_plan_exporter()
-            .expect("the runtime builds")
-            .1
-            .prepared_runtime_structure()
-            .expect("the structure exports")
+        let mut structure = applied
+            .builder
+            .descriptor()
+            .expect("the applied builder is valid");
+        structure.application_blocks = applied.application_blocks.clone();
+        let handle = applied.block_settings_handle();
+        applied.build().expect("the runtime builds");
+        structure.block_settings = handle.read().expect("settings lock").to_sorted_map();
+        structure.normalize();
+        structure
     }
 
     #[test]
@@ -753,7 +778,7 @@ pub(super) mod tests {
 
         let target = apply(ImpresspressBuilder::new(), &plan, &lock)
             .expect("the import compares no inventory");
-        let Err(error) = target.build_with_plan_exporter() else {
+        let Err(error) = target.build() else {
             panic!("a runtime without the plan's example/counted must not build");
         };
         assert!(
@@ -793,13 +818,106 @@ pub(super) mod tests {
         }
     }
 
+    /// A consumer block: off by default (operators may switch it on), and
+    /// declaring one auto-generated secret, `{ORG}__{BLOCK}__SIGNING_SECRET`.
+    struct Consumer(&'static str, &'static str);
+
+    #[wafer_block::wafer_async_trait]
+    impl wafer_run::Block for Consumer {
+        fn info(&self) -> wafer_run::BlockInfo {
+            wafer_run::BlockInfo::new(self.0, "0.1.0", "http-handler@v1", "consumer")
+                .can_disable(true)
+                .default_enabled(false)
+                .config_keys(vec![wafer_run::ConfigVar::new(
+                    self.1,
+                    "signing secret",
+                    "",
+                )
+                .auto_generate()])
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            _msg: wafer_run::Message,
+            _input: wafer_run::InputStream,
+        ) -> wafer_run::OutputStream {
+            crate::http::ResponseBuilder::new()
+                .status(200)
+                .body(Vec::new(), "text/plain")
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            _event: wafer_run::LifecycleEvent,
+        ) -> Result<(), wafer_run::WaferError> {
+            Ok(())
+        }
+    }
+
+    /// The deploy funnel (Cloudflare's `/_deploy/*`) seeds from the
+    /// runtime's registered declarations: a consumer block registered on the
+    /// builder, and one registered on the built runtime before boot, each get
+    /// their declared enablement default and their auto-generated secret.
+    #[tokio::test]
+    async fn the_deploy_funnel_seeds_consumer_blocks_declarations() {
+        let database: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            Arc::new(
+                wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+                    .expect("open in-memory sqlite"),
+            );
+        let (builder, config) = serviced_over(
+            ImpresspressBuilder::new().extra_block(
+                "example/consumer",
+                Arc::new(Consumer(
+                    "example/consumer",
+                    "EXAMPLE__CONSUMER__SIGNING_SECRET",
+                )),
+            ),
+            database.clone(),
+            true,
+        );
+        let settings = builder.block_settings_handle();
+        let (mut wafer, _exporter) = builder
+            .build_with_plan_exporter()
+            .expect("the deploy runtime builds");
+        wafer
+            .register_block(
+                "example/late",
+                Arc::new(Consumer("example/late", "EXAMPLE__LATE__SIGNING_SECRET")),
+            )
+            .expect("a post-build block registers");
+        let report = crate::builder::boot_deploy_runtime(&mut wafer, &database, &settings, config)
+            .await
+            .expect("the deploy funnel runs");
+        assert!(report.ok, "{report:#?}");
+
+        let stored = crate::platform_state::block_settings::load(&database)
+            .await
+            .expect("block settings");
+        for (block, key) in [
+            ("example/consumer", "EXAMPLE__CONSUMER__SIGNING_SECRET"),
+            ("example/late", "EXAMPLE__LATE__SIGNING_SECRET"),
+        ] {
+            assert!(
+                !stored.state(block).enabled,
+                "{block}'s declared default (off) is seeded"
+            );
+            let secret = crate::platform_state::variables::find_by_key(&database, key)
+                .await
+                .expect("read the secret")
+                .unwrap_or_else(|| panic!("{key} is generated"));
+            assert!(!secret.value.is_empty(), "{key} is generated");
+        }
+    }
+
     /// The request-path build reads each block's declaration once, at its
-    /// registration (wafer-run#478): importing a plan, building the runtime
-    /// with its exporter, and booting it as a cold isolate does — seal and
-    /// every block's `Init` — then exporting the plan, read none again:
+    /// registration (wafer-run#478): importing a plan, building the runtime,
+    /// and booting it as a cold isolate does — seal and every block's
+    /// `Init` — read none again:
     /// neither a consumer block's (the counted block) nor the feature blocks'
     /// (no use of the block set `blocks::all_block_infos` constructs, through
-    /// any wrapper; see `blocks::block_set_sweeps`). The plan comes from the
+    /// any wrapper; see `blocks::block_set_sweeps`, which counts this test's
+    /// own thread — the build and boot run on it). The plan comes from the
     /// deploy funnel over the same database, as on Cloudflare. Before, the
     /// import and the exporter each constructed the application block
     /// inventory from `info()`.
@@ -870,9 +988,7 @@ pub(super) mod tests {
             )
             .expect("the plan applies");
         let settings = target.block_settings_handle();
-        let (mut wafer, exporter) = target
-            .build_with_plan_exporter()
-            .expect("the runtime builds");
+        let mut wafer = target.build().expect("the runtime builds");
         crate::builder::boot_request_runtime(
             &mut wafer,
             &database,
@@ -882,14 +998,6 @@ pub(super) mod tests {
         )
         .await
         .expect("the prepared runtime boots");
-        exporter
-            .prepare_runtime_plan(
-                "example",
-                hash('b'),
-                lock.clone(),
-                PreparedReleaseAssets::absent(),
-            )
-            .expect("the plan exports");
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             crate::blocks::block_set_sweeps(),

@@ -44,6 +44,14 @@ wafer-run#482, which carries #478 and #479.
 - A name is a block or an alias, never both, and both are fixed once the
   runtime is sealed (#479). impresspress registers every block and alias
   before it seals, so a deployment sees no difference.
+- Every target seeds from the blocks its runtime registered. A consumer's
+  own blocks — added on the builder or after `build()` — now get their
+  declared enablement default (`default_enabled`) and their auto-generated
+  secrets on native and in the browser as well as on Cloudflare; before,
+  native and the browser seeded only impresspress's compiled blocks, and
+  a consumer block that declared a generated secret started without it. A
+  native server now seeds those after registering its blocks and before
+  booting them.
 
 **Embedder API, breaking (Rust).**
 
@@ -53,10 +61,13 @@ wafer-run#482, which carries #478 and #479.
   `ImpresspressBuilder::build_with_plan_exporter()`, which builds the runtime
   and answers it with its exporter (error: `PreparedBuildError`).
 - `apply_prepared_plan` answers an `AppliedPlanBuilder`, which builds only
-  through its `build_with_plan_exporter()`. That compares the application
-  blocks it registered with the plan's and refuses a mismatch with
-  `PreparedPlanError::StructureMismatch`. Inject the services before
-  importing the plan.
+  through its `build()`. That compares the application blocks it registered
+  with the plan's and refuses a mismatch with
+  `PreparedPlanError::StructureMismatch`, before the plan's block settings
+  reach the builder's shared settings handle. Inject the services before
+  importing the plan. A runtime that serves requests builds without an
+  exporter; only a build that exports a plan (the deploy funnel) calls
+  `build_with_plan_exporter()`.
 - `Context::registered_blocks()` returns `&[Arc<BlockInfo>]`, and
   `Wafer::block_infos()` returns `Vec<Arc<BlockInfo>>`. A `Context`
   implementation returns the `Arc`s; field access reads through them as
@@ -71,12 +82,18 @@ wafer-run#482, which carries #478 and #479.
   `&[]` names its element type. `ImpresspressRouterBlock`'s constructors and
   `BodyLimitBlock::new` take `impl Into<Arc<[Arc<BlockInfo>]>>`, and
   `blocks::register_feature_blocks` answers the names it registered.
-- The deploy funnel seeds from the runtime's registered declarations:
-  `DeployBootHooks::new` and `DeployBootHooks::seeding_towards` take them
-  (`Vec<Arc<BlockInfo>>`, `Wafer::block_infos()`),
-  `platform_state::variables::seed_auto_generated` takes the declarations to
-  generate secrets for, and `blocks::enabled_defaults_from` (the rule behind
-  `block_enabled_defaults`) is public.
+- Seeding takes the runtime's registered declarations
+  (`Wafer::block_infos()`): `DeployBootHooks::new` and
+  `DeployBootHooks::seeding_towards` take them,
+  `platform_state::variables::seed_and_load` and `seed_auto_generated` take
+  the declarations to generate secrets for, and `blocks::enabled_defaults_from`
+  (the rule behind `block_enabled_defaults`) is public. A target that needs
+  its variables before `build()` runs `variables::seed_environment_and_load`
+  first and `variables::seed_declared_and_load` after registration, as
+  native does; `builder::publish_block_settings` publishes the seeded
+  settings onto the handle and both config surfaces.
+- `blocks::register_admin` and `blocks::register_llm` answer the name they
+  registered, and `blocks::register_fastembed` registers the embedder.
 - A block or alias an embedder registers after `Wafer::seal()` is refused
   (`RuntimeError::RegisteredAfterSeal`, `AliasError::AfterSeal`) where it
   used to be silently unreachable; impresspress's own hooks, including
