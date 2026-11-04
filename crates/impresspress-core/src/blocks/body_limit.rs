@@ -52,15 +52,18 @@ pub const BLOCK_NAME: &str = "impresspress/body-limit";
 /// mint arbitrary rows — needs the route table to tell the two apart. Same
 /// snapshot `impresspress/router` is built with.
 pub struct BodyLimitBlock {
-    block_infos: Vec<BlockInfo>,
+    block_infos: Arc<[BlockInfo]>,
     extra_routes: Arc<Vec<ExtraRoute>>,
 }
 
 impl BodyLimitBlock {
     /// Construct the block with the routes its audit rows are judged against.
-    pub fn new(block_infos: Vec<BlockInfo>, extra_routes: Arc<Vec<ExtraRoute>>) -> Self {
+    pub fn new(
+        block_infos: impl Into<Arc<[BlockInfo]>>,
+        extra_routes: Arc<Vec<ExtraRoute>>,
+    ) -> Self {
         Self {
-            block_infos,
+            block_infos: block_infos.into(),
             extra_routes,
         }
     }

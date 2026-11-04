@@ -34,8 +34,9 @@ pub struct ImpresspressRouterBlock {
     features: Arc<dyn FeatureConfig>,
     /// BlockInfo for all registered impresspress blocks — used by the discovery
     /// endpoints (`/openapi.json`, `/.well-known/agent.json`). Populated from
-    /// `Wafer::block_infos()` after all blocks are registered.
-    block_infos: Vec<BlockInfo>,
+    /// `Wafer::block_infos()` after all blocks are registered, and shared
+    /// with `impresspress/body-limit`.
+    block_infos: Arc<[BlockInfo]>,
     /// Runtime-added routes from downstream projects (see `ImpresspressBuilder::add_route`).
     /// Built-in `ROUTES` take priority — see `routing::route_to_block`.
     extra_routes: Arc<Vec<ExtraRoute>>,
@@ -46,7 +47,7 @@ impl ImpresspressRouterBlock {
     pub fn new(
         jwt_secret: Arc<RwLock<String>>,
         features: Arc<dyn FeatureConfig>,
-        block_infos: Vec<BlockInfo>,
+        block_infos: impl Into<Arc<[BlockInfo]>>,
     ) -> Self {
         Self::with_extra_routes(jwt_secret, features, block_infos, Vec::new())
     }
@@ -56,7 +57,7 @@ impl ImpresspressRouterBlock {
     pub fn with_extra_routes(
         jwt_secret: Arc<RwLock<String>>,
         features: Arc<dyn FeatureConfig>,
-        block_infos: Vec<BlockInfo>,
+        block_infos: impl Into<Arc<[BlockInfo]>>,
         extra_routes: Vec<ExtraRoute>,
     ) -> Self {
         Self::with_extra_routes_arc(jwt_secret, features, block_infos, Arc::new(extra_routes))
@@ -64,19 +65,20 @@ impl ImpresspressRouterBlock {
 
     /// Construct a router sharing an already-`Arc`'d route list.
     ///
-    /// `impresspress/body-limit` is built from the same list — it judges the
-    /// path on its audit rows the way this block routes — so the builder
-    /// shares one allocation rather than cloning the vector per block.
+    /// `impresspress/body-limit` is built from the same list and the same
+    /// declarations — it judges the path on its audit rows the way this block
+    /// routes — so the builder shares one allocation of each rather than
+    /// cloning them per block.
     pub fn with_extra_routes_arc(
         jwt_secret: Arc<RwLock<String>>,
         features: Arc<dyn FeatureConfig>,
-        block_infos: Vec<BlockInfo>,
+        block_infos: impl Into<Arc<[BlockInfo]>>,
         extra_routes: Arc<Vec<ExtraRoute>>,
     ) -> Self {
         Self {
             jwt_secret,
             features,
-            block_infos,
+            block_infos: block_infos.into(),
             extra_routes,
         }
     }

@@ -26,9 +26,9 @@ use crate::{
 
 /// Deploy-time plan producer detached from the consumed builder.
 ///
-/// A Cloudflare candidate creates this immediately after executing the real
-/// consumer registration closure, then consumes the builder with `build()`.
-/// The exporter retains only immutable descriptor data plus the shared
+/// A Cloudflare candidate gets this from
+/// [`ImpresspressBuilder::build_with_plan_exporter`], after executing the real
+/// consumer registration closure. The exporter retains only immutable descriptor data plus the shared
 /// `BlockSettings` snapshot handle. After deploy initialization seeds and
 /// republishes those settings, `prepare_runtime_plan()` observes the final
 /// snapshot and can return the plan through the candidate endpoint.
@@ -153,30 +153,70 @@ impl PreparedPlanExporter {
     }
 }
 
+/// Why [`ImpresspressBuilder::build_with_plan_exporter`] produced no runtime.
+#[derive(Debug, thiserror::Error)]
+pub enum PreparedBuildError {
+    /// The runtime did not build (`ImpresspressBuilder::build`'s error).
+    #[error("builder.build: {0}")]
+    Build(#[from] wafer_run::RuntimeError),
+    /// The runtime built, but its registrations do not form a valid plan.
+    #[error(transparent)]
+    Plan(#[from] PreparedPlanError),
+}
+
+/// The implementations of the application blocks named in `application`, from
+/// the runtime's registration-time declarations, sorted as a plan stores them.
+///
+/// `infos` is [`wafer_run::Wafer::block_infos`]: the `BlockInfo` each block's
+/// registration read once, so this reads no block's `info()`.
+pub(super) fn application_inventory(
+    infos: &[Arc<wafer_run::BlockInfo>],
+    application: &[String],
+) -> Vec<PreparedBlockImplementation> {
+    let mut blocks: Vec<_> = infos
+        .iter()
+        .filter(|info| application.contains(&info.name))
+        .map(|info| PreparedBlockImplementation {
+            name: info.name.clone(),
+            version: info.version.clone(),
+            interface: info.interface.clone(),
+            runtime: match info.runtime {
+                BlockRuntime::Native => PreparedBlockRuntime::Native,
+                BlockRuntime::Wasm => PreparedBlockRuntime::Wasm,
+            },
+        })
+        .collect();
+    blocks.sort_by(|a, b| {
+        (&a.name, &a.version, &a.interface).cmp(&(&b.name, &b.version, &b.interface))
+    });
+    blocks
+}
+
 impl ImpresspressBuilder {
-    /// Capture an exporter before `build()` consumes this builder.
+    /// Build the runtime, and the exporter of the plan that describes it.
     ///
     /// This is the candidate-endpoint seam: execute consumer registrations,
-    /// call this method, build+boot normally, then use the exporter after boot
-    /// to package the final seeded structural snapshot.
-    pub fn prepared_plan_exporter(&self) -> Result<PreparedPlanExporter, PreparedPlanError> {
-        let mut application_blocks: Vec<_> = crate::blocks::all_block_infos()
-            .into_iter()
-            .chain(self.extra_blocks.iter().map(|(_, block)| block.info()))
-            .map(|info| PreparedBlockImplementation {
-                name: info.name,
-                version: info.version,
-                interface: info.interface,
-                runtime: match info.runtime {
-                    BlockRuntime::Native => PreparedBlockRuntime::Native,
-                    BlockRuntime::Wasm => PreparedBlockRuntime::Wasm,
-                },
-            })
-            .collect();
-        application_blocks.sort_by(|a, b| {
-            (&a.name, &a.version, &a.interface).cmp(&(&b.name, &b.version, &b.interface))
-        });
+    /// call this method, boot the runtime normally, then use the exporter
+    /// after boot to package the final seeded structural snapshot. The
+    /// exporter's application block inventory is the one `build()`
+    /// registered, read from the runtime's registration-time `BlockInfo`s.
+    pub fn build_with_plan_exporter(
+        self,
+    ) -> Result<(wafer_run::Wafer, PreparedPlanExporter), PreparedBuildError> {
+        let mut exporter = self.unregistered_exporter();
+        let registered = self.register()?;
+        exporter.application_blocks = registered.application_blocks;
+        // A descriptor or config error is the plan's, so it is answered here
+        // rather than when the deploy funnel first exports, while the settings
+        // handle can still be updated after boot.
+        exporter.prepared_runtime_structure()?;
+        Ok((registered.wafer, exporter))
+    }
 
+    /// The exporter of everything this builder holds that a plan carries,
+    /// except the application block inventory, which only registration
+    /// knows: [`Self::build_with_plan_exporter`] fills it in.
+    fn unregistered_exporter(&self) -> PreparedPlanExporter {
         let built_in_route_count = ROUTES.len();
         let routes = ROUTES
             .iter()
@@ -210,8 +250,8 @@ impl ImpresspressBuilder {
             final_block_configs.insert(name.clone(), value.clone());
         }
 
-        let exporter = PreparedPlanExporter {
-            application_blocks,
+        PreparedPlanExporter {
+            application_blocks: Vec::new(),
             routes,
             built_in_route_count,
             block_settings: self.block_settings.clone(),
@@ -228,70 +268,17 @@ impl ImpresspressBuilder {
                     .map(PreparedResourceGrant::from)
                     .collect(),
             )),
-        };
-        // Fail early for descriptor/config errors, while still allowing the
-        // settings handle to be updated after boot.
-        exporter.prepared_runtime_structure()?;
-        Ok(exporter)
-    }
-
-    /// Snapshot the builder's immutable application structure.
-    ///
-    /// This method performs no filesystem, database, KV, R2, or network I/O.
-    /// Service implementations and executable factories are deliberately not
-    /// serialized. Their declarative block identities are captured for parity
-    /// checking by [`Self::apply_prepared_plan`].
-    pub fn prepared_runtime_structure(
-        &self,
-    ) -> Result<PreparedRuntimeStructure, PreparedPlanError> {
-        self.prepared_plan_exporter()?.prepared_runtime_structure()
-    }
-
-    /// Create a content-addressed deployment plan from this builder's actual
-    /// registrations. The final staged application digest and exact
-    /// `wafer.lock` identity are supplied by the deployment host.
-    pub fn prepare_runtime_plan(
-        &self,
-        application_id: impl Into<String>,
-        application_build_sha256: impl Into<String>,
-        dependency_lock: WaferLockIdentity,
-        release_assets: PreparedReleaseAssets,
-    ) -> Result<PreparedRuntimePlan, PreparedPlanError> {
-        PreparedRuntimePlan::new(
-            application_id,
-            application_build_sha256,
-            dependency_lock,
-            release_assets,
-            self.prepared_runtime_structure()?,
-        )
-    }
-
-    /// Create a deployable content-addressed plan bound to the exact
-    /// post-funnel KV structural/config generation.
-    pub fn prepare_runtime_plan_with_config_generation(
-        &self,
-        application_id: impl Into<String>,
-        application_build_sha256: impl Into<String>,
-        config_generation: impl Into<String>,
-        dependency_lock: WaferLockIdentity,
-        release_assets: PreparedReleaseAssets,
-    ) -> Result<PreparedRuntimePlan, PreparedPlanError> {
-        PreparedRuntimePlan::new_with_config_generation(
-            application_id,
-            application_build_sha256,
-            config_generation,
-            dependency_lock,
-            release_assets,
-            self.prepared_runtime_structure()?,
-        )
+        }
     }
 
     /// Verify and apply a prepared plan to the normal builder path.
     ///
     /// Call the consumer's usual registration function first, then invoke
     /// this method, inject current platform services, and call `build()`. The
-    /// application block inventory and complete route declaration must match
-    /// the target compile. Deployment-owned block settings and non-secret
+    /// complete route declaration, final block configs and consumer grants
+    /// must match the target compile, or this refuses the plan; the
+    /// application block inventory must too, which `build()` checks against
+    /// the blocks it registers. Deployment-owned block settings and non-secret
     /// structural configs are then replaced from the plan without external
     /// I/O. Executable block objects and service backends remain those already
     /// installed on this builder.
@@ -314,12 +301,10 @@ impl ImpresspressBuilder {
             expected_release_assets,
         )?;
 
-        let current = self.prepared_runtime_structure()?;
-        if current.application_blocks != plan.structure.application_blocks {
-            return Err(PreparedPlanError::StructureMismatch(
-                "compiled application block inventory does not match".into(),
-            ));
-        }
+        // Everything but the application block inventory is compared here,
+        // before a block is constructed. The inventory is what `build()`
+        // registers, so `build()` compares it, against the copy kept below.
+        let current = self.unregistered_exporter().prepared_runtime_structure()?;
         if current.routes != plan.structure.routes
             || current.built_in_route_count != plan.structure.built_in_route_count
         {
@@ -396,6 +381,7 @@ impl ImpresspressBuilder {
             .cloned()
             .map(wafer_run::ResourceGrant::from)
             .collect();
+        self.prepared_application_blocks = Some(plan.structure.application_blocks.clone());
 
         Ok(self)
     }
@@ -474,12 +460,96 @@ impl From<PreparedRouteAccess> for RouteAccess {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use wafer_core::interfaces::network::service::{
+        NetworkError, NetworkService, Request, Response,
+    };
+
     use super::*;
     use crate::features::BlockState;
 
     fn hash(ch: char) -> String {
         format!("sha256:{}", ch.to_string().repeat(64))
+    }
+
+    /// Nothing these builds do leaves the process.
+    struct NoNetwork;
+
+    #[wafer_block::wafer_async_trait]
+    impl NetworkService for NoNetwork {
+        async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
+            Err(NetworkError::Other(format!("no network: {}", req.url)))
+        }
+    }
+
+    /// `builder` with the six services `build()` requires, over an in-memory
+    /// SQLite database. Building registers blocks and seals nothing, so the
+    /// database is never read.
+    pub(in crate::builder) fn serviced(builder: ImpresspressBuilder) -> ImpresspressBuilder {
+        let database = Arc::new(
+            wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+                .expect("open in-memory sqlite"),
+        );
+        let (builder, ()) = crate::builder::RuntimeConfig::new()
+            .install(
+                builder.database(database, wafer_sql_utils::Backend::Sqlite),
+                |map| {
+                    (
+                        crate::builder::fill_config_service(
+                            Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                            map,
+                        ),
+                        (),
+                    )
+                },
+            )
+            .expect("install the config surfaces");
+        builder
+            .storage(Arc::new(crate::test_support::InMemoryStorageService::new()))
+            .crypto(Arc::new(crate::test_support::real_crypto_service()))
+            .network(Arc::new(NoNetwork))
+            .logger(Arc::new(wafer_core::service_blocks::logger::TracingLogger))
+    }
+
+    /// The exporter of `builder`'s runtime, built.
+    pub(in crate::builder) fn exporter(builder: ImpresspressBuilder) -> PreparedPlanExporter {
+        serviced(builder)
+            .build_with_plan_exporter()
+            .expect("the runtime builds")
+            .1
+    }
+
+    /// The structure `builder`'s runtime exports.
+    fn structure(builder: ImpresspressBuilder) -> PreparedRuntimeStructure {
+        exporter(builder)
+            .prepared_runtime_structure()
+            .expect("the structure exports")
+    }
+
+    /// The plan `builder`'s runtime exports, bound to `lock`.
+    fn plan(builder: ImpresspressBuilder, lock: &WaferLockIdentity) -> PreparedRuntimePlan {
+        exporter(builder)
+            .prepare_runtime_plan(
+                "example",
+                hash('b'),
+                lock.clone(),
+                PreparedReleaseAssets::absent(),
+            )
+            .expect("the plan exports")
+    }
+
+    fn apply(
+        builder: ImpresspressBuilder,
+        plan: &PreparedRuntimePlan,
+        lock: &WaferLockIdentity,
+    ) -> Result<ImpresspressBuilder, PreparedPlanError> {
+        builder.apply_prepared_plan(
+            plan,
+            "example",
+            &hash('b'),
+            lock,
+            &PreparedReleaseAssets::absent(),
+        )
     }
 
     #[test]
@@ -497,14 +567,7 @@ mod tests {
             .block_config("wafer-run/web", serde_json::json!({ "web_root": "site" }))
             .add_route("/app/", "example/app", crate::routing::RouteAccess::Public);
         let lock = WaferLockIdentity::from_digest(2, hash('a')).unwrap();
-        let plan = source
-            .prepare_runtime_plan(
-                "example",
-                hash('b'),
-                lock.clone(),
-                PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
+        let plan = plan(source, &lock);
 
         // The target executes the same consumer registration before import.
         let target = ImpresspressBuilder::new().add_route(
@@ -512,19 +575,131 @@ mod tests {
             "example/app",
             crate::routing::RouteAccess::Public,
         );
-        let applied = target
-            .apply_prepared_plan(
-                &plan,
-                "example",
-                &hash('b'),
-                &lock,
-                &PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
-        assert_eq!(
-            applied.prepared_runtime_structure().unwrap(),
-            plan.structure
+        let applied = apply(target, &plan, &lock).unwrap();
+        assert_eq!(structure(applied), plan.structure);
+    }
+
+    /// The plan's application block inventory is what the runtime that
+    /// exported it registered on the application's behalf: the feature-block
+    /// manifest, admin, llm and the consumer's extra blocks, and none of the
+    /// runtime's own service, middleware, router or framework-auth blocks.
+    #[test]
+    fn the_inventory_is_the_application_blocks_the_runtime_registered() {
+        let names: Vec<String> = structure(ImpresspressBuilder::new())
+            .application_blocks
+            .into_iter()
+            .map(|block| block.name)
+            .collect();
+        let mut expected: Vec<String> = crate::blocks::all_block_infos()
+            .into_iter()
+            .map(|info| info.name)
+            .collect();
+        expected.sort();
+        assert_eq!(names, expected);
+    }
+
+    /// A target whose compiled blocks differ from the plan's is refused by
+    /// `build()`, which is where the inventory is known: the import itself
+    /// constructs no block.
+    #[test]
+    fn build_refuses_a_plan_whose_inventory_differs() {
+        let lock = WaferLockIdentity::absent();
+        let plan = plan(
+            ImpresspressBuilder::new()
+                .extra_block("example/counted", Arc::new(Counted(Arc::default()))),
+            &lock,
         );
+        assert!(plan
+            .structure
+            .application_blocks
+            .iter()
+            .any(|block| block.name == "example/counted"));
+
+        let target = apply(ImpresspressBuilder::new(), &plan, &lock)
+            .expect("the import compares no inventory");
+        let Err(error) = serviced(target).build() else {
+            panic!("a runtime without the plan's example/counted must not build");
+        };
+        assert!(
+            error.to_string().contains("application block inventory"),
+            "{error}"
+        );
+    }
+
+    /// A consumer block that counts the reads of its declaration.
+    struct Counted(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[wafer_block::wafer_async_trait]
+    impl wafer_run::Block for Counted {
+        fn info(&self) -> wafer_run::BlockInfo {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            wafer_run::BlockInfo::new("example/counted", "0.0.1", "echo@v1", "counts info()")
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            _msg: wafer_run::Message,
+            _input: wafer_run::InputStream,
+        ) -> wafer_run::OutputStream {
+            crate::http::ResponseBuilder::new()
+                .status(200)
+                .body(Vec::new(), "text/plain")
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn wafer_run::context::Context,
+            _event: wafer_run::LifecycleEvent,
+        ) -> Result<(), wafer_run::WaferError> {
+            Ok(())
+        }
+    }
+
+    /// The request-path build reads each block's declaration once, at its
+    /// registration (wafer-run#478): importing a plan, building the runtime
+    /// with its exporter, sealing, initializing the block and exporting the
+    /// plan read none again. Before, the import and the exporter each
+    /// constructed the application block inventory from `info()`.
+    #[tokio::test]
+    async fn a_prepared_build_reads_each_declaration_once() {
+        let lock = WaferLockIdentity::absent();
+        let counted = |reads: &Arc<std::sync::atomic::AtomicUsize>| -> Arc<dyn wafer_run::Block> {
+            Arc::new(Counted(Arc::clone(reads)))
+        };
+        let source_reads = Arc::default();
+        let plan = plan(
+            ImpresspressBuilder::new().extra_block("example/counted", counted(&source_reads)),
+            &lock,
+        );
+        assert_eq!(
+            source_reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exporting a plan reads the declaration only at registration"
+        );
+
+        let reads = Arc::default();
+        let target = apply(
+            ImpresspressBuilder::new().extra_block("example/counted", counted(&reads)),
+            &plan,
+            &lock,
+        )
+        .expect("the plan applies");
+        let (mut wafer, exporter) = serviced(target)
+            .build_with_plan_exporter()
+            .expect("the runtime builds");
+        wafer.seal().await.expect("the runtime seals");
+        wafer
+            .init_block("example/counted")
+            .await
+            .expect("the counted block initializes");
+        exporter
+            .prepare_runtime_plan(
+                "example",
+                hash('b'),
+                lock.clone(),
+                PreparedReleaseAssets::absent(),
+            )
+            .expect("the plan exports");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -535,23 +710,9 @@ mod tests {
             crate::routing::RouteAccess::Public,
         );
         let lock = WaferLockIdentity::from_digest(2, hash('a')).unwrap();
-        let plan = source
-            .prepare_runtime_plan(
-                "example",
-                hash('b'),
-                lock.clone(),
-                PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
+        let plan = plan(source, &lock);
 
-        let target = ImpresspressBuilder::new();
-        let Err(error) = target.apply_prepared_plan(
-            &plan,
-            "example",
-            &hash('b'),
-            &lock,
-            &PreparedReleaseAssets::absent(),
-        ) else {
+        let Err(error) = apply(ImpresspressBuilder::new(), &plan, &lock) else {
             panic!("route drift should fail plan import");
         };
         assert!(matches!(error, PreparedPlanError::StructureMismatch(_)));
@@ -559,9 +720,9 @@ mod tests {
 
     #[test]
     fn exporter_survives_builder_consumption_and_observes_seeded_settings() {
-        let builder = ImpresspressBuilder::new();
-        let exporter = builder.prepared_plan_exporter().unwrap();
-        drop(builder); // mirrors `build(self)` consuming the candidate builder
+        // `build_with_plan_exporter` consumes the builder; the exporter keeps
+        // its settings handle.
+        let exporter = exporter(ImpresspressBuilder::new());
 
         let mut seeded = HashMap::new();
         seeded.insert(
@@ -581,8 +742,7 @@ mod tests {
 
     #[test]
     fn published_wrap_grants_round_trip_into_builder() {
-        let source = ImpresspressBuilder::new();
-        let exporter = source.prepared_plan_exporter().unwrap();
+        let exporter = exporter(ImpresspressBuilder::new());
         exporter
             .publish_wrap_grants(&[wafer_run::ResourceGrant::read_write(
                 "example/app",
@@ -600,20 +760,9 @@ mod tests {
             .unwrap();
         assert_eq!(plan.structure.deployment_wrap_grants.len(), 1);
 
-        let applied = ImpresspressBuilder::new()
-            .apply_prepared_plan(
-                &plan,
-                "example",
-                &hash('b'),
-                &lock,
-                &PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
+        let applied = apply(ImpresspressBuilder::new(), &plan, &lock).unwrap();
         assert_eq!(applied.deployment_wrap_grants.len(), 1);
-        assert_eq!(
-            applied.prepared_runtime_structure().unwrap(),
-            plan.structure
-        );
+        assert_eq!(structure(applied), plan.structure);
     }
 
     /// An append-only grant crosses the plan as `"append"` and comes back
@@ -621,8 +770,7 @@ mod tests {
     /// while the boolean spelling every earlier plan used still imports.
     #[test]
     fn an_append_grant_round_trips_through_the_plan() {
-        let source = ImpresspressBuilder::new();
-        let exporter = source.prepared_plan_exporter().unwrap();
+        let exporter = exporter(ImpresspressBuilder::new());
         exporter
             .publish_wrap_grants(&[wafer_run::ResourceGrant::append(
                 "example/app",
@@ -645,15 +793,7 @@ mod tests {
         );
 
         let reimported = PreparedRuntimePlan::from_json(&plan.to_json_pretty().unwrap()).unwrap();
-        let applied = ImpresspressBuilder::new()
-            .apply_prepared_plan(
-                &reimported,
-                "example",
-                &hash('b'),
-                &lock,
-                &PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
+        let applied = apply(ImpresspressBuilder::new(), &reimported, &lock).unwrap();
         assert_eq!(
             applied.deployment_wrap_grants[0].write,
             wafer_block::GrantWrite::Append
@@ -692,47 +832,26 @@ mod tests {
             "routes": [{ "path": "/**", "block": "impresspress/router" }]
         });
         let lock = WaferLockIdentity::absent();
-        let source =
-            ImpresspressBuilder::new().final_block_config("wafer-run/router", config.clone());
-        let plan = source
-            .prepare_runtime_plan(
-                "example",
-                hash('b'),
-                lock.clone(),
-                PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
+        let plan = plan(
+            ImpresspressBuilder::new().final_block_config("wafer-run/router", config.clone()),
+            &lock,
+        );
         assert_eq!(
             plan.structure.final_block_configs["wafer-run/router"],
             config
         );
 
-        let matching = ImpresspressBuilder::new()
-            .final_block_config("wafer-run/router", config)
-            .apply_prepared_plan(
-                &plan,
-                "example",
-                &hash('b'),
-                &lock,
-                &PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
-        assert_eq!(
-            matching.prepared_runtime_structure().unwrap(),
-            plan.structure
-        );
+        let matching = apply(
+            ImpresspressBuilder::new().final_block_config("wafer-run/router", config),
+            &plan,
+            &lock,
+        )
+        .unwrap();
+        assert_eq!(structure(matching), plan.structure);
 
         let drifted = ImpresspressBuilder::new()
             .final_block_config("wafer-run/router", serde_json::json!({ "routes": [] }));
-        assert!(drifted
-            .apply_prepared_plan(
-                &plan,
-                "example",
-                &hash('b'),
-                &lock,
-                &PreparedReleaseAssets::absent(),
-            )
-            .is_err());
+        assert!(apply(drifted, &plan, &lock).is_err());
     }
 
     #[test]
@@ -740,36 +859,19 @@ mod tests {
         let declared =
             wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__api_keys");
         let lock = WaferLockIdentity::absent();
-        let source = ImpresspressBuilder::new().wrap_grants(vec![declared.clone()]);
-        let plan = source
-            .prepare_runtime_plan(
-                "example",
-                hash('b'),
-                lock.clone(),
-                PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
+        let plan = plan(
+            ImpresspressBuilder::new().wrap_grants(vec![declared.clone()]),
+            &lock,
+        );
         assert_eq!(plan.structure.wrap_grants.len(), 1);
         assert!(plan.structure.deployment_wrap_grants.is_empty());
 
-        ImpresspressBuilder::new()
-            .wrap_grants(vec![declared])
-            .apply_prepared_plan(
-                &plan,
-                "example",
-                &hash('b'),
-                &lock,
-                &PreparedReleaseAssets::absent(),
-            )
-            .unwrap();
-        assert!(ImpresspressBuilder::new()
-            .apply_prepared_plan(
-                &plan,
-                "example",
-                &hash('b'),
-                &lock,
-                &PreparedReleaseAssets::absent(),
-            )
-            .is_err());
+        apply(
+            ImpresspressBuilder::new().wrap_grants(vec![declared]),
+            &plan,
+            &lock,
+        )
+        .unwrap();
+        assert!(apply(ImpresspressBuilder::new(), &plan, &lock).is_err());
     }
 }

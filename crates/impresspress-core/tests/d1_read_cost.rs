@@ -356,9 +356,10 @@ async fn try_build(
         }
         None => builder,
     };
-    let exporter = builder.prepared_plan_exporter().expect("an exporter");
     let block_settings = builder.block_settings_handle();
-    let wafer = builder.build().expect("the runtime builds");
+    let (wafer, exporter) = builder
+        .build_with_plan_exporter()
+        .expect("the runtime builds");
     Ok(Built {
         wafer,
         exporter,
@@ -1576,7 +1577,7 @@ async fn run(variant: Variant) -> Run {
         .block_infos()
         .into_iter()
         .filter(|info| !info.config_keys.is_empty())
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
     config_blocks.sort();
 
@@ -2148,7 +2149,7 @@ async fn admin_init_reads_no_stored_config_and_a_config_declaring_block_reads_fi
         .block_infos()
         .into_iter()
         .filter(|info| !info.config_keys.is_empty())
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
     let mut first_reader = None;
     for name in built.wafer.block_names() {
@@ -2313,7 +2314,7 @@ fn config_declaring(wafer: &Wafer) -> Vec<String> {
         .block_infos()
         .into_iter()
         .filter(|info| !info.config_keys.is_empty())
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
     wafer
         .block_names()

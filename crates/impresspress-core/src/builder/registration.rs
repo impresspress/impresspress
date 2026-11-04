@@ -35,7 +35,10 @@ wafer_block::use_static_blocks!(
 #[cfg(feature = "native-embedding")]
 use super::boot::register_vector_block;
 use super::ImpresspressBuilder;
-use crate::{blocks::router::ImpresspressRouterBlock, features::FeatureConfig};
+use crate::{
+    blocks::router::ImpresspressRouterBlock, features::FeatureConfig,
+    prepared_plan::PreparedBlockImplementation,
+};
 
 /// The six `wafer-run/*` middleware blocks, by the name each crate's
 /// `register_static_block!` gives it.
@@ -70,8 +73,39 @@ pub fn register_middleware_blocks(wafer: &mut Wafer) -> Result<(), RuntimeError>
     wafer.register_static_blocks(WAFER_STATIC_BLOCKS)
 }
 
+/// What [`ImpresspressBuilder::register`] produced: the built (unsealed)
+/// runtime, and the implementations of the application blocks it registered.
+pub(super) struct Registered {
+    pub(super) wafer: Wafer,
+    /// Every application block's implementation, read from the runtime's
+    /// registration-time `BlockInfo` — see [`ImpresspressBuilder::register`].
+    pub(super) application_blocks: Vec<PreparedBlockImplementation>,
+}
+
 impl ImpresspressBuilder {
+    /// Register every block, flow and config on a new runtime, ready to seal.
+    ///
+    /// A builder that imported a prepared plan ([`Self::apply_prepared_plan`])
+    /// is refused here if the application blocks it registered differ from
+    /// the plan's: a target with a different feature set cannot silently
+    /// accept the artifact.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
+        self.register().map(|registered| registered.wafer)
+    }
+
+    /// [`Self::build`], also answering the application block inventory the
+    /// prepared plan describes, so the exporter reads it from this runtime's
+    /// registrations instead of constructing every block again.
+    ///
+    /// The application blocks are the ones this function registers on the
+    /// application's behalf: the feature-block manifest,
+    /// `impresspress/fastembed`, `impresspress/admin`, `impresspress/llm` and
+    /// the consumer's [`Self::extra_block`]s. Service, middleware, router and
+    /// framework-auth blocks are the runtime's, not the application's. Each
+    /// implementation comes from the `BlockInfo` the runtime read once, at
+    /// registration (wafer-run#478), so taking the inventory reads no block's
+    /// `info()`.
+    pub(super) fn register(self) -> Result<Registered, RuntimeError> {
         // 1. Validate required services
         let database = self
             .database
@@ -291,18 +325,24 @@ impl ImpresspressBuilder {
         // `register_all_static_blocks` list; both are gone. The four
         // non-zero-arg blocks (`fastembed`, `llm`, framework `auth`,
         // `transformers-embed`) are registered explicitly.
-        crate::blocks::register_feature_blocks(&mut wafer)?;
+        let mut application: Vec<String> = crate::blocks::register_feature_blocks(&mut wafer)?
+            .into_iter()
+            .map(str::to_string)
+            .collect();
 
         // `impresspress/fastembed` caches its model under the embedder's
         // directory, so it is registered here with it rather than from the
         // zero-arg manifest.
         #[cfg(feature = "block-fastembed")]
-        wafer.register_block(
-            crate::blocks::fastembed::FastembedBlock::BLOCK_NAME,
-            Arc::new(crate::blocks::fastembed::FastembedBlock::new(
-                required_model_cache_dir(self.model_cache_dir.as_deref(), "block-fastembed")?,
-            )),
-        )?;
+        {
+            wafer.register_block(
+                crate::blocks::fastembed::FastembedBlock::BLOCK_NAME,
+                Arc::new(crate::blocks::fastembed::FastembedBlock::new(
+                    required_model_cache_dir(self.model_cache_dir.as_deref(), "block-fastembed")?,
+                )),
+            )?;
+            application.push(crate::blocks::fastembed::FastembedBlock::BLOCK_NAME.to_string());
+        }
 
         // Admin is registered here rather than from the manifest: its
         // constructor takes the same `Arc<RwLock<BlockSettings>>` handed to
@@ -311,6 +351,7 @@ impl ImpresspressBuilder {
         // only writing the table. Without it the toggle is inert on native
         // until the process restarts.
         crate::blocks::register_admin(&mut wafer, self.block_settings.clone())?;
+        application.push(crate::blocks::admin::ADMIN_BLOCK_ID.to_string());
 
         wafer.add_block_config(
             "wafer-run/inspector",
@@ -363,11 +404,27 @@ impl ImpresspressBuilder {
             let provider_admin: Arc<dyn ProviderAdmin> =
                 Arc::new(crate::blocks::llm::provider_admin::NoopProviderAdmin);
             crate::blocks::register_llm(&mut wafer, provider_admin)?;
+            application.push(crate::blocks::llm::LlmBlock::BLOCK_NAME.to_string());
         }
 
         // 7. Extra platform-specific blocks
         for (name, block) in self.extra_blocks {
             wafer.register_block(&name, block)?;
+            application.push(name);
+        }
+
+        // 8. The application block inventory, from the declarations the
+        //    runtime read at registration, checked against an imported plan's.
+        let registered_infos = wafer.block_infos();
+        let application_blocks =
+            super::prepared::application_inventory(&registered_infos, &application);
+        if let Some(expected) = &self.prepared_application_blocks {
+            if *expected != application_blocks {
+                return Err(RuntimeError::Config(
+                    "compiled application block inventory does not match the prepared plan"
+                        .to_string(),
+                ));
+            }
         }
 
         // 10. Build and register the impresspress router.
@@ -379,7 +436,16 @@ impl ImpresspressBuilder {
         // sees post-build mutations via the same RwLock. See the doc comment
         // on `block_settings_handle()` for why this matters.
         let feature_config: Arc<dyn FeatureConfig> = self.block_settings.clone();
-        let block_infos = wafer.block_infos();
+        // One copy of the registration-time declarations, shared by the
+        // router and the body-limit block below and read by the boot-time
+        // passes in between. The runtime lends them as `Arc<BlockInfo>`;
+        // the routing and discovery functions read `&[BlockInfo]`, so this is
+        // the build's one deep copy (about 1 ms native for the Worker's block
+        // set), and no block's `info()` runs again.
+        let block_infos: Arc<[wafer_run::BlockInfo]> = registered_infos
+            .iter()
+            .map(|info| wafer_run::BlockInfo::clone(info))
+            .collect();
         let routes_cfg = crate::routing::routes_config(&block_infos);
 
         // WebMCP refusals are *mostly* structural — a defect in a block's
@@ -487,7 +553,7 @@ impl ImpresspressBuilder {
         let router = ImpresspressRouterBlock::with_extra_routes_arc(
             self.jwt_secret.clone(),
             feature_config,
-            block_infos.clone(),
+            Arc::clone(&block_infos),
             extra_routes.clone(),
         );
         wafer.register_block(crate::blocks::router::ROUTER_BLOCK_ID, Arc::new(router))?;
@@ -548,7 +614,10 @@ impl ImpresspressBuilder {
         // `builder::RuntimeConfig`.
         super::config::write_snapshot(&mut wafer, self.config_snapshot);
 
-        Ok(wafer)
+        Ok(Registered {
+            wafer,
+            application_blocks,
+        })
     }
 }
 

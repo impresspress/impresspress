@@ -432,7 +432,6 @@ where
                 (None, None) => builder,
                 _ => return Err("prepared runtime identity invariant violated".into()),
             };
-            let plan_exporter = builder.prepared_plan_exporter()?;
             let block_settings_handle = builder.block_settings_handle();
 
             // 6. Build runtime. `build()` installs the synchronous
@@ -441,8 +440,9 @@ where
             // embedder-provided keys with no I/O. That is immutable
             // configuration data, not a request-derived service handle;
             // Worker-version identity still forces a rebuild when it
-            // changes.
-            let mut wafer = builder.build().map_err(|e| format!("builder.build: {e}"))?;
+            // changes. The plan exporter's block inventory is read from
+            // the declarations this registration read, not rebuilt.
+            let (mut wafer, plan_exporter) = builder.build_with_plan_exporter()?;
 
             // 6a. The consumer receives the scoped storage proxy, never the
             // request's concrete R2 Bucket. A block may safely retain this

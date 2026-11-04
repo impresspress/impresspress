@@ -76,7 +76,9 @@ pub mod vector;
 ///   inspector route granularity, the route/auth policy table);
 /// - [`register_feature_blocks`] — `register_block(name, Arc::new(Ctor::new()))`
 ///   over every entry, called from `ImpresspressBuilder::build` on **both** native
-///   and wasm32.
+///   and wasm32. It answers the names it registered, which start the prepared
+///   plan's application block inventory: a runtime build reads that inventory
+///   from its own registrations, never from [`all_block_infos`].
 ///
 /// Replaces the three formerly hand-synced lists (per-block `register_static_block!`
 /// linkme sites on native, the `register_all_static_blocks` wasm32 list, and
@@ -152,18 +154,25 @@ macro_rules! feature_block_manifest {
         /// The `impresspress/llm`, `wafer-run/auth` and
         /// `impresspress/transformers-embed` blocks are registered explicitly by
         /// the builder afterwards (non-zero-arg constructors).
+        ///
+        /// Answers the names it registered, in registration order: the
+        /// builder's application block inventory starts from them.
         pub fn register_feature_blocks(
             wafer: &mut wafer_run::Wafer,
-        ) -> Result<(), wafer_run::RuntimeError> {
+        ) -> Result<Vec<&'static str>, wafer_run::RuntimeError> {
             use std::sync::Arc;
+            let mut registered = Vec::new();
             $(
                 $(#[$cfg])?
-                wafer.register_block(
-                    <$ctor>::BLOCK_NAME,
-                    Arc::new(<$ctor>::new()),
-                )?;
+                {
+                    wafer.register_block(
+                        <$ctor>::BLOCK_NAME,
+                        Arc::new(<$ctor>::new()),
+                    )?;
+                    registered.push(<$ctor>::BLOCK_NAME);
+                }
             )+
-            Ok(())
+            Ok(registered)
         }
     };
 }
@@ -362,7 +371,7 @@ pub fn register_llm(
     provider_admin: std::sync::Arc<dyn llm::provider_admin::ProviderAdmin>,
 ) -> Result<(), wafer_run::RuntimeError> {
     w.register_block(
-        "impresspress/llm".to_string(),
+        llm::LlmBlock::BLOCK_NAME,
         std::sync::Arc::new(llm::LlmBlock::new(provider_admin)),
     )
 }
