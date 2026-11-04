@@ -53,17 +53,17 @@ wafer-run#482, which carries #478 and #479.
   `ImpresspressBuilder::build_with_plan_exporter()`, which builds the runtime
   and answers it with its exporter (error: `PreparedBuildError` —
   `InvalidInput` for what this builder would put in a plan, refused before
-  the runtime is handed back, so before anything migrates or seeds; `Plan`
-  for a plan that does not fit the compile; `Build` for a runtime that did
-  not build).
+  the runtime is handed back, so before anything migrates or seeds; `Build`
+  for a runtime that did not build).
 - `apply_prepared_plan` answers an `AppliedPlanBuilder`, which builds only
   through its `build()`. That compares the application blocks it registered
   with the plan's and refuses a mismatch with
-  `PreparedPlanError::StructureMismatch`, before the plan's block settings
-  reach the builder's shared settings handle. Inject the services before
-  importing the plan. A runtime that serves requests builds without an
-  exporter; only a build that exports a plan (the deploy funnel) calls
-  `build_with_plan_exporter()`.
+  `PreparedBuildError::Plan(PreparedPlanError::StructureMismatch(_))`, before
+  the plan's block settings reach the builder's shared settings handle; a
+  poisoned settings handle is `PreparedBuildError::SettingsPoisoned`. Inject
+  the services before importing the plan. A runtime that serves requests
+  builds without an exporter; only a build that exports a plan (the deploy
+  funnel) calls `build_with_plan_exporter()`.
 - `Context::registered_blocks()` returns `&[Arc<BlockInfo>]`, and
   `Wafer::block_infos()` returns `Vec<Arc<BlockInfo>>`. A `Context`
   implementation returns the `Arc`s; field access reads through them as

@@ -173,6 +173,13 @@ pub enum PreparedBuildError {
     /// compile registered are not the plan's.
     #[error(transparent)]
     Plan(PreparedPlanError),
+    /// The runtime's block-settings handle is poisoned: a thread panicked
+    /// while it held the write lock. The runtime built, and the plan matched,
+    /// but its settings cannot be installed into a handle whose last write
+    /// may be half done, so the build is refused rather than served with
+    /// settings nobody chose.
+    #[error("block settings handle poisoned: a writer panicked while holding it")]
+    SettingsPoisoned,
 }
 
 impl From<wafer_run::RuntimeError> for PreparedBuildError {
@@ -238,11 +245,9 @@ impl AppliedPlanBuilder {
                 ),
             ));
         }
-        *handle.write().map_err(|_| {
-            wafer_run::RuntimeError::Config(
-                "BlockSettings lock poisoned while installing the plan's settings".into(),
-            )
-        })? = self.block_settings;
+        *handle
+            .write()
+            .map_err(|_| PreparedBuildError::SettingsPoisoned)? = self.block_settings;
         Ok(registered.wafer)
     }
 }
@@ -807,6 +812,31 @@ pub(super) mod tests {
                 error,
                 PreparedBuildError::Plan(PreparedPlanError::StructureMismatch(_))
             ),
+            "{error:?}"
+        );
+    }
+
+    /// A poisoned settings handle refuses the build with its own error: the
+    /// plan matched, so it is neither a plan error nor a runtime that did not
+    /// build.
+    #[test]
+    fn a_poisoned_settings_handle_is_its_own_refusal() {
+        let lock = WaferLockIdentity::absent();
+        let plan = plan(ImpresspressBuilder::new(), &lock);
+        let target = apply(ImpresspressBuilder::new(), &plan, &lock)
+            .expect("an identical compile imports its own plan");
+        let handle = target.block_settings_handle();
+        let poisoner = std::thread::spawn(move || {
+            let _held = handle.write().expect("not yet poisoned");
+            panic!("poison the block settings handle");
+        });
+        assert!(poisoner.join().is_err());
+
+        let Err(error) = target.build() else {
+            panic!("a poisoned settings handle must not build");
+        };
+        assert!(
+            matches!(error, PreparedBuildError::SettingsPoisoned),
             "{error:?}"
         );
     }

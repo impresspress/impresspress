@@ -19,10 +19,11 @@ use std::sync::Arc;
 use impresspress_core::blocks;
 use wafer_run::{StaticConfigSource, Wafer};
 
-/// Zero-arg blocks the manifest registers on every host build (none of these
-/// is feature-gated off by default). `admin` / `fastembed` / `llm` /
-/// framework `auth` / `transformers-embed` take non-zero-arg constructors and
-/// are NOT in the manifest (the builder installs them explicitly).
+/// Zero-arg blocks the application table registers on every host build (none
+/// of these is feature-gated off by default). `admin` / `fastembed` / `llm`
+/// are in the same table but take an argument from `ApplicationBlockArgs`, so
+/// they are asserted separately; framework `auth` belongs to the runtime, not
+/// the table.
 const MANIFEST_ZERO_ARG_BLOCKS: &[&str] = &[
     "impresspress/auth-ui",
     "impresspress/email",
@@ -83,37 +84,34 @@ fn register_application_blocks_installs_exactly_the_application_set() {
     assert_eq!(registered, described);
 }
 
-/// `all_block_infos()` must enumerate the SAME zero-arg manifest set (so
-/// config-var discovery / inspector route granularity / the routing-auth
-/// policy see every block), PLUS `impresspress/llm` (its declarative `info()`
-/// belongs in the discovery set even though its constructor is special).
-///
-/// This is the before/after block-set proof: the manifest, the registration
-/// fn, and the info discovery set can no longer drift.
+/// `all_block_infos()` must enumerate every application block — the zero-arg
+/// set plus the ones constructed with an argument (`admin`, and `llm` /
+/// `fastembed` when enabled) — so config-var discovery, the inspector route
+/// table and the routing-auth policy see every block. It derives from the same
+/// table as registration, so the two cannot drift.
 #[test]
-fn all_block_infos_covers_the_manifest_set_plus_llm() {
+fn all_block_infos_covers_every_application_block() {
     let infos = blocks::all_block_infos();
     let names: Vec<&str> = infos.iter().map(|i| i.name.as_str()).collect();
 
     for name in MANIFEST_ZERO_ARG_BLOCKS {
         assert!(
             names.contains(name),
-            "all_block_infos() is missing manifest block {name}"
+            "all_block_infos() is missing application block {name}"
         );
     }
 
-    // Admin is registered outside the manifest (its ctor takes the live
-    // `BlockSettings` handle) but its declarative `info()` must stay in the
-    // discovery set: `collect_all_config_vars()`, the inspector route table
-    // and the routing/auth policy all read it. Asserted explicitly because it
-    // is no longer covered by the manifest loop above.
+    // Admin's constructor takes the live `BlockSettings` handle, so it is not
+    // in the zero-arg list above; its declarative `info()` must still be in
+    // the discovery set: `collect_all_config_vars()`, the inspector route
+    // table and the routing/auth policy all read it.
     assert!(
         names.contains(&"impresspress/admin"),
         "all_block_infos() must include impresspress/admin"
     );
 
-    // `llm` is the one block registered outside the manifest whose info() is
-    // still discovered (via a NoopProviderAdmin handle).
+    // `llm`'s constructor takes a provider-admin handle; its declarative
+    // `info()` is described with a `NoopProviderAdmin`.
     #[cfg(feature = "block-llm")]
     assert!(
         names.contains(&"impresspress/llm"),

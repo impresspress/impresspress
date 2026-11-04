@@ -350,7 +350,7 @@ pub fn routes_config<B: std::borrow::Borrow<BlockInfo>>(block_infos: &[B]) -> se
     // for blocks that own a built-in prefix route (so we mirror the routing
     // table, not the whole registry), and skip any whose exact `{prefix}**`
     // form already covers them.
-    for info in crate::declarations::declared(block_infos) {
+    for info in wafer_block::declarations(block_infos) {
         if !ROUTES.iter().any(|r| r.block == info.name) {
             continue;
         }
@@ -409,7 +409,11 @@ fn declared_endpoint_access<B: std::borrow::Borrow<BlockInfo>>(
     action: &str,
     path: &str,
 ) -> Option<RouteAccess> {
-    let info = crate::declarations::declared(block_infos).find(|i| i.name == block_name)?;
+    // Per request: borrowed in place, not collected.
+    let info = block_infos
+        .iter()
+        .map(std::borrow::Borrow::borrow)
+        .find(|i: &&BlockInfo| i.name == block_name)?;
     endpoint_match::endpoint_auth(&info.endpoints, action, path).map(RouteAccess::from_auth_level)
 }
 
@@ -601,7 +605,8 @@ fn disabled_blocks_json<B: std::borrow::Borrow<BlockInfo>>(
     features: &dyn FeatureConfig,
     block_infos: &[B],
 ) -> String {
-    let disabled: Vec<&str> = crate::declarations::declared(block_infos)
+    let disabled: Vec<&str> = wafer_block::declarations(block_infos)
+        .into_iter()
         .map(|b| feature_gate_name(&b.name))
         .filter(|gate| !crate::features::is_enabled(features, block_infos, gate))
         .collect();

@@ -57,7 +57,7 @@ async fn tools_json_publishes_every_selection_with_zero_refusals() {
 ///
 /// `/b/webmcp/manifest.json`, `/openapi.json` and the agent card drop
 /// `server_only` endpoints in the browser runtime (`pipeline.rs`'s
-/// `discoverable_infos`); `tools.json` projects `SELECTIONS` straight from
+/// `published_access`); `tools.json` projects `SELECTIONS` straight from
 /// the registered blocks and applies no such filter. That is right only
 /// while no selection names one: the dev block is registered by the browser
 /// runtime alone (`impresspress-web`), so a `server_only` row would publish a

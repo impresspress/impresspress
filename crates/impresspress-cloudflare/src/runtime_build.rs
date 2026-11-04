@@ -262,19 +262,6 @@ pub(crate) async fn read_variables(
 /// returned beside it. Migrations on CF run exclusively through that funnel
 /// (both a production deploy and local `impresspress serve --target
 /// cloudflare` POST it).
-///
-/// Missing-table tolerance is an invariant of the reads around it: on a
-/// first-ever deploy `/_deploy/init` builds this runtime BEFORE any migration
-/// has run, so every read this window makes must tolerate a not-yet-created
-/// table, or first deploys deadlock before migrations can create the tables.
-/// Each read owns that tolerance at its own definition, and says how:
-/// `platform_state::block_settings::load` ([`read_block_settings`]),
-/// `platform_state::wrap_grants::load` (the funnel's `GrantSource::Database`),
-/// [`read_variables`] (an absent table passes), and
-/// `DatabaseConfigSource::load_for_block` (reached only after admin's `Init`
-/// has created the variables table, for the reason `boot` gives at its
-/// admin-first step). `migration_helper::read_state` reads the config
-/// snapshot, not the database.
 // The captured environment is deliberately a parameter rather than something
 // re-derived from `env` here: reading a var twice per request is exactly what
 // `CfEnvironment` exists to stop, and a function that could reach for
@@ -347,6 +334,21 @@ where
 /// The deploy funnel's runtime (`/_deploy/init`, `/_deploy/prepare`): built
 /// as [`build_runtime`] builds one, with a migration pass forced, and
 /// answered with the exporter of the plan it will seal.
+///
+/// Missing-table tolerance is an invariant of the reads around it: on a
+/// first-ever deploy `/_deploy/init` builds and boots this runtime BEFORE any
+/// migration has run, so every read in that window must tolerate a
+/// not-yet-created table, or first deploys deadlock before migrations can
+/// create the tables. Each read owns that tolerance at its own definition,
+/// and says how: `platform_state::block_settings::load`
+/// ([`read_block_settings`], which `/_deploy/init` calls before this),
+/// `platform_state::wrap_grants::load` (the funnel's `GrantSource::Database`),
+/// and `DatabaseConfigSource::load_for_block` (reached only after admin's
+/// `Init` has created the variables table, for the reason `boot` gives at its
+/// admin-first step). The funnel never runs [`read_variables`]: it builds
+/// over a fresh, unread snapshot ([`fresh_variables_snapshot`]).
+/// `migration_helper::read_state` reads the config snapshot, not the
+/// database.
 pub(crate) fn build_deploy_runtime<F, G>(
     env: &worker::Env,
     environment: &CfEnvironment,
@@ -381,11 +383,13 @@ where
     .map_err(|e| crate::runtime_cache::RuntimeBuildError::Fault(e.to_string()))
 }
 
-/// [`build_runtime`]'s body: the config surfaces, the services, the
-/// consumer's registrations and `build()`.
+/// The body [`build_runtime`] and [`build_deploy_runtime`] share: the config
+/// surfaces, the services, the consumer's registrations and `build`. With
+/// `run_migrations` (the deploy funnel only) it runs before any table may
+/// exist; see [`build_deploy_runtime`] for what the reads around it owe that.
 #[expect(
     clippy::too_many_arguments,
-    reason = "build_runtime's own arguments, passed on; see its note"
+    reason = "build_runtime's and build_deploy_runtime's own arguments, passed on; see build_runtime's note"
 )]
 fn assemble_runtime<F, G, B, X>(
     env: &worker::Env,

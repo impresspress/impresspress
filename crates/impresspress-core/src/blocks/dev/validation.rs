@@ -428,7 +428,8 @@ pub fn builtin_agent_tool_names<B: std::borrow::Borrow<BlockInfo>>(
     registered: &[B],
 ) -> BTreeSet<String> {
     agent_tool_names(
-        crate::declarations::declared(registered)
+        wafer_block::declarations(registered)
+            .into_iter()
             .filter(|info| !info.name.starts_with(BLOCK_NAMESPACE)),
     )
 }

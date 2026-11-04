@@ -137,10 +137,10 @@
 //! The cache is the **isolate's**, not the service's ([`isolate_schema_cache`]),
 //! and that is what makes the memoization worth anything: every D1 service is
 //! built per request (`warm_request_services`, the audit-row write handle,
-//! `build_runtime`'s pre-`Init` `block_settings` read), and every request runs
-//! the config source's snapshot, a paged `list` over the variables table. A
-//! per-service cache would be cold for each of them, so each request would pay
-//! the key round trip. What may invalidate the cache is enumerated on
+//! the build handle `runtime_build::open_build_database` opens), and every
+//! request runs the config source's snapshot, a paged `list` over the
+//! variables table. A per-service cache would be cold for each of them, so
+//! each request would pay the key round trip. What may invalidate the cache is enumerated on
 //! [`D1DatabaseService::schema_cache`].
 
 use std::{cell::Cell, rc::Rc};

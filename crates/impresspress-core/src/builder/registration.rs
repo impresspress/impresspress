@@ -411,8 +411,8 @@ impl ImpresspressBuilder {
         // The registration-time declarations, as the runtime lends them: one
         // list of `Arc`s, shared by the router and the body-limit block below
         // and read by the boot-time passes in between. Every reader takes the
-        // `Arc`s as they are (`crate::declarations`), so no declaration is
-        // copied and no block's `info()` runs again.
+        // `Arc`s as they are (generic over `Borrow<BlockInfo>`), so no
+        // declaration is copied and no block's `info()` runs again.
         let block_infos: Arc<[Arc<wafer_run::BlockInfo>]> = registered_infos.into();
         let routes_cfg = crate::routing::routes_config(&block_infos);
 

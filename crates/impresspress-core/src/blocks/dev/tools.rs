@@ -325,7 +325,10 @@ pub async fn handle(ctx: &dyn Context) -> OutputStream {
 /// uninteresting reason. Returning early keeps those 21 lines out of the
 /// logs of every runtime that simply is not a sandbox.
 pub(crate) fn log_selection_refusals<B: std::borrow::Borrow<BlockInfo>>(blocks: &[B]) {
-    if !crate::declarations::declared(blocks).any(|b| b.name == super::BLOCK_NAME) {
+    if !wafer_block::declarations(blocks)
+        .iter()
+        .any(|b| b.name == super::BLOCK_NAME)
+    {
         return;
     }
     let (_doc, refused) = generate(blocks);

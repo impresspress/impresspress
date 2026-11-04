@@ -76,7 +76,8 @@ fn published_access<'a, B: Borrow<BlockInfo>>(
     let browser = crate::runtime_kind::is_browser(ctx);
     // Enablement is a property of the block, decided once per document for
     // each registered block; only `server_only` is asked per endpoint.
-    let disabled: std::collections::HashSet<&'a str> = crate::declarations::declared(block_infos)
+    let disabled: std::collections::HashSet<&'a str> = wafer_block::declarations(block_infos)
+        .into_iter()
         .filter(|block| {
             !crate::features::is_enabled(
                 features,
@@ -687,7 +688,8 @@ fn template_vars(template: &str) -> impl Iterator<Item = &str> {
 /// here. `exactly_one_declared_route_carries_a_capability_in_its_path` is
 /// where a reviewer is told that the set changed.
 fn capability_path_templates<B: Borrow<BlockInfo>>(block_infos: &[B]) -> Vec<&str> {
-    crate::declarations::declared(block_infos)
+    wafer_block::declarations(block_infos)
+        .into_iter()
         .flat_map(|info| info.endpoints.iter())
         .map(|ep| ep.path.as_str())
         .filter(|template| template_vars(template).any(path_var_is_capability))
@@ -850,8 +852,11 @@ fn resembles_a_declared_route<B: Borrow<BlockInfo>>(
     {
         return true;
     }
-    crate::declarations::declared(block_infos)
-        .flat_map(|info| info.endpoints.iter())
+    // Per logged request: borrowed in place, not collected.
+    block_infos
+        .iter()
+        .map(Borrow::borrow)
+        .flat_map(|info: &BlockInfo| info.endpoints.iter())
         .any(|endpoint| endpoint_match::match_template(&endpoint.path, &normalized).is_some())
 }
 

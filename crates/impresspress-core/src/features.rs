@@ -44,8 +44,14 @@ pub fn is_enabled<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
     registered: &[B],
     gate_name: &str,
 ) -> bool {
-    let always_on = crate::declarations::declared(registered)
-        .any(|b| !b.can_disable && crate::routing::feature_gate_name(&b.name) == gate_name);
+    // Per request (the router's gate): borrowed in place, not collected.
+    let always_on =
+        registered
+            .iter()
+            .map(std::borrow::Borrow::borrow)
+            .any(|b: &wafer_run::BlockInfo| {
+                !b.can_disable && crate::routing::feature_gate_name(&b.name) == gate_name
+            });
     always_on || features.is_block_enabled(gate_name)
 }
 
