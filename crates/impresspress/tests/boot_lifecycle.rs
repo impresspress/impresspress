@@ -389,6 +389,50 @@ async fn a_failed_shared_variable_seed_fails_a_reported_boot() {
     );
 }
 
+/// A builder carrying the six services `build()` requires, over the sqlite
+/// file at `db_path` and the local storage at `storage_root`: what the
+/// prepared-plan tests build both the runtime that exports a plan and the one
+/// that hydrates it from, and what the deployment-grant test builds with.
+async fn serviced_builder(
+    db_path: &Path,
+    storage_root: &Path,
+) -> impresspress_core::builder::ImpresspressBuilder {
+    let infra = infra_for(db_path, storage_root);
+    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
+        .await
+        .expect("construct sqlite database service");
+    let storage = impresspress_native::make_storage_service("local", &infra.storage_root)
+        .await
+        .expect("construct local storage service");
+
+    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new()
+        .install(
+            impresspress_core::builder::ImpresspressBuilder::new()
+                .database(database, wafer_sql_utils::Backend::Sqlite)
+                .storage(storage),
+            |map| {
+                (
+                    impresspress_core::builder::fill_config_service(
+                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                        map,
+                    ),
+                    (),
+                )
+            },
+        )
+        .expect("install the config surfaces");
+    builder
+        .crypto(
+            impresspress_native::make_jwt_crypto_service(
+                "serviced-builder-test-jwt-secret-value".to_string(),
+                Default::default(),
+            )
+            .expect("jwt crypto service"),
+        )
+        .network(impresspress_native::make_fetch_network_service())
+        .logger(impresspress_native::make_tracing_logger())
+}
+
 /// The Cloudflare prepared-hydration path passes `GrantSource::PreInstalled`
 /// because `ImpresspressBuilder::apply_prepared_plan` has already installed the
 /// plan's grants — this pins that the claim is true through `build()` and
@@ -413,9 +457,9 @@ async fn a_prepared_plans_grants_reach_the_sealed_runtime() {
 
     // Export a plan carrying one deployment grant, exactly the way
     // `/_deploy/init` does after seeding (`publish_wrap_grants`).
-    let source = impresspress_core::builder::ImpresspressBuilder::new();
-    let exporter = source
-        .prepared_plan_exporter()
+    let (_source, exporter) = serviced_builder(&tmp.path().join("source.sqlite3"), &storage_root)
+        .await
+        .build_with_plan_exporter()
         .expect("prepared plan exporter");
     exporter
         .publish_wrap_grants(std::slice::from_ref(&grant))
@@ -430,40 +474,8 @@ async fn a_prepared_plans_grants_reach_the_sealed_runtime() {
 
     // Hydrate a real runtime from it, then boot it the way the prepared
     // Cloudflare path does.
-    let infra = infra_for(&db_path, &storage_root);
-    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
+    let builder = serviced_builder(&db_path, &storage_root)
         .await
-        .expect("construct sqlite database service");
-    let storage = impresspress_native::make_storage_service("local", &infra.storage_root)
-        .await
-        .expect("construct local storage service");
-
-    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new()
-        .install(
-            impresspress_core::builder::ImpresspressBuilder::new()
-                .database(database, wafer_sql_utils::Backend::Sqlite)
-                .storage(storage),
-            |map| {
-                (
-                    impresspress_core::builder::fill_config_service(
-                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-                        map,
-                    ),
-                    (),
-                )
-            },
-        )
-        .expect("install the config surfaces");
-    let builder = builder
-        .crypto(
-            impresspress_native::make_jwt_crypto_service(
-                "prepared-grants-test-jwt-secret-value".to_string(),
-                Default::default(),
-            )
-            .expect("jwt crypto service"),
-        )
-        .network(impresspress_native::make_fetch_network_service())
-        .logger(impresspress_native::make_tracing_logger())
         .apply_prepared_plan(&plan, "app", &build_sha, &lock, &assets)
         .expect("apply prepared plan");
 
@@ -498,39 +510,8 @@ async fn a_malformed_deployment_grant_fails_the_build() {
     let storage_root = tmp.path().join("storage");
     std::fs::create_dir_all(&storage_root).expect("create storage root");
 
-    let infra = infra_for(&db_path, &storage_root);
-    let database = impresspress_native::make_database_service(infra.db_type, &infra.db_path, None)
+    let builder = serviced_builder(&db_path, &storage_root)
         .await
-        .expect("construct sqlite database service");
-    let storage = impresspress_native::make_storage_service("local", &infra.storage_root)
-        .await
-        .expect("construct local storage service");
-    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new()
-        .install(
-            impresspress_core::builder::ImpresspressBuilder::new()
-                .database(database, wafer_sql_utils::Backend::Sqlite)
-                .storage(storage),
-            |map| {
-                (
-                    impresspress_core::builder::fill_config_service(
-                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-                        map,
-                    ),
-                    (),
-                )
-            },
-        )
-        .expect("install the config surfaces");
-    let builder = builder
-        .crypto(
-            impresspress_native::make_jwt_crypto_service(
-                "malformed-grant-test-jwt-secret-value".to_string(),
-                Default::default(),
-            )
-            .expect("jwt crypto service"),
-        )
-        .network(impresspress_native::make_fetch_network_service())
-        .logger(impresspress_native::make_tracing_logger())
         // An append-only grant is a database-collection grant; typed
         // Storage it is one the runtime will not install.
         .wrap_grants(vec![
@@ -1063,8 +1044,8 @@ async fn the_block_manifest_declares_every_endpoint_the_native_runtime_publishes
         .block_infos()
         .into_iter()
         .map(|info| {
-            let json = serde_json::to_value(&info).expect("BlockInfo serializes");
-            (info.name, json)
+            let json = serde_json::to_value(&*info).expect("BlockInfo serializes");
+            (info.name.clone(), json)
         })
         .collect();
     let manifest = impresspress_core::blocks::all_block_infos();

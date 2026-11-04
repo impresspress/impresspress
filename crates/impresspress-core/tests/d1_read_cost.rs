@@ -187,7 +187,9 @@ impl NetworkService for NoNetwork {
 /// What a built runtime hands the funnels.
 struct Built {
     wafer: Wafer,
-    exporter: PreparedPlanExporter,
+    /// The deploy funnel's plan exporter: a provisioning build's alone, as
+    /// on the Worker, where only `/_deploy/*` exports a plan.
+    exporter: Option<PreparedPlanExporter>,
     block_settings: Arc<RwLock<BlockSettings>>,
     config: Arc<dyn ConfigService>,
     source: Arc<RequestScopedSource>,
@@ -347,18 +349,25 @@ async fn try_build(
         .block_settings(settings)
         .config_source(source.clone())
         .variables_snapshot(variables.clone());
-    let builder = match prepared {
+    let block_settings = builder.block_settings_handle();
+    let (wafer, exporter) = match prepared {
         Some(plan) => {
             let (sha, lock, assets) = identity();
-            builder
+            let wafer = builder
                 .apply_prepared_plan(plan, APP_ID, &sha, &lock, &assets)
                 .expect("the plan applies")
+                .build()
+                .expect("the runtime builds");
+            (wafer, None)
         }
-        None => builder,
+        None if provisioning => {
+            let (wafer, exporter) = builder
+                .build_with_plan_exporter()
+                .expect("the runtime builds");
+            (wafer, Some(exporter))
+        }
+        None => (builder.build().expect("the runtime builds"), None),
     };
-    let exporter = builder.prepared_plan_exporter().expect("an exporter");
-    let block_settings = builder.block_settings_handle();
-    let wafer = builder.build().expect("the runtime builds");
     Ok(Built {
         wafer,
         exporter,
@@ -406,12 +415,15 @@ async fn provision(db: &Arc<dyn DatabaseService>) -> PreparedRuntimePlan {
     .await
     .expect("the deploy funnel runs");
     assert!(report.ok, "provisioning must succeed: {report:#?}");
-    seal_prepared_plan(db, &built.exporter)
+    let exporter = built
+        .exporter
+        .as_ref()
+        .expect("a provisioning build exports");
+    seal_prepared_plan(db, exporter)
         .await
         .expect("the plan seals");
     let (sha, lock, assets) = identity();
-    built
-        .exporter
+    exporter
         .prepare_runtime_plan_with_config_generation(APP_ID, sha, "0".repeat(32), lock, assets)
         .expect("the plan exports")
 }
@@ -1576,7 +1588,7 @@ async fn run(variant: Variant) -> Run {
         .block_infos()
         .into_iter()
         .filter(|info| !info.config_keys.is_empty())
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
     config_blocks.sort();
 
@@ -2148,7 +2160,7 @@ async fn admin_init_reads_no_stored_config_and_a_config_declaring_block_reads_fi
         .block_infos()
         .into_iter()
         .filter(|info| !info.config_keys.is_empty())
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
     let mut first_reader = None;
     for name in built.wafer.block_names() {
@@ -2307,13 +2319,48 @@ async fn a_failed_gate_costs_a_sliver_of_a_cold_build() {
     );
 }
 
+/// **A request-path build constructs no block set.** A cold isolate's build
+/// and boot — the prepared one and the database one, from the variables gate
+/// through every block's `Init` — read each block's declaration once, at its
+/// registration (wafer-run#478), and every later reader takes the registered
+/// copies. `blocks::block_set_sweeps` counts every use of the block set
+/// `blocks::all_block_infos()` constructs: a call, directly or through any
+/// function that calls it, and every read of `config_vars`'
+/// declared-key memo — which `provision` below has already built in this
+/// process, so a read here would be the sweep on a cold isolate and is
+/// counted as one. The counter is per thread, and the build and boot here
+/// run on the test's own current-thread runtime, so it sees every use they
+/// cause. Before this pin a prepared build swept twice: the plan import and
+/// the plan exporter.
+#[tokio::test]
+async fn a_request_path_build_constructs_no_block_set() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    for build_kind in [RequestBuild::Prepared, RequestBuild::Database] {
+        let db = cold(&path, &ledger);
+        let before = impresspress_core::blocks::block_set_sweeps();
+        let (wafer, _, _) = boot_request(&db, build_kind, &plan, &HashMap::new()).await;
+        assert_eq!(
+            impresspress_core::blocks::block_set_sweeps(),
+            before,
+            "a {build_kind:?} request build constructed the feature blocks again"
+        );
+        drop(wafer);
+    }
+    ledger.take();
+}
+
 /// The blocks of `wafer` that declare config keys, by registered name.
 fn config_declaring(wafer: &Wafer) -> Vec<String> {
     let declaring: Vec<String> = wafer
         .block_infos()
         .into_iter()
         .filter(|info| !info.config_keys.is_empty())
-        .map(|info| info.name)
+        .map(|info| info.name.clone())
         .collect();
     wafer
         .block_names()

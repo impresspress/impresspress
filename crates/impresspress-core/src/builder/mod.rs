@@ -41,7 +41,7 @@ pub use boot::{
     InitPolicy, SeedError, StepOutcome, DEPLOY_RESPONSE_SCHEMA_VERSION, PREPARE_RUNTIME_PLAN_KEY,
 };
 pub use config::{fill_config_service, RuntimeConfig, ServiceOnlyKey};
-pub use prepared::PreparedPlanExporter;
+pub use prepared::{AppliedPlanBuilder, PreparedBuildError, PreparedPlanExporter};
 /// Re-exported so `impresspress-cloudflare`'s wasm test lane can assert what
 /// this crate's own test code cannot: that a runtime built for wasm32 really
 /// does carry all six middleware blocks. See

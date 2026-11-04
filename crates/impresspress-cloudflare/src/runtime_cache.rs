@@ -1655,7 +1655,6 @@ where
             None,
             register_blocks,
             register_post_build,
-            false,
             source,
         )?;
         // One lifecycle: D1 grants before seal, seal, admin first, the request
@@ -2490,7 +2489,6 @@ where
         Some(plan),
         register_blocks,
         register_post_build,
-        false,
         source,
     )?;
 

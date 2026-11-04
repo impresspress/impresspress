@@ -8,7 +8,7 @@
 //! This file is the contract for the part of the surface the router
 //! enforces: which (method, path) pairs a block declares and the level
 //! each requires. `server_only` marks an endpoint the browser runtime's
-//! discovery documents leave out (`pipeline::discoverable_infos`), so a
+//! discovery documents leave out (`pipeline::published_access`), so a
 //! change to that set is reviewed here too.
 //!
 //! Regenerate with

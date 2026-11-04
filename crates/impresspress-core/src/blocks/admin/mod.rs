@@ -971,10 +971,12 @@ impl AdminBlock {
     /// macro-generated [`Self::new`] leaves the field at `Default`, i.e. a
     /// private snapshot nothing else reads: correct for the declarative
     /// `info()` callers (grant and endpoint assertions, `all_block_infos`),
-    /// and inert for the toggle. Production therefore registers through
-    /// [`crate::blocks::register_admin`], and `tests/autoreg_smoke.rs` pins
-    /// that admin is NOT in the zero-arg manifest, so an unwired instance
-    /// cannot reach a runtime by accident.
+    /// and inert for the toggle. Production therefore constructs it with this,
+    /// in [`crate::blocks::application_blocks`], from the runtime's handle
+    /// (`ApplicationBlockArgs::block_settings`); the test
+    /// `the_registered_admin_toggles_the_handle_it_was_given` pins that the
+    /// block that table registers is wired to that handle, so an unwired
+    /// instance cannot reach a runtime by accident.
     pub fn with_block_settings(block_settings_handle: Arc<RwLock<BlockSettings>>) -> Self {
         Self {
             block_settings_handle,
@@ -1328,6 +1330,54 @@ mod tests {
         assert!(
             !handle.is_block_enabled("impresspress/files"),
             "the snapshot the router reads per request must show it disabled",
+        );
+    }
+
+    /// The admin block production registers — the one
+    /// [`crate::blocks::application_blocks`] builds — is wired to the settings
+    /// handle its arguments carry: its toggle disables a block in that very
+    /// handle, which is the router's. Built with `AdminBlock::new()` there, the
+    /// toggle would write a private snapshot and this would fail.
+    #[tokio::test]
+    async fn the_registered_admin_toggles_the_handle_it_was_given() {
+        use crate::{
+            features::FeatureConfig,
+            test_support::{admin_msg, TestContext},
+        };
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.register_block_info(
+            "impresspress/files",
+            wafer_run::BlockInfo::new("impresspress/files", "1.0.0", "http.handler", "files")
+                .can_disable(true),
+        );
+
+        let handle: Arc<RwLock<BlockSettings>> = Arc::new(RwLock::new(BlockSettings::default()));
+        let args = crate::blocks::ApplicationBlockArgs {
+            block_settings: handle.clone(),
+            ..crate::blocks::ApplicationBlockArgs::declarative()
+        };
+        let (_, admin) = crate::blocks::application_blocks(&args)
+            .into_iter()
+            .find(|(name, _)| *name == crate::blocks::admin::ADMIN_BLOCK_ID)
+            .expect("admin is an application block");
+
+        let _ = admin
+            .handle(
+                &ctx,
+                admin_msg("create", "/b/admin/blocks/impresspress--files/toggle"),
+                InputStream::empty(),
+            )
+            .await
+            .collect_buffered()
+            .await
+            .expect("a toggle against a healthy database must succeed");
+
+        assert!(
+            !handle.is_block_enabled("impresspress/files"),
+            "the registered admin block must toggle the handle it was given",
         );
     }
 
@@ -1793,7 +1843,7 @@ mod test_support {
             self.inner.is_cancelled()
         }
 
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.inner.registered_blocks()
         }
 

@@ -9,7 +9,9 @@ fn producer_surface_is_pinned() {
     let (_manifest, _refused) = wafer_core::discovery::generate_webmcp_selected(
         &[] as &[wafer_block::types::BlockInfo],
         wafer_block::types::AuthLevel::Public,
-        |_block: &wafer_block::types::BlockInfo, ep: &wafer_block::types::BlockEndpoint| ep.auth,
+        |_block: &wafer_block::types::BlockInfo, ep: &wafer_block::types::BlockEndpoint| {
+            Some(ep.auth)
+        },
         &[] as &[wafer_core::discovery::ToolSelection],
     );
     let _ = wafer_block::wire::database::EnsureTableRequest {

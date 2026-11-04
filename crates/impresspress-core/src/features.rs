@@ -39,14 +39,19 @@ pub trait FeatureConfig: wafer_run::MaybeSend + wafer_run::MaybeSync {
 /// (`routing::META_DISABLED_BLOCKS`, and `routing::gate_from_request`'s
 /// fallback), the API documents (`pipeline`) and the admin Blocks page. A
 /// name no registered block gates as falls back to the stored settings.
-pub fn is_enabled(
+pub fn is_enabled<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
     features: &dyn FeatureConfig,
-    registered: &[wafer_run::BlockInfo],
+    registered: &[B],
     gate_name: &str,
 ) -> bool {
-    let always_on = registered
-        .iter()
-        .any(|b| !b.can_disable && crate::routing::feature_gate_name(&b.name) == gate_name);
+    // Per request (the router's gate): borrowed in place, not collected.
+    let always_on =
+        registered
+            .iter()
+            .map(std::borrow::Borrow::borrow)
+            .any(|b: &wafer_run::BlockInfo| {
+                !b.can_disable && crate::routing::feature_gate_name(&b.name) == gate_name
+            });
     always_on || features.is_block_enabled(gate_name)
 }
 

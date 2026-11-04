@@ -183,7 +183,9 @@ async fn built_in_route_wins_over_extra_with_same_prefix() {
     // vs extra route precedence.
     let msg = make_msg_with_user("/b/auth/login", "u1");
     let input = InputStream::empty();
-    let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
+    let stream =
+        routing::route_to_block::<wafer_run::BlockInfo>(&ctx, msg, input, &features, &[], &extras)
+            .await;
     let _ = stream.collect_buffered().await;
 
     let calls = ctx.calls();
@@ -208,7 +210,9 @@ async fn public_extra_route_dispatches_without_auth() {
     // No user_id set on the message — Public access should allow it through.
     let msg = make_msg("/b/chat/hello");
     let input = InputStream::empty();
-    let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
+    let stream =
+        routing::route_to_block::<wafer_run::BlockInfo>(&ctx, msg, input, &features, &[], &extras)
+            .await;
     let status = response_status(stream).await;
     assert_eq!(status, 200);
 
@@ -229,7 +233,9 @@ async fn authenticated_extra_route_forbids_empty_user_id() {
 
     let msg = make_msg("/b/chat/hello"); // no user_id
     let input = InputStream::empty();
-    let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
+    let stream =
+        routing::route_to_block::<wafer_run::BlockInfo>(&ctx, msg, input, &features, &[], &extras)
+            .await;
     let status = response_status(stream).await;
     assert_eq!(status, 401, "Authenticated + empty user_id should be 401");
 
@@ -252,7 +258,9 @@ async fn authenticated_extra_route_allows_user() {
 
     let msg = make_msg_with_user("/b/chat/hello", "user-123");
     let input = InputStream::empty();
-    let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
+    let stream =
+        routing::route_to_block::<wafer_run::BlockInfo>(&ctx, msg, input, &features, &[], &extras)
+            .await;
     let status = response_status(stream).await;
     assert_eq!(status, 200);
 
@@ -273,7 +281,9 @@ async fn admin_extra_route_forbids_non_admin() {
     // User is authenticated but lacks the admin role.
     let msg = make_msg_with_user("/b/gizza-admin/dash", "user-123");
     let input = InputStream::empty();
-    let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
+    let stream =
+        routing::route_to_block::<wafer_run::BlockInfo>(&ctx, msg, input, &features, &[], &extras)
+            .await;
     let status = response_status(stream).await;
     assert_eq!(status, 403, "Admin access + non-admin user should be 403");
 
@@ -293,7 +303,9 @@ async fn admin_extra_route_allows_admin() {
 
     let msg = make_msg_with_admin("/b/gizza-admin/dash", "admin-1");
     let input = InputStream::empty();
-    let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
+    let stream =
+        routing::route_to_block::<wafer_run::BlockInfo>(&ctx, msg, input, &features, &[], &extras)
+            .await;
     let status = response_status(stream).await;
     assert_eq!(status, 200);
 
@@ -322,8 +334,15 @@ async fn anonymous_html_request_on_authenticated_route_redirects_to_login() {
     )];
     let mut msg = make_msg("/b/chat/hello");
     msg.set_meta("http.header.accept", "text/html,application/xhtml+xml");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &[], &extras).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &AllEnabled,
+        &[],
+        &extras,
+    )
+    .await;
     let (status, location) = response_status_and_location(stream).await;
     assert_eq!(status, 302);
     assert_eq!(
@@ -345,8 +364,15 @@ async fn authenticated_non_admin_html_request_on_admin_route_still_403s() {
     // The role-failure case is a genuine 403 — it must NOT redirect to login.
     let mut msg = make_msg_with_user("/b/gizza-admin/dash", "user-123");
     msg.set_meta("http.header.accept", "text/html,application/xhtml+xml");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &[], &extras).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &AllEnabled,
+        &[],
+        &extras,
+    )
+    .await;
     let (status, location) = response_status_and_location(stream).await;
     assert_eq!(status, 403, "role failure must stay 403, not redirect");
     assert_eq!(
@@ -375,7 +401,9 @@ async fn unmatched_path_falls_through_to_not_found() {
 
     let msg = make_msg("/some/other/path");
     let input = InputStream::empty();
-    let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
+    let stream =
+        routing::route_to_block::<wafer_run::BlockInfo>(&ctx, msg, input, &features, &[], &extras)
+            .await;
     let status = response_status(stream).await;
     assert_eq!(status, 404);
 
@@ -422,8 +450,15 @@ async fn declared_admin_endpoint_rejects_non_admin_even_when_prefix_is_public() 
     // be rejected centrally BEFORE the block runs — proving the admin gate no
     // longer rests on route-table ordering.
     let msg = make_msg_with_user("/b/legalpages/admin", "user-1");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &features,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(stream).await, 403);
     assert!(ctx.calls().is_empty(), "must not dispatch to the block");
 }
@@ -435,8 +470,15 @@ async fn declared_admin_endpoint_allows_admin() {
     let infos = legalpages_infos();
 
     let msg = make_msg_with_admin("/b/legalpages/admin", "admin-1");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &features,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(stream).await, 200);
     assert_eq!(ctx.calls(), vec!["impresspress/legalpages".to_string()]);
 }
@@ -451,8 +493,15 @@ async fn declared_admin_endpoint_with_path_param_enforced() {
     // even though the `{id}` segment is dynamic.
     let mut msg = make_msg_with_user("/b/legalpages/api/documents/doc-7", "user-1");
     msg.set_meta("req.action", "update");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &features,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(stream).await, 403);
     assert!(ctx.calls().is_empty());
 }
@@ -465,8 +514,15 @@ async fn public_declared_endpoint_passes_without_auth() {
 
     // `/b/legalpages/terms` is declared Public — anonymous request dispatches.
     let msg = make_msg("/b/legalpages/terms");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &features,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(stream).await, 200);
     assert_eq!(ctx.calls(), vec!["impresspress/legalpages".to_string()]);
 }
@@ -486,15 +542,29 @@ async fn undeclared_path_falls_back_to_authenticated_not_the_prefix_tier() {
     // legalpages_admin_and_api_paths_are_denied_without_the_admin_role`.)
     let ctx = RecordingContext::new();
     let msg = make_msg("/b/legalpages/api/documents");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &features,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(stream).await, 401);
     assert!(ctx.calls().is_empty());
 
     let ctx = RecordingContext::new();
     let msg = make_msg_with_user("/b/legalpages/api/documents", "user-1");
-    let stream =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &features,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(stream).await, 200);
     assert_eq!(ctx.calls(), vec!["impresspress/legalpages".to_string()]);
 }
@@ -523,9 +593,15 @@ async fn llm_admin_ui_rejects_non_admin() {
     let infos = llm_infos();
     for path in ["/b/llm/providers", "/b/llm/models"] {
         let msg = make_msg_with_user(path, "user-1");
-        let stream =
-            routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-                .await;
+        let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         assert_eq!(
             response_status(stream).await,
             403,
@@ -543,22 +619,43 @@ async fn llm_admin_provider_crud_rejects_non_admin() {
     // POST /b/llm/api/providers — declared Admin.
     let mut create = make_msg_with_user("/b/llm/api/providers", "user-1");
     create.set_meta("req.action", "create");
-    let s1 =
-        routing::route_to_block(&ctx, create, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let s1 = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        create,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(s1).await, 403);
 
     // DELETE /b/llm/api/providers/{id} — declared Admin, dynamic segment.
     let mut del = make_msg_with_user("/b/llm/api/providers/p-9", "user-1");
     del.set_meta("req.action", "delete");
-    let s2 =
-        routing::route_to_block(&ctx, del, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let s2 = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        del,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(s2).await, 403);
 
     // POST /b/llm/api/models/{backend}/{model}/load — declared Admin.
     let mut load = make_msg_with_user("/b/llm/api/models/ollama/llama3/load", "user-1");
     load.set_meta("req.action", "create");
-    let s3 =
-        routing::route_to_block(&ctx, load, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let s3 = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        load,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(s3).await, 403);
 
     assert!(ctx.calls().is_empty());
@@ -580,7 +677,7 @@ async fn files_admin_pages_reject_non_admin_and_public_share_passes() {
 
     // Non-admin → 403 on admin page.
     let admin_page = make_msg_with_user("/b/storage/admin/buckets", "user-1");
-    let s1 = routing::route_to_block(
+    let s1 = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         admin_page,
         InputStream::empty(),
@@ -594,7 +691,7 @@ async fn files_admin_pages_reject_non_admin_and_public_share_passes() {
     // Anonymous → 401 on the Authenticated bucket list.
     let ctx2 = RecordingContext::new();
     let bucket_list = make_msg("/b/storage/");
-    let s2 = routing::route_to_block(
+    let s2 = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx2,
         bucket_list,
         InputStream::empty(),
@@ -608,8 +705,15 @@ async fn files_admin_pages_reject_non_admin_and_public_share_passes() {
     // Anonymous → 200 dispatch on the Public direct-share link.
     let ctx3 = RecordingContext::new();
     let share = make_msg("/b/storage/direct/tok-abc");
-    let s3 =
-        routing::route_to_block(&ctx3, share, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let s3 = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx3,
+        share,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(s3).await, 200);
     assert_eq!(ctx3.calls(), vec!["impresspress/files".to_string()]);
 }
@@ -645,8 +749,15 @@ async fn products_admin_api_rejects_non_admin() {
     for (action, path) in cases {
         let mut msg = make_msg_with_user(path, "user-1");
         msg.set_meta("req.action", *action);
-        let s = routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-            .await;
+        let s = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         assert_eq!(
             response_status(s).await,
             403,
@@ -658,8 +769,15 @@ async fn products_admin_api_rejects_non_admin() {
     // The public catalog still dispatches anonymously.
     let ctx2 = RecordingContext::new();
     let cat = make_msg("/b/products/catalog");
-    let s2 =
-        routing::route_to_block(&ctx2, cat, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let s2 = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx2,
+        cat,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(s2).await, 200);
     assert_eq!(ctx2.calls(), vec!["impresspress/products".to_string()]);
 }
@@ -682,16 +800,30 @@ async fn auth_ui_admin_settings_rejects_non_admin() {
     ])];
 
     let msg = make_msg_with_user("/b/auth/admin/settings", "user-1");
-    let s =
-        routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let s = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        msg,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(s).await, 403);
     assert!(ctx.calls().is_empty());
 
     // The public login page still dispatches anonymously.
     let ctx2 = RecordingContext::new();
     let login = make_msg("/b/auth/login");
-    let s2 =
-        routing::route_to_block(&ctx2, login, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let s2 = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx2,
+        login,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(s2).await, 200);
     assert_eq!(ctx2.calls(), vec!["impresspress/auth-ui".to_string()]);
 }
@@ -705,8 +837,15 @@ async fn llm_chat_allows_authenticated_non_admin() {
     // dispatches (proving the chat endpoint is NOT swept up by the admin gate).
     let mut chat = make_msg_with_user("/b/llm/api/chat", "user-1");
     chat.set_meta("req.action", "create");
-    let stream =
-        routing::route_to_block(&ctx, chat, InputStream::empty(), &AllEnabled, &infos, &[]).await;
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        chat,
+        InputStream::empty(),
+        &AllEnabled,
+        &infos,
+        &[],
+    )
+    .await;
     assert_eq!(response_status(stream).await, 200);
     assert_eq!(ctx.calls(), vec!["impresspress/llm".to_string()]);
 }
@@ -769,9 +908,15 @@ async fn tickets_real_endpoint_contract_exposes_only_the_three_public_routes() {
         ] {
             let ctx = RecordingContext::new();
             msg.set_meta("req.action", action);
-            let stream =
-                routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-                    .await;
+            let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+                &ctx,
+                msg,
+                InputStream::empty(),
+                &AllEnabled,
+                &infos,
+                &[],
+            )
+            .await;
             assert_eq!(
                 response_status(stream).await,
                 status,
@@ -789,9 +934,15 @@ async fn tickets_real_endpoint_contract_exposes_only_the_three_public_routes() {
         let ctx = RecordingContext::new();
         let mut msg = make_msg(path);
         msg.set_meta("req.action", action);
-        let stream =
-            routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-                .await;
+        let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         assert_eq!(response_status(stream).await, 200, "{action} {path}");
         assert_eq!(ctx.calls(), vec!["impresspress/tickets".to_string()]);
     }
@@ -817,7 +968,7 @@ async fn products_owned_group_taxonomy_and_pricing_routes_enforce_real_declarati
         let anonymous_ctx = RecordingContext::new();
         let mut anonymous = make_msg(path);
         anonymous.set_meta("req.action", action);
-        let denied = routing::route_to_block(
+        let denied = routing::route_to_block::<wafer_run::BlockInfo>(
             &anonymous_ctx,
             anonymous,
             InputStream::empty(),
@@ -836,7 +987,7 @@ async fn products_owned_group_taxonomy_and_pricing_routes_enforce_real_declarati
         let authenticated_ctx = RecordingContext::new();
         let mut authenticated = make_msg_with_user(path, "seller-1");
         authenticated.set_meta("req.action", action);
-        let allowed = routing::route_to_block(
+        let allowed = routing::route_to_block::<wafer_run::BlockInfo>(
             &authenticated_ctx,
             authenticated,
             InputStream::empty(),
@@ -867,8 +1018,15 @@ async fn assert_admin_overview_gated(block_name: &str, paths: &[&str]) {
     for path in paths {
         let ctx = RecordingContext::new();
         let msg = make_msg(path);
-        let s = routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-            .await;
+        let s = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         assert_eq!(
             response_status(s).await,
             401,
@@ -884,8 +1042,15 @@ async fn assert_admin_overview_gated(block_name: &str, paths: &[&str]) {
     for path in paths {
         let ctx = RecordingContext::new();
         let msg = make_msg_with_user(path, "user-1");
-        let s = routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-            .await;
+        let s = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         assert_eq!(
             response_status(s).await,
             403,
@@ -924,8 +1089,15 @@ async fn products_admin_overview_allows_admin_both_forms() {
     for path in ["/b/products/admin", "/b/products/admin/"] {
         let ctx = RecordingContext::new();
         let msg = make_msg_with_admin(path, "admin-1");
-        let s = routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-            .await;
+        let s = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         assert_eq!(
             response_status(s).await,
             200,
@@ -942,8 +1114,15 @@ async fn files_admin_overview_allows_admin_both_forms() {
     for path in ["/b/storage/admin", "/b/storage/admin/"] {
         let ctx = RecordingContext::new();
         let msg = make_msg_with_admin(path, "admin-1");
-        let s = routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-            .await;
+        let s = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         assert_eq!(
             response_status(s).await,
             200,
@@ -997,7 +1176,7 @@ async fn declared_admin_endpoint_under_a_public_extra_route_rejects_anonymous() 
     let mut msg = msg;
     msg.set_meta(wafer_run::META_REQ_ACTION, "create");
 
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         msg,
         InputStream::empty(),
@@ -1018,7 +1197,7 @@ async fn declared_admin_endpoint_under_a_public_extra_route_allows_admin() {
     let mut msg = make_msg_with_admin("/b/hello/api/admin", "admin-1");
     msg.set_meta(wafer_run::META_REQ_ACTION, "create");
 
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         msg,
         InputStream::empty(),
@@ -1036,7 +1215,7 @@ async fn a_declared_public_endpoint_under_a_public_extra_route_is_still_public()
     // The refinement takes the STRICTER of the two, so a block that means a
     // path to be public says so and keeps it.
     let ctx = RecordingContext::new();
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         make_msg("/b/hello/"),
         InputStream::empty(),
@@ -1055,7 +1234,7 @@ async fn an_undeclared_path_under_a_declaring_block_falls_back_to_authenticated(
     // declares its surface has opted into the declaration being the answer,
     // and a path it never declared is not silently public.
     let ctx = RecordingContext::new();
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         make_msg("/b/hello/undeclared"),
         InputStream::empty(),
@@ -1086,7 +1265,7 @@ async fn a_refined_route_to_a_block_that_declares_no_endpoints_is_not_public() {
         "site/hello",
         RouteAccess::Public,
     )];
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         make_msg("/b/hello/anything"),
         InputStream::empty(),
@@ -1118,7 +1297,7 @@ async fn declaring_one_endpoint_does_not_lock_a_plain_extra_route() {
     // The declared path is still refined upward...
     let mut msg = make_msg("/b/chat/api/admin");
     msg.set_meta(wafer_run::META_REQ_ACTION, "create");
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         msg,
         InputStream::empty(),
@@ -1131,7 +1310,7 @@ async fn declaring_one_endpoint_does_not_lock_a_plain_extra_route() {
 
     // ...while every OTHER path keeps the tier the route was registered with.
     let ctx = RecordingContext::new();
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         make_msg("/b/chat/anything"),
         InputStream::empty(),
@@ -1161,7 +1340,7 @@ async fn an_extra_route_to_a_block_that_declares_no_endpoints_keeps_its_tier() {
         RouteAccess::Public,
     )];
 
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         make_msg("/b/chat/anything"),
         InputStream::empty(),
@@ -1176,7 +1355,7 @@ async fn an_extra_route_to_a_block_that_declares_no_endpoints_keeps_its_tier() {
     // And a block with no `BlockInfo` at all — the case the earlier tests in
     // this file drive — is unchanged too.
     let ctx = RecordingContext::new();
-    let stream = routing::route_to_block(
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
         &ctx,
         make_msg("/b/chat/anything"),
         InputStream::empty(),
@@ -1230,9 +1409,15 @@ async fn files_admin_api_rows_reject_anonymous_and_non_admin() {
         ] {
             let ctx = RecordingContext::new();
             let msg = files_admin_api_msg(action, path, caller);
-            let s =
-                routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-                    .await;
+            let s = routing::route_to_block::<wafer_run::BlockInfo>(
+                &ctx,
+                msg,
+                InputStream::empty(),
+                &AllEnabled,
+                &infos,
+                &[],
+            )
+            .await;
             let status = response_status(s).await;
             if status != expected || !ctx.calls().is_empty() {
                 failures.push(format!(
@@ -1255,8 +1440,15 @@ async fn files_admin_api_rows_allow_admin() {
     for (action, path) in FILES_ADMIN_API_ROWS {
         let ctx = RecordingContext::new();
         let msg = files_admin_api_msg(action, path, Some(("admin-1", true)));
-        let s = routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
-            .await;
+        let s = routing::route_to_block::<wafer_run::BlockInfo>(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
         let status = response_status(s).await;
         if status != 200 || ctx.calls() != vec!["impresspress/files".to_string()] {
             failures.push(format!(

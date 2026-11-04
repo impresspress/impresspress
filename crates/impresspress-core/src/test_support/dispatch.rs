@@ -120,14 +120,18 @@ pub(super) fn empty_wafer() -> wafer_run::Wafer {
 ///
 /// The same goes for its grant declarations: a grant `Wafer::seal` would
 /// refuse boot over is refused here ([`refuse_rejected_grants`]).
-pub(super) fn admit(name: &str, block: Arc<dyn Block>) -> wafer_run::BlockInfo {
+pub(super) fn admit(name: &str, block: Arc<dyn Block>) -> Arc<wafer_run::BlockInfo> {
     let mut wafer = empty_wafer();
-    let info = block.info();
     wafer
         .register_block(name, block)
         .unwrap_or_else(|e| panic!("the runtime refuses to register {name}: {e}"));
     refuse_rejected_grants(&wafer);
-    info
+    // The declaration the registration read, as the runtime lends it.
+    wafer
+        .block_infos()
+        .into_iter()
+        .find(|info| info.name == name)
+        .unwrap_or_else(|| panic!("{name} is registered"))
 }
 
 /// Panic with the runtime's own refusal if `wafer` holds a grant declaration
@@ -174,23 +178,20 @@ impl Block for Declared {
 /// the runtime collects them, and the names those blocks are registered
 /// under.
 ///
-/// Registered through the builder's own functions: the feature-block
-/// manifest, admin, the framework auth block over `AuthServiceImpl`, the llm
-/// feature block, and the `wafer-run/llm` router. Built once per process —
+/// Registered through the builder's own functions: the application blocks
+/// (`blocks::register_application_blocks`), the framework auth block over
+/// `AuthServiceImpl`, and the `wafer-run/llm` router. Built once per process —
 /// every one of them is a pure function of the build's features.
 fn built_in() -> &'static (Vec<ResourceGrant>, HashSet<String>) {
     static BUILT_IN: OnceLock<(Vec<ResourceGrant>, HashSet<String>)> = OnceLock::new();
     BUILT_IN.get_or_init(|| {
         let mut wafer = empty_wafer();
-        crate::blocks::register_feature_blocks(&mut wafer).expect("feature blocks register");
-        crate::blocks::register_admin(&mut wafer, Arc::default()).expect("admin registers");
-        crate::blocks::register_auth(&mut wafer).expect("auth registers");
-        #[cfg(feature = "block-llm")]
-        crate::blocks::register_llm(
+        crate::blocks::register_application_blocks(
             &mut wafer,
-            Arc::new(crate::blocks::llm::provider_admin::NoopProviderAdmin),
+            &crate::blocks::ApplicationBlockArgs::declarative(),
         )
-        .expect("llm registers");
+        .expect("application blocks register");
+        crate::blocks::register_auth(&mut wafer).expect("auth registers");
         wafer_core::service_blocks::llm::register_with(
             &mut wafer,
             Arc::new(crate::builder::granted_llm_router()),

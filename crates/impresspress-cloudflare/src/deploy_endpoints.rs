@@ -23,7 +23,7 @@ use crate::{
     environment::{packaged_prepared_runtime_plan, CfEnvironment},
     kv_cached_db, request_services, runner,
     runtime_build::{
-        boot_deploy_runtime, build_runtime, fresh_variables_snapshot, open_build_database,
+        boot_deploy_runtime, build_deploy_runtime, fresh_variables_snapshot, open_build_database,
         read_block_settings, BuildSource,
     },
     services::{make_kv_backend, make_r2_storage_service},
@@ -119,14 +119,12 @@ where
         // `Init`), and the config-write generation that seeding bumps is what
         // makes the snapshot read it afterwards. A read here would also be a
         // statement the funnel never sent before.
-        let mut built = build_runtime(
+        let (mut built, exporter) = build_deploy_runtime(
             &env,
             &environment,
             &request_config,
-            None,
             register_blocks,
             register_post_build,
-            true,
             BuildSource {
                 db,
                 block_settings,
@@ -138,13 +136,13 @@ where
             .await
             .map_err(|e| FunnelFailure::new(e.is_transient(), format!("boot: {e}")))?;
         let plan_draft = if prepare_plan && report.ok {
-            impresspress_core::builder::seal_prepared_plan(&built.db, &built.plan_exporter)
+            impresspress_core::builder::seal_prepared_plan(&built.db, &exporter)
                 .await
                 .map_err(|e| FunnelFailure::new(e.is_transient(), e))?;
             let identity = environment
                 .prepared_runtime_identity()
                 .map_err(|e| FunnelFailure::new(false, e))?;
-            Some((built.plan_exporter.clone(), identity))
+            Some((exporter, identity))
         } else {
             None
         };

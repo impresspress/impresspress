@@ -815,9 +815,8 @@ mod tests {
     #[tokio::test]
     async fn sealing_a_plan_fails_when_the_grants_read_fails() {
         let db = crate::platform_state::wrap_grants::fixture_with_failing_reads().await;
-        let exporter = super::super::ImpresspressBuilder::new()
-            .prepared_plan_exporter()
-            .expect("an exporter");
+        let exporter =
+            super::super::prepared::tests::exporter(super::super::ImpresspressBuilder::new());
         let error = seal_prepared_plan(&db, &exporter)
             .await
             .expect_err("a failed grants read must not seal a plan");

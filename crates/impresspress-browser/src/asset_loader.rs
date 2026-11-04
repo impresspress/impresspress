@@ -118,14 +118,12 @@ fn lookup_manifest(asset_id: &str) -> Option<ExternalAsset> {
     crate::runtime::RUNTIME.with(|r| {
         let borrow = r.borrow();
         let wafer = borrow.as_ref()?;
-        for info in wafer.block_infos() {
-            for asset in info.external_assets {
-                if asset.id == asset_id {
-                    return Some(asset);
-                }
-            }
-        }
-        None
+        wafer.block_infos().iter().find_map(|info| {
+            info.external_assets
+                .iter()
+                .find(|asset| asset.id == asset_id)
+                .cloned()
+        })
     })
 }
 

@@ -1244,7 +1244,7 @@ mod integration_tests {
             self.inner.is_cancelled()
         }
 
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.inner.registered_blocks()
         }
 
@@ -1575,7 +1575,7 @@ mod integration_tests {
             self.inner.is_cancelled()
         }
 
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.inner.registered_blocks()
         }
 
@@ -2364,7 +2364,7 @@ mod integration_tests {
             self.inner.is_cancelled()
         }
 
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.inner.registered_blocks()
         }
 
@@ -2575,7 +2575,7 @@ mod integration_tests {
             self.inner.is_cancelled()
         }
 
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.inner.registered_blocks()
         }
 
@@ -3034,7 +3034,7 @@ mod integration_tests {
             self.inner.is_cancelled()
         }
 
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.inner.registered_blocks()
         }
 

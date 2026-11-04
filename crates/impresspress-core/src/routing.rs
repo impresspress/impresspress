@@ -337,7 +337,7 @@ pub const ROUTES: &[Route] = &[
 /// per-endpoint `Route` entries — this is what lets the vector block collapse
 /// to a single prefix route while the inspector still shows its nine
 /// endpoints. Endpoint entries are de-duplicated against the prefix entries.
-pub fn routes_config(block_infos: &[BlockInfo]) -> serde_json::Value {
+pub fn routes_config<B: std::borrow::Borrow<BlockInfo>>(block_infos: &[B]) -> serde_json::Value {
     let mut routes: Vec<serde_json::Value> = ROUTES
         .iter()
         .map(|r| {
@@ -350,7 +350,7 @@ pub fn routes_config(block_infos: &[BlockInfo]) -> serde_json::Value {
     // for blocks that own a built-in prefix route (so we mirror the routing
     // table, not the whole registry), and skip any whose exact `{prefix}**`
     // form already covers them.
-    for info in block_infos {
+    for info in wafer_block::declarations(block_infos) {
         if !ROUTES.iter().any(|r| r.block == info.name) {
             continue;
         }
@@ -384,7 +384,11 @@ pub fn routes_config(block_infos: &[BlockInfo]) -> serde_json::Value {
 /// [`ExtraRoute`] constructor the registrar used rather than by whether the
 /// block happens to declare any endpoint at all — see [`ExtraRoute`]'s doc
 /// comment for why that distinction is load-bearing in both directions.
-fn extra_route_access(block_infos: &[BlockInfo], route: &ExtraRoute, msg: &Message) -> RouteAccess {
+fn extra_route_access<B: std::borrow::Borrow<BlockInfo>>(
+    block_infos: &[B],
+    route: &ExtraRoute,
+    msg: &Message,
+) -> RouteAccess {
     match declared_endpoint_access(block_infos, &route.block_name, msg.action(), msg.path()) {
         Some(declared) => route.access.max(declared),
         None if route.refines_undeclared() => route.access.max(RouteAccess::Authenticated),
@@ -399,13 +403,17 @@ fn extra_route_access(block_infos: &[BlockInfo], route: &ExtraRoute, msg: &Messa
 /// caller's policy, and the two callers differ. [`declared_access`] folds it
 /// into the fail-closed `Authenticated` default that governs built-in routes;
 /// [`extra_route_access`] consults the route's own choice.
-fn declared_endpoint_access(
-    block_infos: &[BlockInfo],
+fn declared_endpoint_access<B: std::borrow::Borrow<BlockInfo>>(
+    block_infos: &[B],
     block_name: &str,
     action: &str,
     path: &str,
 ) -> Option<RouteAccess> {
-    let info = block_infos.iter().find(|i| i.name == block_name)?;
+    // Per request: borrowed in place, not collected.
+    let info = block_infos
+        .iter()
+        .map(std::borrow::Borrow::borrow)
+        .find(|i: &&BlockInfo| i.name == block_name)?;
     endpoint_match::endpoint_auth(&info.endpoints, action, path).map(RouteAccess::from_auth_level)
 }
 
@@ -425,7 +433,11 @@ fn declared_endpoint_access(
 /// session; the router has no per-path override. `Authenticated`, not a
 /// hard deny, so a forgotten declaration degrades to "please log in" rather
 /// than 404ing a route that already works for logged-in callers.
-fn declared_access(block_infos: &[BlockInfo], block_name: &str, msg: &Message) -> RouteAccess {
+fn declared_access<B: std::borrow::Borrow<BlockInfo>>(
+    block_infos: &[B],
+    block_name: &str,
+    msg: &Message,
+) -> RouteAccess {
     declared_endpoint_access(block_infos, block_name, msg.action(), msg.path())
         .unwrap_or(RouteAccess::Authenticated)
 }
@@ -440,7 +452,11 @@ fn declared_access(block_infos: &[BlockInfo], block_name: &str, msg: &Message) -
 /// non-admin never sees a link to an admin page. Enablement and registration
 /// are asked separately there. An `href` no built-in route covers is not
 /// admitted: a nav link the router cannot place would 404.
-pub fn admits_page(block_infos: &[BlockInfo], msg: &Message, href: &str) -> bool {
+pub fn admits_page<B: std::borrow::Borrow<BlockInfo>>(
+    block_infos: &[B],
+    msg: &Message,
+    href: &str,
+) -> bool {
     let path = href.split('?').next().unwrap_or(href);
     let Some(route) = ROUTES
         .iter()
@@ -585,9 +601,12 @@ pub const META_DISABLED_BLOCKS: &str = "routing.disabled_blocks";
 /// `BlockSettings`, because the router holds `Arc<dyn FeatureConfig>` and the
 /// trait's only method is the predicate. That is one in-memory map lookup per
 /// registered block — and on any ordinary deployment the answer is `[]`.
-fn disabled_blocks_json(features: &dyn FeatureConfig, block_infos: &[BlockInfo]) -> String {
-    let disabled: Vec<&str> = block_infos
-        .iter()
+fn disabled_blocks_json<B: std::borrow::Borrow<BlockInfo>>(
+    features: &dyn FeatureConfig,
+    block_infos: &[B],
+) -> String {
+    let disabled: Vec<&str> = wafer_block::declarations(block_infos)
+        .into_iter()
         .map(|b| feature_gate_name(&b.name))
         .filter(|gate| !crate::features::is_enabled(features, block_infos, gate))
         .collect();
@@ -599,7 +618,11 @@ fn disabled_blocks_json(features: &dyn FeatureConfig, block_infos: &[BlockInfo])
 /// router serves. [`route_to_block`] publishes it before its access check and
 /// dispatch; the pipeline publishes it before the CSRF origin policy, whose
 /// 403 page is drawn before the router runs.
-pub fn publish_gate(msg: &mut Message, features: &dyn FeatureConfig, block_infos: &[BlockInfo]) {
+pub fn publish_gate<B: std::borrow::Borrow<BlockInfo>>(
+    msg: &mut Message,
+    features: &dyn FeatureConfig,
+    block_infos: &[B],
+) {
     msg.set_meta(
         META_DISABLED_BLOCKS,
         disabled_blocks_json(features, block_infos),
@@ -723,14 +746,14 @@ fn route_prefix_matches(prefix: &str, path: &str) -> bool {
 ///
 /// Checks the feature gate and the access tier, then dispatches via
 /// `ctx.call_block` — every impresspress block is registered in the Wafer
-/// registry at boot (`blocks::register_feature_blocks`, `register_llm`,
+/// registry at boot (`blocks::register_application_blocks`,
 /// `register_auth`).
-pub async fn route_to_block(
+pub async fn route_to_block<B: std::borrow::Borrow<BlockInfo>>(
     ctx: &dyn Context,
     mut msg: Message,
     input: InputStream,
     features: &dyn FeatureConfig,
-    block_infos: &[BlockInfo],
+    block_infos: &[B],
     extra_routes: &[ExtraRoute],
 ) -> OutputStream {
     let path = msg.path().to_string();
@@ -1103,7 +1126,7 @@ mod tests {
                 "test/extra",
                 RouteAccess::Public,
             )];
-            let out = route_to_block(
+            let out = route_to_block::<BlockInfo>(
                 &ctx,
                 anon_msg("retrieve", "/x/extra/thing"),
                 InputStream::empty(),
@@ -1148,9 +1171,15 @@ mod tests {
             ] {
                 let mut msg = crate::test_support::admin_msg("retrieve", path);
                 msg.set_meta("http.header.accept", accept);
-                let out =
-                    route_to_block(&ctx, msg, InputStream::empty(), &NoneEnabled, &[], &extra)
-                        .await;
+                let out = route_to_block::<BlockInfo>(
+                    &ctx,
+                    msg,
+                    InputStream::empty(),
+                    &NoneEnabled,
+                    &[],
+                    &extra,
+                )
+                .await;
                 let parts = wafer_block::http_codec::collect_http_response(out).await;
                 let body = String::from_utf8_lossy(&parts.body);
                 assert_eq!(parts.status, 404, "{path} {accept}: {body}");
@@ -1324,7 +1353,7 @@ mod tests {
         // routes_config() must show the inspector as `impresspress/inspector`
         // (the display/feature name), not its `wafer-run/inspector` dispatch
         // target — the inspector UI keys its feature map on the former.
-        let cfg = super::routes_config(&[]);
+        let cfg = super::routes_config::<BlockInfo>(&[]);
         let routes = cfg["routes"].as_array().expect("routes array");
         let inspector = routes
             .iter()
@@ -1390,7 +1419,7 @@ mod tests {
     fn declared_access_defaults_to_authenticated_when_block_has_no_info_at_all() {
         let msg = crate::test_support::anon_msg("retrieve", "/b/unregistered/anything");
         assert_eq!(
-            declared_access(&[], "test/block-not-registered", &msg),
+            declared_access::<BlockInfo>(&[], "test/block-not-registered", &msg),
             RouteAccess::Authenticated
         );
     }

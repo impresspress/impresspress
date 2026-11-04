@@ -526,7 +526,7 @@ mod tests {
                 Arc::new(wafer_run::StaticConfigSource::default());
             let mut wafer = wafer_run::Wafer::new(cfg).expect("wafer");
             let mutator: Arc<dyn Block> = Arc::new(Mutator);
-            let infos = vec![mutator.info()];
+            let infos = vec![Arc::new(mutator.info())];
             wafer
                 .register_block(BLOCK, mutator)
                 .expect("register mutator");

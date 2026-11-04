@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Lean-by-default: `default = []` ships only the always-on core blocks
 # (admin/auth-ui/email/system/auth — registered unconditionally by
-# `impresspress-core::blocks::register_feature_blocks`, no `block-*` feature
+# `impresspress-core::blocks::register_application_blocks`, no `block-*` feature
 # needed). A representative consumer (wafer-site's Cloudflare target) enables
 # zero optional blocks — measured at 14.5% bloat when this default pulled
 # files/legalpages/messages/products/userportal in anyway because the
@@ -39,7 +39,7 @@ full = [
 ]
 # Passthrough block features → forwarded to `impresspress-core`. The block
 # register sites in impresspress-core are `#[cfg(feature = "block-X")]`-gated
-# (`register_feature_blocks`), so enabling these here is what makes the
+# (`register_application_blocks`), so enabling these here is what makes the
 # corresponding `impresspress/<name>` routes resolve.
 #
 # This set is checked against `impresspress-core`'s and

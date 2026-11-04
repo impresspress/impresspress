@@ -50,7 +50,6 @@ pub(crate) struct BuiltRuntime {
     /// copies this field; it retains only the Wafer whose service blocks are
     /// stateless forwarding proxies.
     pub(crate) services: std::rc::Rc<request_services::RequestServices>,
-    pub(crate) plan_exporter: impresspress_core::builder::PreparedPlanExporter,
     /// Same settings snapshot the router owns. Deploy init updates it after
     /// admin migration + structural seeding so the disposable candidate
     /// runtime validates the exact state ordinary cold builds will read.
@@ -256,33 +255,17 @@ pub(crate) async fn read_variables(
 /// and build + config-snapshot the runtime. Synchronous: it reaches no
 /// backend, so whatever fails here is a fault.
 ///
-/// `force_run_migrations` inserts `IMPRESSPRESS_RUN_MIGRATIONS=1` into the config
-/// snapshot — set only by the `/_deploy/init` endpoint to force a migration
-/// pass. Migrations on CF run exclusively through that funnel (both a
-/// production deploy and local `impresspress serve --target cloudflare` POST it);
-/// the normal request path always passes `false` and never migrates.
-///
-/// Missing-table tolerance is an invariant of the reads around it: on a
-/// first-ever deploy `/_deploy/init` builds this runtime BEFORE any migration
-/// has run, so every read this window makes must tolerate a not-yet-created
-/// table, or first deploys deadlock before migrations can create the tables.
-/// Each read owns that tolerance at its own definition, and says how:
-/// `platform_state::block_settings::load` ([`read_block_settings`]),
-/// `platform_state::wrap_grants::load` (the funnel's `GrantSource::Database`),
-/// [`read_variables`] (an absent table passes), and
-/// `DatabaseConfigSource::load_for_block` (reached only after admin's `Init`
-/// has created the variables table, for the reason `boot` gives at its
-/// admin-first step). `migration_helper::read_state` reads the config
-/// snapshot, not the database.
-// Eight arguments. The captured environment is deliberately a parameter
-// rather than something re-derived from `env` here: reading a var twice per
-// request is exactly what `CfEnvironment` exists to stop, and a function that
-// could reach for `env.var` on its own would put that back.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the captured environment travels as a parameter so nothing here can \
-              re-read `env.var` per request"
-)]
+/// This is the runtime that serves requests — a cold build, a rebuild, or a
+/// prepared plan's hydrate. It never migrates and exports no plan, so a
+/// plan-only check can never fail it. The deploy funnel's runtime is
+/// [`build_deploy_runtime`]'s: migrations forced, and the plan exporter
+/// returned beside it. Migrations on CF run exclusively through that funnel
+/// (both a production deploy and local `impresspress serve --target
+/// cloudflare` POST it).
+// The captured environment is deliberately a parameter rather than something
+// re-derived from `env` here: reading a var twice per request is exactly what
+// `CfEnvironment` exists to stop, and a function that could reach for
+// `env.var` on its own would put that back.
 pub(crate) fn build_runtime<F, G>(
     env: &worker::Env,
     environment: &CfEnvironment,
@@ -290,9 +273,96 @@ pub(crate) fn build_runtime<F, G>(
     prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
     register_blocks: F,
     register_post_build: G,
-    force_run_migrations: bool,
     source: BuildSource,
 ) -> Result<BuiltRuntime, crate::runtime_cache::RuntimeBuildError>
+where
+    F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
+    G: FnOnce(
+        &mut wafer_run::Wafer,
+        Arc<dyn StorageService>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
+    let fault =
+        |e: &dyn std::fmt::Display| crate::runtime_cache::RuntimeBuildError::Fault(e.to_string());
+    let prepared = match prepared_plan {
+        Some(plan) => Some((
+            plan,
+            environment
+                .prepared_runtime_identity()
+                .map_err(|e| fault(&e))?,
+        )),
+        None => None,
+    };
+    // Through the imported plan when there is one, which also holds the
+    // registered application blocks to the plan's. What renders: a runtime
+    // that does not build is `builder.build: …` on both paths; a plan this
+    // compile refuses is the plan's own error — the import's
+    // (`PreparedPlanError`, e.g. "compiled built-in/consumer routes do not
+    // match") or, after registration, "compiled application block inventory
+    // does not match".
+    let build = move |builder: ImpresspressBuilder| -> Result<(wafer_run::Wafer, ()), Box<dyn std::error::Error>> {
+        let wafer = match prepared {
+            Some((plan, identity)) => builder
+                .apply_prepared_plan(
+                    plan,
+                    &identity.application_id,
+                    &identity.application_build_sha256,
+                    &identity.dependency_lock,
+                    &identity.release_assets,
+                )?
+                .build()?,
+            None => builder
+                .build()
+                .map_err(|e| format!("builder.build: {e}"))?,
+        };
+        Ok((wafer, ()))
+    };
+    assemble_runtime(
+        env,
+        environment,
+        request_config,
+        register_blocks,
+        register_post_build,
+        false,
+        source,
+        build,
+    )
+    .map(|(built, ())| built)
+    .map_err(|e| fault(&e))
+}
+
+/// The deploy funnel's runtime (`/_deploy/init`, `/_deploy/prepare`): built
+/// as [`build_runtime`] builds one, with a migration pass forced, and
+/// answered with the exporter of the plan it will seal.
+///
+/// Missing-table tolerance is an invariant of the reads around it: on a
+/// first-ever deploy `/_deploy/init` builds and boots this runtime BEFORE any
+/// migration has run, so every read in that window must tolerate a
+/// not-yet-created table, or first deploys deadlock before migrations can
+/// create the tables. Each read owns that tolerance at its own definition,
+/// and says how: `platform_state::block_settings::load`
+/// ([`read_block_settings`], which `/_deploy/init` calls before this),
+/// `platform_state::wrap_grants::load` (the funnel's `GrantSource::Database`),
+/// and `DatabaseConfigSource::load_for_block` (reached only after admin's
+/// `Init` has created the variables table, for the reason `boot` gives at its
+/// admin-first step). The funnel never runs [`read_variables`]: it builds
+/// over a fresh, unread snapshot ([`fresh_variables_snapshot`]).
+/// `migration_helper::read_state` reads the config snapshot, not the
+/// database.
+pub(crate) fn build_deploy_runtime<F, G>(
+    env: &worker::Env,
+    environment: &CfEnvironment,
+    request_config: &HashMap<String, String>,
+    register_blocks: F,
+    register_post_build: G,
+    source: BuildSource,
+) -> Result<
+    (
+        BuiltRuntime,
+        impresspress_core::builder::PreparedPlanExporter,
+    ),
+    crate::runtime_cache::RuntimeBuildError,
+>
 where
     F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
     G: FnOnce(
@@ -304,37 +374,40 @@ where
         env,
         environment,
         request_config,
-        prepared_plan,
         register_blocks,
         register_post_build,
-        force_run_migrations,
+        true,
         source,
+        |builder: ImpresspressBuilder| Ok(builder.build_with_plan_exporter()?),
     )
     .map_err(|e| crate::runtime_cache::RuntimeBuildError::Fault(e.to_string()))
 }
 
-/// [`build_runtime`]'s body: the config surfaces, the services, the
-/// consumer's registrations and `build()`.
+/// The body [`build_runtime`] and [`build_deploy_runtime`] share: the config
+/// surfaces, the services, the consumer's registrations and `build`. With
+/// `run_migrations` (the deploy funnel only) it runs before any table may
+/// exist; see [`build_deploy_runtime`] for what the reads around it owe that.
 #[expect(
     clippy::too_many_arguments,
-    reason = "build_runtime's own arguments, passed on; see its note"
+    reason = "build_runtime's and build_deploy_runtime's own arguments, passed on; see build_runtime's note"
 )]
-fn assemble_runtime<F, G>(
+fn assemble_runtime<F, G, B, X>(
     env: &worker::Env,
     environment: &CfEnvironment,
     request_config: &HashMap<String, String>,
-    prepared_plan: Option<&impresspress_core::PreparedRuntimePlan>,
     register_blocks: F,
     register_post_build: G,
-    force_run_migrations: bool,
+    run_migrations: bool,
     source: BuildSource,
-) -> Result<BuiltRuntime, Box<dyn std::error::Error>>
+    build: B,
+) -> Result<(BuiltRuntime, X), Box<dyn std::error::Error>>
 where
     F: FnOnce(ImpresspressBuilder) -> Result<ImpresspressBuilder, Box<dyn std::error::Error>>,
     G: FnOnce(
         &mut wafer_run::Wafer,
         Arc<dyn StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
+    B: FnOnce(ImpresspressBuilder) -> Result<(wafer_run::Wafer, X), Box<dyn std::error::Error>>,
 {
     let BuildSource {
         db,
@@ -347,7 +420,7 @@ where
     let (mut runtime_config, mut overlay) = structural_runtime_config(structural_config_inputs(
         environment,
         block_settings.to_config_json(),
-        force_run_migrations,
+        run_migrations,
     ));
 
     // Explicit application request config reaches the async service surface
@@ -406,10 +479,7 @@ where
     // construction is synchronous but reads ConfigService immediately, so it
     // runs under the same request scope as async dispatch.
     let storage_proxy = request_services::storage_proxy();
-    let prepared_identity = prepared_plan
-        .map(|_| environment.prepared_runtime_identity())
-        .transpose()?;
-    let (wafer, block_settings_handle, plan_exporter) = request_services::scope_sync(
+    let (wafer, block_settings_handle, product) = request_services::scope_sync(
         services.clone(),
         || -> Result<_, Box<dyn std::error::Error>> {
             let builder = request_path_builder(
@@ -421,46 +491,36 @@ where
 
             // 5. Consumer registers its blocks.
             let builder = register_blocks(builder)?;
-            let builder = match (prepared_plan, prepared_identity.as_ref()) {
-                (Some(plan), Some(identity)) => builder.apply_prepared_plan(
-                    plan,
-                    &identity.application_id,
-                    &identity.application_build_sha256,
-                    &identity.dependency_lock,
-                    &identity.release_assets,
-                )?,
-                (None, None) => builder,
-                _ => return Err("prepared runtime identity invariant violated".into()),
-            };
-            let plan_exporter = builder.prepared_plan_exporter()?;
             let block_settings_handle = builder.block_settings_handle();
 
-            // 6. Build runtime. `build()` installs the synchronous
-            // `ctx.config_get` snapshot that `RuntimeConfig::install`
-            // handed over alongside the service map, so blocks can read
+            // 6. Build runtime, as `build` says: the serving path's or the
+            // deploy funnel's. `build()` installs the synchronous
+            // `ctx.config_get` snapshot that `RuntimeConfig::install` handed
+            // over alongside the service map, so blocks can read
             // embedder-provided keys with no I/O. That is immutable
             // configuration data, not a request-derived service handle;
-            // Worker-version identity still forces a rebuild when it
-            // changes.
-            let mut wafer = builder.build().map_err(|e| format!("builder.build: {e}"))?;
+            // Worker-version identity still forces a rebuild when it changes.
+            let (mut wafer, product) = build(builder)?;
 
             // 6a. The consumer receives the scoped storage proxy, never the
             // request's concrete R2 Bucket. A block may safely retain this
             // proxy in the isolate-cached runtime.
             register_post_build(&mut wafer, storage_proxy)
                 .map_err(|e| format!("register_post_build: {e}"))?;
-            Ok((wafer, block_settings_handle, plan_exporter))
+            Ok((wafer, block_settings_handle, product))
         },
     )?;
 
-    Ok(BuiltRuntime {
-        wafer,
-        db,
-        services,
-        plan_exporter,
-        block_settings_handle,
-        variables_snapshot,
-    })
+    Ok((
+        BuiltRuntime {
+            wafer,
+            db,
+            services,
+            block_settings_handle,
+            variables_snapshot,
+        },
+        product,
+    ))
 }
 
 /// Every value the structural config pass takes out of `worker::Env`, split
