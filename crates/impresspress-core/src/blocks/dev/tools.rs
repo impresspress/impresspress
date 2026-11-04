@@ -68,7 +68,10 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
         "dev_write_file",
         "Write a workspace file under `site/` or `blocks/<name>/`. Writing under `site/` \
          publishes a new generation immediately, live on the sandbox; writing under `blocks/` \
-         only stages source — nothing serves it until the block is compiled and staged.",
+         only stages source — nothing serves it until the block is compiled and staged. \
+         `expected_sha256` is required: the file's current hash to replace it (a seeded \
+         sandbox starts with files such as `site/index.html`; `dev_list_files` lists every \
+         hash), `null` to create it.",
     ),
     (
         "impresspress/dev",
@@ -78,7 +81,9 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
         "Write several workspace files as ONE change: all under `site/` (publishes one \
          generation) or all under one `blocks/<name>/` (stages only). Every `expected_sha256` \
          is checked before anything is written; any mismatch refuses the whole batch and lists \
-         every conflict. Use it for a scaffold of several pages; `dev_write_file` for one file.",
+         every conflict. Each entry needs its own `expected_sha256`: the current hash for a file \
+         that exists (a seeded sandbox starts with `site/index.html`), `null` for a new one. Use it for a \
+         scaffold of several pages; `dev_write_file` for one file.",
     ),
     (
         "impresspress/dev",

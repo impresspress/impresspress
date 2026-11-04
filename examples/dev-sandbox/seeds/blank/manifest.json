@@ -20,13 +20,13 @@
     "suggested_prompt": "Build me a small online shop for handmade ceramics. Create a home page at site/index.html that lists products from /b/products/catalog and lets a visitor open one, using the storefront widget from /b/products/storefront.js, and include <script src=\"/b/webmcp/webmcp.js\" defer></script> in its <head> so a visitor's agent can use the shop's tools. Then create three products with shop_create_product, give each a published offer with shop_create_offer and shop_publish_offer, and set their status to active with shop_update_product. If your browser has no WebMCP, run these tools from the Tool console on the workspace page (/b/dev). Show me the live site when you are done.",
     "guide": {
       "path": "guide.md",
-      "sha256": "95a449a275dda0b41591cc8cb15ae2ae2451a8ed0c5523ede47c72c05ed941e5",
-      "size": 6419
+      "sha256": "9fe68f4bc95f46fe90d412774aaa2421ef71e2ec0c5a184d56d1d55d60660d6d",
+      "size": 6952
     },
     "llms": {
       "path": "llms.txt",
-      "sha256": "3ee3a62c67b4f88d603bbe428e98df24842c613cedf64912cbe96b75411bbd45",
-      "size": 9277
+      "sha256": "5f31270029aa0f4c9950cbe2cbb8dbc8d19b3a9f8f3389da9a15e32a6ec21a6f",
+      "size": 9810
     }
   }
 }

@@ -18,8 +18,11 @@ the tool in `#dev-console-tool`, put its arguments as JSON in
 - `site/index.html` is the entrypoint, served at `/`. A subdirectory is a
   route: `site/blog/index.html` serves at `/blog/`, `site/about.html` at
   `/about.html`.
-- Read a file before overwriting it: `dev_write_file` takes the file's
-  current `sha256` as `expected_sha256`; a new file takes `null`.
+- Every write states what it expects to replace: `expected_sha256` is the
+  file's current `sha256` for a file that exists, `null` for a new one, and
+  is required on every `dev_write_file` call and every `dev_write_files`
+  entry. The sandbox starts with `site/index.html` already there --
+  `dev_list_files` gives every file's hash.
 - `dev_rollback` republishes an earlier generation when something regresses.
 
 ## Page skeleton
@@ -132,8 +135,12 @@ send and read JSON.
   `site/vendor/sql-wasm*` files, or anything under `site/snippets/`,
   `site/seed/` or `site/cdn-cgi/`. The refusal names the rule; pick another
   path (e.g. `site/app.json`). The rest of `site/vendor/` is yours.
-- A stale `expected_sha256`: the refusal carries the current hash, so
-  re-read and retry.
+- A stale `expected_sha256`, or `null` for a path that already holds a
+  file (`409`): the refusal carries the current hash, so re-read and retry.
+- A left-out `expected_sha256` (`400`): nothing was written. The message
+  names each such file with its current hash, or says it does not exist yet
+  (send `null`). Send a hash only if it is the one you read; if it differs,
+  read the file first -- it changed since you saw it.
 
 ## Workflow
 

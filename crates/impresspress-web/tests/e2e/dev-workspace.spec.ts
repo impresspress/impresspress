@@ -932,6 +932,7 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
     path: PIXEL_PNG_PATH,
     content: PIXEL_PNG_BASE64,
     encoding: 'base64',
+    expected_sha256: null,
   }));
   expect(written.size).toBe(PIXEL_PNG_BYTES);
   // Under `site/`, so it published — which is what makes "no new generation"
@@ -1035,6 +1036,7 @@ test('a site file the service worker would shadow is refused', async ({ page }) 
   const refused = await execute(page, 'dev_write_file', {
     path: 'site/manifest.json',
     content: '{"name":"shop"}',
+    expected_sha256: null,
   });
   expect(refused.isError, JSON.stringify(refused)).toBe(true);
   // `webmcp-core.js` reports a refusal as `Request failed (<status>): <body>`,
@@ -1053,6 +1055,7 @@ test('a site file the service worker would shadow is refused', async ({ page }) 
   const allowed = structured<FileWrite>(await execute(page, 'dev_write_file', {
     path: 'site/app/manifest.json',
     content: '{"name":"shop"}',
+    expected_sha256: null,
   }));
   expect(allowed.generation?.cause).toBe('site_write');
 

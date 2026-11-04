@@ -39,7 +39,7 @@ const MANIFEST = {
           encoding: { type: 'string', enum: ['utf8', 'base64'] },
           expected_sha256: { type: ['string', 'null'] }
         },
-        required: ['path', 'content']
+        required: ['path', 'content', 'expected_sha256']
       },
       outputSchema: { type: 'object' },
       invocation: {
@@ -307,8 +307,14 @@ test('selecting a tool pre-fills its required arguments from the input schema', 
   handle.showConsoleTool();
 
   // Required properties only, each with a placeholder of its declared type;
-  // `encoding` and `expected_sha256` are optional and stay out.
-  assert.deepEqual(JSON.parse(elements.get('dev-console-args').value), { path: '', content: '' });
+  // `encoding` is optional and stays out. `expected_sha256` is required and
+  // nullable, so it is `null` — "create this file" — never an empty hash,
+  // which the write would refuse as stale.
+  assert.deepEqual(JSON.parse(elements.get('dev-console-args').value), {
+    path: '',
+    content: '',
+    expected_sha256: null
+  });
   assert.equal(elements.get('dev-console-description').textContent, 'Write a workspace file.');
   assert.deepEqual(
     JSON.parse(elements.get('dev-console-schema').textContent),
@@ -356,11 +362,11 @@ test('exampleArguments gives each required property a value of its type', () => 
     on: false,
     tags: [],
     kind: 'hello',
-    maybe: '',
+    maybe: null,
     nested: { id: '' },
     shared: 'draft',
     preset: 'x',
-    either: 0
+    either: null
   });
   // No schema, or one that requires nothing, is a complete call.
   assert.deepEqual(handle.exampleArguments(undefined), {});
@@ -425,7 +431,8 @@ test('a mutating tool run from the console refreshes the page as an agent call d
   handle.showConsoleTool();
   elements.get('dev-console-args').value = JSON.stringify({
     path: 'blocks/hello/src/lib.rs',
-    content: 'fn main() {}'
+    content: 'fn main() {}',
+    expected_sha256: null
   });
   const running = handle.runConsoleTool();
   // `withProgress` is live for the duration: the count is up and the status
@@ -435,7 +442,9 @@ test('a mutating tool run from the console refreshes the page as an agent call d
   assert.equal(elements.get('dev-console-run').disabled, true, 'one console run at a time');
   await running;
 
-  assert.deepEqual(written, [{ path: 'blocks/hello/src/lib.rs', content: 'fn main() {}' }]);
+  assert.deepEqual(written, [
+    { path: 'blocks/hello/src/lib.rs', content: 'fn main() {}', expected_sha256: null }
+  ]);
   assert.equal(handle.outstanding, 0);
   assert.equal(handle.isPolling, false);
   // The catch-up: the file tree is re-read and the preview reloaded.
@@ -461,7 +470,7 @@ test('a refusal is shown as an error result, with the server’s own body', asyn
 
   elements.get('dev-console-tool').value = 'dev_write_file';
   handle.showConsoleTool();
-  elements.get('dev-console-args').value = '{"path":"../x","content":""}';
+  elements.get('dev-console-args').value = '{"path":"../x","content":"","expected_sha256":null}';
   await handle.runConsoleTool();
 
   const result = elements.get('dev-console-result');
