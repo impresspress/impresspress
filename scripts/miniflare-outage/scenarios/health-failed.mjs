@@ -1,13 +1,14 @@
 // `/health` reports `failed` (IP-C; D1 outage plan rev 3.1 §6 step 7) on a
 // wafer-site-shaped deployment: a warm runtime degraded by a D1 outage, whose
-// rebuild after the window then fails permanently (every statement `no such
-// table`).
+// retry after the window then fails permanently (every statement `no such
+// table`): its gate read is a fault, so nothing is built and the window is
+// armed as a `Fault`.
 //
 // 1. The rebuild's own request answers the edge's opaque 500, its cause only
 //    in the log under the reference it names.
 // 2. The next `/health`, inside the `Fault` window, is served by the runtime
 //    the failed rebuild left cached: 503 `failed`, `since` the episode's
-//    start (the degraded cold build), `rebuilds` 2, the degraded blocks
+//    start (the degraded cold build), `retries` 2, the degraded blocks
 //    still listed, and no D1 call. The site's pages keep serving from it.
 // 3. A cold isolate inside a `Fault` window has no runtime to report from:
 //    its `/health` is the edge's opaque 500, as every route is (documented
@@ -15,7 +16,7 @@
 
 import assert from "node:assert/strict";
 
-import { assertHealth, assertNoCause, assertServed, attemptedBuild, pollUntil, RECOVERY_DEADLINE_MS } from "./common.mjs";
+import { assertHealth, assertNoCause, assertServed, buildsSince, pollUntil, probedBackend, RECOVERY_DEADLINE_MS } from "./common.mjs";
 
 /** The edge's opaque 500, its reference, and the cause logged under it. */
 async function assertOpaque500(d, answer, what, since) {
@@ -38,7 +39,7 @@ export default {
     // 1.
     await d.setMode("no-such-table");
     const mark = d.mark();
-    const { answer: rebuild } = await pollUntil(d, "/health", (a) => attemptedBuild(a.d1Calls), {
+    const { answer: rebuild } = await pollUntil(d, "/health", (a) => probedBackend(a.d1Calls), {
       withinMs: RECOVERY_DEADLINE_MS,
     });
     const line = await assertOpaque500(d, rebuild, "the failed rebuild's /health", mark);
@@ -48,7 +49,8 @@ export default {
     const next = await d.fetchCounted("/health");
     const failed = assertHealth(next, "the next /health", "failed");
     assert.equal(failed.since, degraded.since, "failed since the episode's start");
-    assert.equal(failed.rebuilds, 2, "the failed rebuild is one more in the episode");
+    assert.equal(failed.retries, 2, "the failed retry is one more in the episode");
+    assert.deepEqual(await buildsSince(d, mark), ["gate"], "the faulted retry assembled no runtime");
     assert.deepEqual(
       failed.unavailable.map((b) => b.block),
       degraded.unavailable.map((b) => b.block),

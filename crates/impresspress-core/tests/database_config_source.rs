@@ -1192,6 +1192,98 @@ async fn a_remembered_failure_is_visible_without_a_query() {
     );
 }
 
+/// **`retry_now` reads a remembered failure again, and only that** (the
+/// Cloudflare retry window's in-place heal, CPU-GATE review m3): under
+/// `RetryMode::Rebuild`, `read` keeps replaying a failure with no query, and
+/// `retry_now` sends one read; a success heals the snapshot for every reader
+/// (`read` then answers from the memo), a failure is remembered as before,
+/// and a loaded snapshot is answered with no query.
+#[tokio::test]
+async fn retry_now_reads_a_remembered_failure_again() {
+    let _generation = GENERATION.lock().await;
+    let (counting, shaped, db) = shaped().await;
+    seed(&db, "WAFER_RUN__AUTH__K", "stored").await;
+    let snapshot = Clock::default().snapshot(RetryMode::Rebuild);
+
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    snapshot
+        .read(&db)
+        .await
+        .expect_err("the outage fails the read");
+    let lists = counting.lists();
+    snapshot
+        .retry_now(&db)
+        .await
+        .expect_err("still down: the retry fails too");
+    assert_eq!(counting.lists(), lists + 1, "the retry sent its read");
+    assert!(
+        snapshot.remembers_a_failure(),
+        "and the failure stays remembered"
+    );
+
+    shaped.clear_fault();
+    snapshot
+        .read(&db)
+        .await
+        .expect_err("read alone never retries");
+    assert_eq!(counting.lists(), lists + 1, "replayed, with no query");
+    let rows = snapshot.retry_now(&db).await.expect("the backend is back");
+    assert_eq!(counting.lists(), lists + 2);
+    assert!(!snapshot.remembers_a_failure(), "healed");
+    assert!(rows.values().contains_key("WAFER_RUN__AUTH__K"));
+
+    snapshot
+        .read(&db)
+        .await
+        .expect("every reader sees the heal");
+    snapshot.retry_now(&db).await.expect("a loaded snapshot");
+    assert_eq!(counting.lists(), lists + 2, "both answered from the memo");
+}
+
+/// **`check_backend` is the Cloudflare gate's read**: a table that does not
+/// exist yet passes and is not remembered (a fresh database is not a failing
+/// one), a failed read is answered and remembered, and a read that answers
+/// fills the snapshot every reader then uses.
+#[tokio::test]
+async fn check_backend_passes_an_absent_table_and_reports_a_failed_read() {
+    let _generation = GENERATION.lock().await;
+    let fresh: Arc<dyn DatabaseService> = Arc::new(D1Shaped::new(
+        wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+            .expect("open in-memory sqlite"),
+        Arc::new(Ledger::default()),
+    ));
+    let snapshot = Clock::default().snapshot(RetryMode::Rebuild);
+    snapshot
+        .check_backend(&fresh)
+        .await
+        .expect("no variables table yet: the check passes");
+    assert!(!snapshot.remembers_a_failure());
+
+    let (counting, shaped, db) = shaped().await;
+    seed(&db, "WAFER_RUN__AUTH__K", "stored").await;
+    let snapshot = Clock::default().snapshot(RetryMode::Rebuild);
+    shaped.fail_table(variables::TABLE, Fault::Unavailable);
+    let error = snapshot
+        .check_backend(&db)
+        .await
+        .expect_err("the outage fails the check");
+    assert!(error.is_transient(), "{error}");
+    assert!(snapshot.remembers_a_failure());
+
+    shaped.clear_fault();
+    snapshot.check_backend(&db).await.expect("D1 is back");
+    let lists = counting.lists();
+    snapshot
+        .read(&db)
+        .await
+        .expect("the check filled the snapshot");
+    assert_eq!(
+        counting.lists(),
+        lists,
+        "read answers from what the check read"
+    );
+}
+
 /// **The remembered failure is judged on the snapshot's own generation**
 /// (#274): a snapshot hosting one deployment among the many a test process
 /// runs sees its deployment's config writes and no one else's — the same

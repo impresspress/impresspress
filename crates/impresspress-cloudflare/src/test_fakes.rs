@@ -1,14 +1,16 @@
 //! Service fakes for this crate's wasm tests that need a request's services
 //! to answer: a crypto service that answers `random_bytes`, a database that
 //! records the rows it is asked to create, a storage service that only
-//! creates folders, and a D1 and a KV that hold `block_settings` state for the
-//! deploy funnel's migration tests. Every other call is an error, so a test
+//! creates folders, a D1 and a KV that hold `block_settings` state for the
+//! deploy funnel's migration tests, and a database whose variables table
+//! answers the runtime cache's gate as a test says. Every other call is an
+//! error, so a test
 //! that reaches one fails loudly instead of passing on a default. Also
 //! [`bounded`], the five-second JS timer that turns a hung await into a
 //! failure.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
     rc::Rc,
     time::Duration,
@@ -376,6 +378,122 @@ pub(crate) fn admin_transaction_lens_after_009() -> Vec<usize> {
         .iter()
         .map(|(_, sql)| executable_statements(sql).len() + 1)
         .collect()
+}
+
+/// How [`VariablesDb`]'s variables table answers a read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VariablesAnswer {
+    /// The table is there and empty.
+    Rows,
+    /// The read fails transiently ([`DatabaseError::Unavailable`], an
+    /// outage).
+    Unavailable,
+    /// The read fails permanently (a malformed query).
+    Fault,
+    /// The table does not exist yet: the list fails and the schema says so.
+    Absent,
+}
+
+/// A database whose only table is `variables`, answering every list of it as
+/// [`VariablesAnswer`] says, and counting them: the runtime cache's gate read
+/// (`runtime_build::read_variables`) over no D1 binding. Shared through `Rc`s
+/// so a test changes the answer between requests. Every other call is
+/// [`CreateRecordingDb`]'s, an error.
+#[derive(Default)]
+pub(crate) struct VariablesDb {
+    pub(crate) answer: Rc<Cell<Option<VariablesAnswer>>>,
+    pub(crate) lists: Rc<Cell<u32>>,
+    inner: CreateRecordingDb,
+}
+
+impl VariablesDb {
+    pub(crate) fn new(answer: Rc<Cell<Option<VariablesAnswer>>>, lists: Rc<Cell<u32>>) -> Self {
+        Self {
+            answer,
+            lists,
+            inner: CreateRecordingDb::default(),
+        }
+    }
+
+    fn inner_service(&self) -> &dyn DatabaseService {
+        &self.inner
+    }
+
+    fn answer(&self) -> VariablesAnswer {
+        self.answer.get().unwrap_or(VariablesAnswer::Rows)
+    }
+}
+
+wafer_core::forward_database_service! {
+    impl DatabaseService for VariablesDb {
+        forward_to inner_service();
+
+        ops {
+            get: forward,
+            list: custom,
+            create: forward,
+            create_many: forward,
+            update: forward,
+            delete: forward,
+            count: forward,
+            sum: forward,
+            query_raw: forward,
+            exec_raw: forward,
+            exec_raw_transaction: forward,
+            delete_where: forward,
+            delete_where_count: forward,
+            take_where: forward,
+            update_where: forward,
+            update_where_count: forward,
+            increment_field_where: forward,
+            upsert: forward,
+            aggregate: forward,
+            batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
+            ensure_schema_table: forward,
+            ensure_schema_tables: forward,
+            schema_table_exists: custom,
+            schema_columns: forward,
+            schema_drop_table: forward,
+            schema_add_column: forward,
+            catalog_tables: forward,
+            catalog_columns: forward,
+            catalog_row_count: forward,
+        }
+
+        async fn list(
+            &self,
+            collection: &str,
+            _opts: &ListOptions,
+        ) -> Result<RecordList, DatabaseError> {
+            if collection != impresspress_core::platform_state::variables::TABLE {
+                return unused();
+            }
+            self.lists.set(self.lists.get() + 1);
+            match self.answer() {
+                VariablesAnswer::Rows => Ok(RecordList {
+                    records: Vec::new(),
+                    total_count: 0,
+                    page: 1,
+                    page_size: 0,
+                }),
+                VariablesAnswer::Unavailable => Err(DatabaseError::Unavailable(
+                    "D1_ERROR: Network connection lost.".into(),
+                )),
+                VariablesAnswer::Fault => Err(DatabaseError::Internal(
+                    "D1_ERROR: no such column: block: SQLITE_ERROR".into(),
+                )),
+                VariablesAnswer::Absent => Err(DatabaseError::Internal(
+                    "D1_ERROR: no such table: impresspress__admin__variables".into(),
+                )),
+            }
+        }
+
+        async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
+            Ok(self.answer() != VariablesAnswer::Absent)
+        }
+    }
 }
 
 /// A D1 stand-in for a database an earlier deploy migrated: it holds

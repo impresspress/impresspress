@@ -665,9 +665,9 @@ fn with_retry_after(mut response: worker::Response) -> worker::Result<worker::Re
 
 /// The `d1_cost` metric line for an invocation that cost `cost`, or `None`
 /// when it is not logged: it is logged when the invocation ran a runtime
-/// build, or read more than `threshold` rows.
+/// build or the retry window's gate, or read more than `threshold` rows.
 ///
-/// `metric=d1_cost build=prepared|dynamic|none calls=N statements=N
+/// `metric=d1_cost build=prepared|dynamic|gate|none calls=N statements=N
 /// rows_read=N rows_written=N unmetered=N`. `calls` is the unit D1 limits per
 /// invocation, a `db.batch()` counting once; `statements` counts each
 /// statement of a batch, and one per lone call. The rows are the sums of D1's
@@ -1639,6 +1639,14 @@ mod deferred_drain_tests {
             ),
         );
         assert_eq!(
+            d1_cost_line(&cost(Some(database::BuildKind::Gate), 0), 1000).as_deref(),
+            Some(
+                "metric=d1_cost build=gate calls=5 statements=12 rows_read=0 \
+                 rows_written=3 unmetered=1"
+            ),
+            "a gate that built nothing is logged, under its own word"
+        );
+        assert_eq!(
             d1_cost_line(&cost(None, 1001), 1000).as_deref(),
             Some(
                 "metric=d1_cost build=none calls=5 statements=12 rows_read=1001 \
@@ -2567,8 +2575,9 @@ mod entry_wiring_tests {
     }
 
     /// A cron through `run_scheduled_with_config`, on an Env whose build gets
-    /// past the KV probe and fails at its D1 binding: a cold dynamic build
-    /// that sent no statement. `vars` are added to that Env.
+    /// past the KV probe and fails at its D1 binding: a cold dynamic attempt
+    /// that sent no statement and assembled nothing. `vars` are added to that
+    /// Env.
     async fn cron(vars: &[(&str, &str)]) -> invocation_log::Captured {
         let env = runtime_cache::tests::env_whose_build_fails_at_d1();
         for (name, value) in vars {
@@ -2640,13 +2649,14 @@ mod entry_wiring_tests {
         );
     }
 
-    /// The scheduled entry's invocation reports once too, and its cold build
-    /// — failed before any statement — is a `build=dynamic` line.
+    /// The scheduled entry's invocation reports once too, and its cold
+    /// attempt — failed at its D1 binding, before any statement and before
+    /// anything was assembled — is a `build=gate` line.
     #[wasm_bindgen_test]
-    async fn a_cron_that_builds_logs_its_d1_cost_line_through_the_entry() {
+    async fn a_cron_that_attempts_a_build_logs_its_d1_cost_line_through_the_entry() {
         let captured = cron(&[]).await;
         let built = database::D1Cost {
-            built: Some(database::BuildKind::Dynamic),
+            built: Some(database::BuildKind::Gate),
             ..database::D1Cost::default()
         };
         assert_eq!(captured.costs, [built]);
@@ -2654,7 +2664,7 @@ mod entry_wiring_tests {
             captured.lines,
             [(
                 "info",
-                "metric=d1_cost build=dynamic calls=0 statements=0 rows_read=0 \
+                "metric=d1_cost build=gate calls=0 statements=0 rows_read=0 \
                  rows_written=0 unmetered=0"
                     .to_string()
             )]

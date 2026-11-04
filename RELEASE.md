@@ -19,6 +19,50 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: a retry checks D1 before it rebuilds; `/health` says `retries`
+
+**What was wrong.** During a D1 outage each isolate retried its runtime by
+rebuilding it once per retry window (1 s doubling to 60 s), and a build costs
+about 320 ms of CPU against the Free plan's 10 ms per request. A healthy
+isolate builds once; a degraded one built again every window. On the
+2026-11-03 outage check that repetition made Cloudflare enforce the 10 ms
+limit strictly on those isolates, and it killed about a quarter of all
+requests (Error 1102), static files included.
+
+**What changes.** When a window ends, the isolate first reads the variables
+table (the read every degraded block failed on) and builds only once it
+answers; the build then reads the table through that same read, so a retry
+still costs one read of it.
+
+- While D1 stays down nothing is built: the window doubles and the runtime
+  the isolate has keeps serving as it was, degraded. It is marked stale when
+  the config moved (an admin change elsewhere), or when D1 failed part-way
+  through a retry whose check passed (a later read of the attempt, such as
+  its block settings or WRAP grants, failed). A retry costs one check of D1
+  (a KV config-stamp probe and the failed read), not a build.
+- A new isolate during an outage builds once, as before: a prepared one
+  publishes degraded and serves the static site. A new isolate on the
+  dynamic path (an admin change since the deploy) answers its first request
+  503 without building, and its next request serves the deploy's packaged
+  plan, stale.
+- A runtime whose blocks all started, and whose only problem is a failed
+  config read a later request left behind, is healed by the read alone.
+- `/health`'s `rebuilds` is renamed **`retries`**: how many windows in a row
+  the isolate has armed, by a build or by a failed check, the first
+  included. During a database-wide outage each block's `runtimes` and
+  `since` stay at the last runtime built, while `retries` counts on.
+- The lasting-outage `error` log line now comes from the retry window: once,
+  when it has been armed 8 times in a row (about two minutes), naming its
+  cause. The per-block line after 8 runtimes still fires for a block whose
+  own `Init` keeps failing while D1 answers.
+- The `d1_cost` metric line says `build=gate` for an invocation that checked
+  D1 and built nothing, and `Server-Timing` says `cache;desc="gated"` for
+  the request that made the check.
+
+**Who has to act.** Anything that reads `rebuilds` from `/health` (or from
+a body that nests its report, such as wafer-site's `/_health` `runtime`)
+reads `retries` instead.
+
 ### A degraded block's refusal no longer quotes its cause; wafer-run 54683c50
 
 **What changes.** The wafer-run pin moves from `f9edcf43` to `54683c50`
@@ -116,13 +160,13 @@ reads no database. It answers:
 
 `failed` outranks `stale`, which outranks `degraded`. A 503 carries
 `Retry-After` and `Cache-Control: no-store`, and its body gives `since`,
-`retry_in`, `rebuilds` (Cloudflare) and `unavailable`, the blocks that do not
-serve, each with its state (`retrying`, `failed`, `initializing`,
-`not_initialized`). A block that has been retrying on the same failure
-across rebuilds has `since` and `runtimes`, so one whose own `Init` keeps
-resetting D1 shows as the lasting failure it is; after 8 runtimes in a row
-it is also logged at `error`. These runs are counted per isolate. The body
-never carries the failure's text.
+`retry_in`, `retries` (Cloudflare; named `rebuilds` until the entry above)
+and `unavailable`, the blocks that do not serve, each with its state
+(`retrying`, `failed`, `initializing`, `not_initialized`). A block that has
+been retrying on the same failure across rebuilds has `since` and
+`runtimes`, so one whose own `Init` keeps resetting D1 shows as the lasting
+failure it is; after 8 runtimes in a row it is also logged at `error`. These
+runs are counted per isolate. The body never carries the failure's text.
 
 A block that hides its database errors at `Init` still shows as serving;
 only a failing `Init` is reported.

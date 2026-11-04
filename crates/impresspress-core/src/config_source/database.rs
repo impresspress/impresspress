@@ -41,7 +41,7 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use wafer_block::ConfigVar;
 use wafer_core::interfaces::database::service::DatabaseService;
-use wafer_run::{init_failure_is_transient, ConfigError, ConfigSource, EnvBlockConfig};
+use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig};
 
 use super::VariablesSnapshot;
 use crate::platform_state::variables::UnfilteredReadError;
@@ -100,7 +100,7 @@ impl DatabaseConfigSource {
 /// a fresh one did and is classified the same way.
 ///
 /// - [`UnfilteredReadError::Read`]: the database's own error, classified by
-///   wafer-run's [`init_failure_is_transient`] over its code and detail code —
+///   wafer-run's [`init_failure_is_transient`](wafer_run::init_failure_is_transient) over its code and detail code —
 ///   the rule a block `Init` that fails the same way is classified by, so the
 ///   config path and the lifecycle path cannot disagree about one refusal.
 ///   `Unavailable` (a backend down, overloaded, over a quota that resets: the
@@ -129,13 +129,8 @@ impl DatabaseConfigSource {
 /// The typed error stays behind either variant (`source`), so a reader of the
 /// [`ConfigError`] can still downcast to the [`UnfilteredReadError`].
 fn config_error(block: &str, error: UnfilteredReadError) -> ConfigError {
-    let transient = match &error {
-        UnfilteredReadError::Read(database) => {
-            init_failure_is_transient(database.code(), database.detail_code())
-        }
-        UnfilteredReadError::Absent(_) => true,
-        UnfilteredReadError::MayBeTruncated { .. } => false,
-    };
+    // The three cases above are `UnfilteredReadError::is_transient`'s.
+    let transient = error.is_transient();
     let block = block.to_string();
     let source = Box::new(error);
     if transient {

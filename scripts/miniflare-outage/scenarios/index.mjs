@@ -3,8 +3,10 @@
 // optionally `vars`, Worker vars for every version it deploys), added below.
 
 import budgetRehearsal from "./budget-rehearsal.mjs";
+import dynamicGate from "./dynamic-gate.mjs";
 import dynamicPath from "./dynamic-path.mjs";
 import deploySmoke from "./deploy-smoke.mjs";
+import gateOutage from "./gate-outage.mjs";
 import healthBlockInit from "./health-block-init.mjs";
 import healthDegraded from "./health-degraded.mjs";
 import healthFailed from "./health-failed.mjs";
@@ -18,8 +20,10 @@ import stalePlan from "./stale-plan.mjs";
 export default [
   preparedWaferSite,
   preparedImpresspressSite,
+  gateOutage,
   permanentFault,
   dynamicPath,
+  dynamicGate,
   stalePlan,
   budgetRehearsal,
   healthDegraded,

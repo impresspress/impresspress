@@ -2,7 +2,10 @@
 // prepared plan (the deploy's candidate) on a cold isolate during an outage.
 // No runtime: every route answers 503 + Retry-After until the retry window
 // ends, and nothing is built inside it; each attempt after a window fails
-// again and doubles the window (1 s, then 2 s, before jitter).
+// again and doubles the window (1 s, then 2 s, before jitter). No attempt
+// assembles a runtime: a dynamic boot cannot publish past a failed read, so
+// a failed check stops it first (CPU-GATE review M1), and every attempt's
+// `d1_cost` line is `build=gate`.
 //
 // The windows are measured from the requests' own clocks, never from the
 // rounded-up Retry-After: a build attempt happens between its request's send
@@ -12,7 +15,7 @@
 import assert from "node:assert/strict";
 
 import { sleep } from "../harness.mjs";
-import { assertUnavailable, attemptedBuild, RECOVERY_DEADLINE_MS, WINDOW_BASE_MS } from "./common.mjs";
+import { assertUnavailable, buildsSince, probedBackend, RECOVERY_DEADLINE_MS, WINDOW_BASE_MS } from "./common.mjs";
 
 const PATHS = ["/", "/about.html", "/b/auth/login"];
 /** Requests this far apart sample every window several times. */
@@ -25,8 +28,9 @@ export default {
     await d.deploy();
     await d.start("candidate", { mode: "quota" });
 
-    // Poll the routes until three build attempts have happened: the cold one
-    // and the first two after a window.
+    // Poll the routes until three attempts have happened: the cold one and
+    // the first two after a window.
+    const mark = d.mark();
     const attempts = [];
     const between = [];
     const started = Date.now();
@@ -35,7 +39,7 @@ export default {
       const path = PATHS[i % PATHS.length];
       const answer = await d.fetchCounted(path);
       assertUnavailable(answer, `dynamic ${path}`);
-      if (attemptedBuild(answer.d1Calls)) {
+      if (probedBackend(answer.d1Calls)) {
         attempts.push(answer);
       } else {
         assert.deepEqual(answer.d1Calls, [], `inside a window ${path} sends D1 nothing`);
@@ -44,6 +48,11 @@ export default {
       await sleep(GAP_MS);
     }
     assert.ok(between.length >= 3, `only ${between.length} requests fell inside the windows`);
+    assert.deepEqual(
+      await buildsSince(d, mark),
+      attempts.map(() => "gate"),
+      "no attempt assembled a runtime",
+    );
 
     const [cold, second, third] = attempts;
     // At least the base window between the cold attempt and the next:

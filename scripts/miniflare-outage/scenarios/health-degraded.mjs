@@ -9,16 +9,22 @@
 //    report, not the edge's plain 503: 503 `degraded`, listing exactly the
 //    blocks the runtime was published without (its own log line names
 //    them), each `retrying`, with no D1 text. The request's D1 calls are
-//    the build's two and nothing of the handler's;
+//    the gate's two (its failed variables read and the probe after it) and
+//    nothing else: the cold isolate builds anyway (Decision 1) over that
+//    failed read, which sends the table nothing more, and the handler sends
+//    nothing;
 // 3. inside the window, `/health` sends D1 and KV nothing and builds nothing;
-// 4. each rebuild after a window, still in the outage: `rebuilds` grows, the
-//    episode's `since` and each block's `since` stay where they were, each
-//    block's `runtimes` grows (I2g);
-// 5. the window elapsed while its rebuild runs: a `/health` served from the
+// 4. each retry after a window, still in the outage, is the gate's check of
+//    D1, which fails, so nothing is built (CPU-GATE review): the request is
+//    served the cached runtime (`gated`), the episode's `retries` grows, its
+//    `since` and each block's `since` stay where they were, and each block's
+//    `runtimes` stays 1 — no runtime was published to extend a run (M3);
+// 5. the window elapsed while its retry runs: a `/health` served from the
 //    cached runtime meanwhile still reports the episode, with a `retry_in`
 //    that is a real wait (PR277-review m1: an underflow here answered
 //    `Retry-After: 4294967295`);
-// 6. D1 back: the first rebuild after the window answers 200 ok, and no
+// 6. D1 back: the first retry after the window passes the gate and rebuilds,
+//    which answers 200 ok, and no
 //    request is answered from the window after it must have ended.
 //
 // Every report's `retry_in` is checked against the window its runtime armed
@@ -32,7 +38,8 @@ import { sleep } from "../harness.mjs";
 import {
   armedWindowMs,
   assertHealth,
-  attemptedBuild,
+  buildsSince,
+  probedBackend,
   readsVariables,
   RECOVERY_DEADLINE_MS,
   windowRetryIn,
@@ -53,20 +60,26 @@ async function fetchMarked(d, path) {
 }
 
 /**
- * `/health` every `everyMs` until a request rebuilds; every answer, the
- * rebuilding one last. Deadline only against a hung run.
+ * `/health` every `everyMs` until a request retries — checks D1 after the
+ * window (`retried(answer)`); every answer, the retrying one last. Deadline
+ * only against a hung run.
  */
-async function untilRebuilt(d, everyMs = 100) {
+async function untilRetried(d, retried, everyMs = 100) {
   const answers = [];
   const started = Date.now();
   for (;;) {
     const answer = await fetchMarked(d, "/health");
     answers.push(answer);
-    if (answer.built) return answers;
-    assert.ok(Date.now() - started < RECOVERY_DEADLINE_MS, "a rebuild after the window, in time");
+    if (retried(answer)) return answers;
+    assert.ok(Date.now() - started < RECOVERY_DEADLINE_MS, "a retry after the window, in time");
     await sleep(everyMs);
   }
 }
+
+/** A retry over a failing D1: the gate's check, and no build. */
+const gated = (answer) => probedBackend(answer.d1Calls);
+/** A retry that rebuilt and served the new runtime. */
+const rebuilt = (answer) => answer.built;
 
 /** `retry_in`, the top-level one and each block's, is inside `bounds`. */
 function assertRetryIn(body, bounds, what) {
@@ -109,8 +122,13 @@ export default {
     const cold = await fetchMarked(d, "/health");
     const first = assertHealth(cold, "outage cold /health", "degraded");
     assert.ok(cold.built, `the cold /health built (${cold.cacheOutcome})`);
-    assert.ok(attemptedBuild(cold.d1Calls), "the cold build read the variables table, which failed");
-    assert.equal(cold.d1Calls.length, 2, `the build's two calls and none of the handler's: ${JSON.stringify(cold.d1Calls)}`);
+    assert.ok(probedBackend(cold.d1Calls), "the cold gate read the variables table, which failed");
+    assert.equal(
+      cold.d1Calls.length,
+      2,
+      `the gate's two calls, then a build over its failed read with none of its own, and none of the handler's: ${JSON.stringify(cold.d1Calls)}`,
+    );
+    assert.deepEqual(await buildsSince(d, cold.mark), ["prepared"], "the cold isolate builds once, degraded (Decision 1)");
     const without = await publishedWithout(d, cold.mark);
     assert.ok(without.includes("wafer-run/auth"), `wafer-run/auth is degraded: ${without}`);
     assert.ok(without.includes("impresspress/auth-ui"), `impresspress/auth-ui is degraded: ${without}`);
@@ -123,7 +141,7 @@ export default {
       assert.equal(block.class, "retrying", `${block.block}: class`);
       assert.equal(block.runtimes, 1, `${block.block}: runtimes`);
     }
-    assert.equal(first.rebuilds, 1, "rebuilds: the cold build");
+    assert.equal(first.retries, 1, "retries: the cold build armed the window");
     const since = Date.parse(first.since);
     assert.ok(
       since >= cold.sentAt && since <= cold.doneAt,
@@ -132,7 +150,7 @@ export default {
     let armedBy = cold;
     let windowMs = await armedWindowMs(d, cold.mark);
     assertRetryIn(first, windowRetryIn(cold, windowMs, cold), "outage cold /health");
-    const episode = { status: "degraded", since: first.since, rebuilds: 1 };
+    const episode = { status: "degraded", since: first.since, retries: 1 };
     const blockSince = Object.fromEntries(first.unavailable.map((b) => [b.block, b.since]));
 
     // 3. A request that is answered before the window can have ended is
@@ -150,34 +168,38 @@ export default {
     // contended core (PR281-review); 3 is far below what a runner manages.
     assert.ok(inside >= 3, `only ${inside} /health requests were answered inside the first window`);
 
-    // 4. One rebuild after the window, still in the outage.
-    for (const rebuilds of [2]) {
+    // 4. One retry after the window, still in the outage.
+    for (const retries of [2]) {
       const endsBy = armedBy.doneAt + armedBy.retryAfter * 1000;
-      const answers = await untilRebuilt(d);
+      const answers = await untilRetried(d, gated);
       for (const [i, answer] of answers.slice(0, -1).entries()) {
-        assertInsideWindow(answer, armedBy, windowMs, episode, `waiting for rebuild ${rebuilds}, /health ${i}`);
-        assert.ok(answer.sentAt <= endsBy, `waiting for rebuild ${rebuilds}: /health ${i} was sent after the window ended`);
+        assertInsideWindow(answer, armedBy, windowMs, episode, `waiting for retry ${retries}, /health ${i}`);
+        assert.ok(answer.sentAt <= endsBy, `waiting for retry ${retries}: /health ${i} was sent after the window ended`);
       }
-      const rebuilt = answers.at(-1);
-      const body = assertHealth(rebuilt, `rebuild ${rebuilds} /health`, "degraded");
-      episode.rebuilds = rebuilds;
+      const retry = answers.at(-1);
+      const body = assertHealth(retry, `retry ${retries} /health`, "degraded");
+      assert.equal(retry.built, false, `retry ${retries} built nothing (${retry.cacheOutcome})`);
+      assert.equal(retry.cacheOutcome, "gated", `retry ${retries} reports its check`);
+      assert.deepEqual(await buildsSince(d, retry.mark), ["gate"], `retry ${retries} assembled no runtime`);
+      episode.retries = retries;
       assert.deepEqual(
         body,
         { ...episode, retry_in: body.retry_in, unavailable: body.unavailable },
-        `rebuild ${rebuilds}: the same episode, one more rebuild`,
+        `retry ${retries}: the same episode, one more retry`,
       );
-      assert.deepEqual(body.unavailable.map((b) => b.block), without, `rebuild ${rebuilds}: the same blocks`);
+      assert.deepEqual(body.unavailable.map((b) => b.block), without, `retry ${retries}: the same blocks`);
       for (const block of body.unavailable) {
-        assert.equal(block.since, blockSince[block.block], `rebuild ${rebuilds}: ${block.block}'s run began where it did`);
-        assert.equal(block.runtimes, rebuilds, `rebuild ${rebuilds}: ${block.block}'s run spans every runtime`);
+        assert.equal(block.since, blockSince[block.block], `retry ${retries}: ${block.block}'s run began where it did`);
+        assert.equal(block.runtimes, 1, `retry ${retries}: no runtime published, so ${block.block}'s run did not move`);
       }
-      armedBy = rebuilt;
-      windowMs = await armedWindowMs(d, rebuilt.mark);
-      assertRetryIn(body, windowRetryIn(rebuilt, windowMs, rebuilt), `rebuild ${rebuilds} /health`);
+      armedBy = retry;
+      windowMs = await armedWindowMs(d, retry.mark);
+      assertRetryIn(body, windowRetryIn(retry, windowMs, retry), `retry ${retries} /health`);
     }
 
-    // 5. Let the window end with no request, then hold the rebuild's D1
-    //    calls: a `/health` sent meanwhile is served from the cached runtime
+    // 5. Let the window end with no request, then hold the retry's D1
+    //    calls (its gate's read): a `/health` sent meanwhile is served from
+    //    the cached runtime
     //    (stale-while-revalidate) with the episode elapsed.
     await sleep(Math.max(0, armedBy.doneAt + armedBy.retryAfter * 1000 - Date.now()) + 100);
     await d.hold();
@@ -190,7 +212,7 @@ export default {
     try {
       const heldSince = Date.now();
       while ((await d.held()) === 0) {
-        assert.ok(Date.now() - heldSince < 10_000, "the rebuild reached D1");
+        assert.ok(Date.now() - heldSince < 10_000, "the retry reached D1");
         await sleep(20);
       }
       // A held call is counted once released, so what `meanwhile` sent is
@@ -198,37 +220,38 @@ export default {
       const callsBefore = (await d.calls()).length;
       const meanwhile = await d.fetch("/health");
       const sentMeanwhile = (await d.calls()).length - callsBefore + (await d.held()) - 1;
-      during = assertHealth(meanwhile, "/health while the rebuild runs", "degraded");
+      during = assertHealth(meanwhile, "/health while the retry runs", "degraded");
       assert.equal(meanwhile.built, false, `served from the cached runtime (${meanwhile.cacheOutcome})`);
       assert.equal(sentMeanwhile, 0, "the /health served meanwhile sent D1 nothing");
       assert.deepEqual(
         during,
         { ...episode, retry_in: during.retry_in, unavailable: during.unavailable },
-        "/health while the rebuild runs: the elapsed episode",
+        "/health while the retry runs: the elapsed episode",
       );
     } finally {
       await d.release();
     }
-    const rebuilt = await owner;
-    const third = assertHealth(rebuilt, "rebuild 3 /health", "degraded");
-    assert.ok(rebuilt.built, `the held request rebuilt (${rebuilt.cacheOutcome})`);
-    episode.rebuilds = 3;
-    assert.deepEqual(third, { ...episode, retry_in: third.retry_in, unavailable: third.unavailable }, "rebuild 3");
+    const held = await owner;
+    const third = assertHealth(held, "retry 3 /health", "degraded");
+    assert.ok(gated(held), "the held request was the retry, and its check failed");
+    assert.equal(held.built, false, `the held retry built nothing (${held.cacheOutcome})`);
+    episode.retries = 3;
+    assert.deepEqual(third, { ...episode, retry_in: third.retry_in, unavailable: third.unavailable }, "retry 3");
     for (const block of third.unavailable) {
-      assert.equal(block.since, blockSince[block.block], `rebuild 3: ${block.block}'s run began where it did`);
-      assert.equal(block.runtimes, 3, `rebuild 3: ${block.block}'s run spans every runtime`);
+      assert.equal(block.since, blockSince[block.block], `retry 3: ${block.block}'s run began where it did`);
+      assert.equal(block.runtimes, 1, `retry 3: ${block.block}'s run did not move`);
     }
-    windowMs = await armedWindowMs(d, rebuilt.mark);
-    assertRetryIn(third, windowRetryIn(rebuilt, windowMs, rebuilt), "rebuild 3 /health");
+    windowMs = await armedWindowMs(d, held.mark);
+    assertRetryIn(third, windowRetryIn(held, windowMs, held), "retry 3 /health");
 
     // 6. D1 back. The window ends no later than the last report's answer
     //    plus its `Retry-After`; every request before the recovering one is
     //    inside it.
-    const endsBy = rebuilt.doneAt + rebuilt.retryAfter * 1000;
+    const endsBy = held.doneAt + held.retryAfter * 1000;
     await d.setMode("ok");
-    const answers = await untilRebuilt(d);
+    const answers = await untilRetried(d, rebuilt);
     for (const [i, answer] of answers.slice(0, -1).entries()) {
-      assertInsideWindow(answer, rebuilt, windowMs, episode, `D1 back, inside the window, /health ${i}`);
+      assertInsideWindow(answer, held, windowMs, episode, `D1 back, inside the window, /health ${i}`);
       assert.ok(answer.sentAt <= endsBy, `D1 back: /health ${i} was sent after the window ended, and not rebuilt`);
     }
     const recovered = answers.at(-1);
@@ -239,9 +262,9 @@ export default {
     assert.equal(after.cacheOutcome, "hit", "after recovery the runtime is served from the cache");
     assert.deepEqual(after.d1Calls, [], "after recovery /health sends D1 nothing");
     console.log(
-      `     ${without.length} blocks degraded; rebuilds 1..3 over the windows; recovered after ` +
+      `     ${without.length} blocks degraded; retries 1..3 over the windows, one build; recovered after ` +
         `${answers.length - 1} request(s) inside the last window; ` +
-        `/health while the rebuild ran: retry_in ${during.retry_in}`,
+        `/health while the retry ran: retry_in ${during.retry_in}`,
     );
   },
 };

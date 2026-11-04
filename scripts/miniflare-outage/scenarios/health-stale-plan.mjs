@@ -2,8 +2,9 @@
 // addendum §4.3), on a wafer-site-shaped deployment: an admin save moved the
 // KV config stamp after the deploy, then D1 went down.
 //
-// 1. `/health` as request 1 goes dynamic (the stamp moved), fails, and arms
-//    the window with nothing cached: the edge's own plain-text 503, not a
+// 1. `/health` as request 1 goes dynamic (the stamp moved), its check of D1
+//    fails, so it builds nothing (CPU-GATE review M1), and it arms the
+//    window with nothing cached: the edge's own plain-text 503, not a
 //    report — there is no runtime to run the handler. The site gate's
 //    reading of `/_health` depends on this shape (PR277-review S1 item 3).
 // 2. Request 2 hydrates the plan and serves it: 503 `stale` since the window
@@ -20,7 +21,8 @@ import assert from "node:assert/strict";
 import {
   assertHealth,
   assertUnavailable,
-  attemptedBuild,
+  buildsSince,
+  probedBackend,
   pollUntil,
   readsVariables,
   RECOVERY_DEADLINE_MS,
@@ -36,9 +38,10 @@ export default {
     await d.restart({ mode: "quota" });
 
     // 1.
+    const mark = d.mark();
     const first = await d.fetchCounted("/health");
     assertUnavailable(first, "request 1 /health");
-    assert.ok(attemptedBuild(first.d1Calls), "request 1 attempts the dynamic build");
+    assert.ok(probedBackend(first.d1Calls), "request 1 checks D1 for the dynamic build");
     assert.match(
       first.body,
       /^Service temporarily unavailable: .* \(reference: [0-9a-f-]{36}\)$/,
@@ -50,6 +53,11 @@ export default {
     const second = await d.fetchCounted("/health");
     const stale = assertHealth(second, "request 2 /health", "stale");
     assert.ok(second.built, `request 2 hydrated the plan (${second.cacheOutcome})`);
+    assert.deepEqual(
+      await buildsSince(d, mark),
+      ["gate", "prepared"],
+      "request 1 assembled nothing (CPU-GATE review M1); request 2's hydrate is the isolate's one build",
+    );
     const since = Date.parse(stale.since);
     assert.ok(
       since >= first.sentAt && since <= first.doneAt,

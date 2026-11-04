@@ -8,9 +8,12 @@
 // 1. A cold isolate publishes without that block only: `/health` is 503
 //    `degraded` listing exactly it, `retrying`, `runtimes` 1. The rest of the
 //    site serves, the stored-config route included.
-// 2. Each rebuild after a window fails the block again: its run's `since`
-//    stays put and `runtimes` grows, so the failure reads as persistent
-//    rather than as a blip.
+// 2. Each retry after a window passes the gate (D1 answers the variables
+//    read), so it rebuilds, and the rebuild fails the block again: its run's
+//    `since` stays put and `runtimes` grows with the episode's `retries`, so
+//    the failure reads as persistent rather than as a blip. This is the case
+//    a block's run still carries since the gate: a database-wide outage
+//    builds nothing per window and moves no run.
 
 import assert from "node:assert/strict";
 
@@ -59,7 +62,7 @@ export default {
     );
     const first = onlyBlock(cold, "cold /health");
     assert.equal(first.block.runtimes, 1, "cold: runtimes");
-    assert.equal(first.body.rebuilds, 1, "cold: rebuilds");
+    assert.equal(first.body.retries, 1, "cold: retries");
     assertServed(await d.fetch("/"), "the site serves /", "wafer-site-shaped fixture");
     assertServed(await d.fetch("/b/auth/login"), "the stored-config route serves");
 
@@ -69,7 +72,7 @@ export default {
       assert.equal(block.since, first.block.since, `rebuild ${runtimes}: the run began where it did`);
       assert.equal(block.runtimes, runtimes, `rebuild ${runtimes}: the run spans every runtime`);
       assert.equal(body.since, first.body.since, `rebuild ${runtimes}: the episode began where it did`);
-      assert.equal(body.rebuilds, runtimes, `rebuild ${runtimes}: rebuilds`);
+      assert.equal(body.retries, runtimes, `rebuild ${runtimes}: retries`);
     }
   },
 };

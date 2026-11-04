@@ -1,12 +1,12 @@
 // `/health` reports `stale` (IP-C; D1 outage plan rev 3.1 §6 step 5) on a
 // wafer-site-shaped deployment: a warm runtime degraded by a D1 outage, then
-// an admin save moves the KV config stamp. The rebuild after the window sees
-// the moved stamp, hands the plan to the dynamic path, fails on D1 and keeps
-// the runtime it was replacing, now serving config older than the
-// database's:
+// an admin save moves the KV config stamp. The retry after the window sees
+// the moved stamp, hands the plan to the dynamic path, whose first read of D1
+// fails before anything is assembled, and keeps the runtime it was
+// replacing, now serving config older than the database's:
 //
-// - that rebuild's own `/health` is 503 `stale`, `since` the failed rebuild
-//   (inside its request), the episode's `rebuilds` one more, and the blocks
+// - that retry's own `/health` is 503 `stale`, `since` the failed retry
+//   (inside its request), the episode's `retries` one more, and the blocks
 //   the kept runtime was published without still listed (stale outranks
 //   degraded, and keeps the list);
 // - the next `/health`, inside the new window, the same report with no D1,
@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 
-import { assertHealth, assertServed, attemptedBuild, pollUntil, RECOVERY_DEADLINE_MS } from "./common.mjs";
+import { assertHealth, assertServed, buildsSince, pollUntil, probedBackend, RECOVERY_DEADLINE_MS } from "./common.mjs";
 
 export default {
   name: "health-stale",
@@ -28,9 +28,10 @@ export default {
     assert.ok(cold.built, `the cold /health built (${cold.cacheOutcome})`);
 
     await d.bumpConfigStamp();
-    // The first request after the window is the rebuild: it probes the
-    // stamp, finds it moved, and tries the dynamic build, which fails on D1.
-    const { answer: rebuild, answers } = await pollUntil(d, "/health", (a) => attemptedBuild(a.d1Calls), {
+    // The first request after the window is the retry: it probes the stamp,
+    // finds it moved, and goes dynamic, whose first D1 read fails.
+    const mark = d.mark();
+    const { answer: rebuild, answers } = await pollUntil(d, "/health", (a) => probedBackend(a.d1Calls), {
       withinMs: RECOVERY_DEADLINE_MS,
     });
     for (const [i, a] of answers.slice(0, -1).entries()) {
@@ -43,7 +44,9 @@ export default {
       since >= rebuild.sentAt && since <= rebuild.doneAt,
       `stale since the failed rebuild: ${stale.since} is outside its request`,
     );
-    assert.equal(stale.rebuilds, 2, "the failed rebuild is one more in the episode");
+    assert.equal(stale.retries, 2, "the failed retry is one more in the episode");
+    assert.equal(rebuild.built, false, `the failed retry built nothing (${rebuild.cacheOutcome})`);
+    assert.deepEqual(await buildsSince(d, mark), ["gate"], "the failed retry assembled no runtime");
     assert.deepEqual(
       stale.unavailable,
       degraded.unavailable.map((b) => ({ ...b, retry_in: stale.retry_in })),
