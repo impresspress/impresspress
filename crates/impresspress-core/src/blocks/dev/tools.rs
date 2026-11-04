@@ -343,6 +343,18 @@ pub(crate) fn log_selection_refusals<B: std::borrow::Borrow<BlockInfo>>(blocks: 
                 reason = %r.reason,
                 "dev tools.json: selection not found — its block is likely absent from this build",
             ),
+            // A selection of an endpoint the resolver does not publish is
+            // the runtime's choice, not a defect here, and is never shown to
+            // a caller: a debug line, so it adds no warning to any log.
+            // `generate` publishes every endpoint at its declared level
+            // today, so this does not fire unless that changes.
+            WebMcpRefusal::SelectionUnpublished => tracing::debug!(
+                block = %r.block,
+                path = %r.path,
+                tool = %r.tool_name,
+                reason = %r.reason,
+                "dev tools.json: selection names an unpublished endpoint",
+            ),
             // Every other reason is a defect in this file's own
             // declarations (a schema wall the selected endpoint's contract
             // hits) and should never fire against the endpoints
