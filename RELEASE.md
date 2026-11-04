@@ -19,6 +19,45 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### A cold build reads each block's declaration once; wafer-run e9646371
+
+**What changes.** The wafer-run pin moves from `54683c50` to `e9646371`
+(wafer-run#478, #479).
+
+- A runtime reads each block's declaration (`BlockInfo`) once, when the block
+  is registered, and every later pass uses that copy (#478). Before, it
+  rebuilt every declaration about ten times per build: `impresspress/products`'
+  is 605 KB of JSON. impresspress's own build now reads its prepared plan's
+  block inventory, and the router's routes, from those registrations too;
+  before, importing the plan and creating its exporter each constructed every
+  block again, on every Cloudflare cold build. A cold prepared build of the
+  Worker's block set, built and booted natively in release: 129 ms → 18 ms.
+  (Cloudflare cold-build timing to follow)
+- A name is a block or an alias, never both, and both are fixed once the
+  runtime is sealed (#479). impresspress registers every block and alias
+  before it seals, so a deployment sees no difference.
+
+**Embedder API, breaking (Rust).**
+
+- `ImpresspressBuilder::prepared_plan_exporter`, `prepared_runtime_structure`,
+  `prepare_runtime_plan` and `prepare_runtime_plan_with_config_generation` are
+  gone: an exporter needs the registered blocks. Call
+  `ImpresspressBuilder::build_with_plan_exporter()`, which builds the runtime
+  and answers it with its exporter (error: `PreparedBuildError`).
+- `apply_prepared_plan` no longer compares the plan's application block
+  inventory; `build()` does, once it has registered the blocks, and refuses a
+  mismatch with `RuntimeError::Config`.
+- A block or alias an embedder registers after `Wafer::seal()` is refused
+  (`RuntimeError::RegisteredAfterSeal`, `AliasError::AfterSeal`) where it
+  used to be silently unreachable; impresspress's own hooks, including
+  `register_post_build`, run before the seal. `Wafer::block_infos()` returns
+  `Vec<Arc<BlockInfo>>`.
+- `ImpresspressRouterBlock`'s constructors and `BodyLimitBlock::new` take
+  `impl Into<Arc<[BlockInfo]>>` (a `Vec<BlockInfo>` still works), and
+  `blocks::register_feature_blocks` answers the names it registered.
+
+No stored data changes.
+
 ### Dev sandbox: every file write states `expected_sha256`
 
 **What was wrong.** `expected_sha256` on `POST /b/dev/api/files/write` and on
