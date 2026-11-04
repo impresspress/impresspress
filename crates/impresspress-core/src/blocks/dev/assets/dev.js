@@ -752,17 +752,26 @@ function placeholderFor(schema, root, depth) {
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     return schema.enum[0];
   }
+  // A nullable property — `["string", "null"]`, or an `anyOf` with a `null`
+  // member — is filled with `null`. Only required properties get a
+  // placeholder, so this is a key that must be sent and whose `null` is a
+  // real answer: `expected_sha256: null` is "create this file". Any other
+  // placeholder would be a value the caller never chose — an empty hash is
+  // refused as a stale one.
   var alternatives = schema.anyOf || schema.oneOf;
+  var nullable = Array.isArray(schema.type)
+    ? schema.type.indexOf('null') !== -1
+    : Array.isArray(alternatives) &&
+      alternatives.some(function (alternative) {
+        return alternative && alternative.type === 'null';
+      });
+  if (nullable) {
+    return null;
+  }
   if (Array.isArray(alternatives) && alternatives.length > 0) {
     return placeholderFor(alternatives[0], root, depth + 1);
   }
-  // `["string", "null"]` is how an optional-but-nullable field is spelled;
-  // the first member that is not `null` is the one worth showing.
-  var type = Array.isArray(schema.type)
-    ? schema.type.filter(function (name) {
-        return name !== 'null';
-      })[0]
-    : schema.type;
+  var type = schema.type;
   if (type === 'string') {
     return '';
   }

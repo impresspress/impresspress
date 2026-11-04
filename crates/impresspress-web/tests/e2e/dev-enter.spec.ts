@@ -171,9 +171,11 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   // --- dev_write_file: a new site file, live at its URL -------------------
   await page.locator('#dev-console-tool').selectOption('dev_write_file');
   // Pre-filled from the input schema: the required properties, as
-  // placeholders an agent replaces.
+  // placeholders an agent replaces. `expected_sha256` is required and
+  // nullable, so its placeholder is `null` — "create this file".
   const prefilled = JSON.parse(await page.locator('#dev-console-args').inputValue());
-  expect(Object.keys(prefilled).sort()).toEqual(['content', 'path']);
+  expect(Object.keys(prefilled).sort()).toEqual(['content', 'expected_sha256', 'path']);
+  expect(prefilled.expected_sha256).toBeNull();
 
   const CONTENT =
     '<!doctype html><html><head><title>From the console</title></head>' +
@@ -184,6 +186,7 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   const written = await runFromConsole(page, 'dev_write_file', {
     path: 'site/console.html',
     content: CONTENT,
+    expected_sha256: null,
   });
   expect(written.isError, JSON.stringify(written)).toBe(false);
   expect(written.result.path).toBe('site/console.html');
@@ -202,6 +205,7 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   const refused = await runFromConsole(page, 'dev_write_file', {
     path: 'outside/the-workspace.txt',
     content: 'x',
+    expected_sha256: null,
   });
   expect(refused.isError).toBe(true);
   expect(String(refused.result)).toMatch(/^Request failed \(4\d\d\): /);

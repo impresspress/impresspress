@@ -2463,14 +2463,17 @@ export interface paths {
                          */
                         encoding?: "utf8" | "base64";
                         /**
-                         * @description The SHA-256 the file has now, as your last read returned it, or
-                         *     `null` if you expect the file not to exist yet. Leaving the field out
-                         *     is the same as `null`. If the file changed since you read it, the
-                         *     write is refused with `409` and the file's current hash: re-read it,
-                         *     then write again.
-                         * @default null
+                         * @description Required. The SHA-256 the file has now — as `dev_list_files`,
+                         *     `dev_read_file` or your last write reported it — or `null` to say the
+                         *     file does not exist yet. A seeded sandbox starts with files of its own
+                         *     (usually `site/index.html`), so look a path up in `dev_list_files`
+                         *     before writing `null` to it. A hash that no longer matches, or `null`
+                         *     for a path that holds a file, is refused with `409` and the file's
+                         *     current hash; nothing is written. Leaving the key out is a `400`
+                         *     naming each such file with its current hash, or saying it does not
+                         *     exist yet; send that hash only if it is the one you read.
                          */
-                        expected_sha256?: string | null;
+                        expected_sha256: string | null;
                         /** @description Workspace-relative path under `site/` or `blocks/<name>/`. */
                         path: string;
                     };
@@ -2601,14 +2604,17 @@ export interface paths {
                              */
                             encoding?: "utf8" | "base64";
                             /**
-                             * @description The SHA-256 the file has now, as your last read returned it, or
-                             *     `null` if you expect the file not to exist yet. Leaving the field out
-                             *     is the same as `null`. If the file changed since you read it, the
-                             *     write is refused with `409` and the file's current hash: re-read it,
-                             *     then write again.
-                             * @default null
+                             * @description Required. The SHA-256 the file has now — as `dev_list_files`,
+                             *     `dev_read_file` or your last write reported it — or `null` to say the
+                             *     file does not exist yet. A seeded sandbox starts with files of its own
+                             *     (usually `site/index.html`), so look a path up in `dev_list_files`
+                             *     before writing `null` to it. A hash that no longer matches, or `null`
+                             *     for a path that holds a file, is refused with `409` and the file's
+                             *     current hash; nothing is written. Leaving the key out is a `400`
+                             *     naming each such file with its current hash, or saying it does not
+                             *     exist yet; send that hash only if it is the one you read.
                              */
-                            expected_sha256?: string | null;
+                            expected_sha256: string | null;
                             /** @description Workspace-relative path under `site/` or `blocks/<name>/`. */
                             path: string;
                         }[];

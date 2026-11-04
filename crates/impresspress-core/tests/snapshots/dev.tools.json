@@ -9561,7 +9561,7 @@
       }
     },
     {
-      "description": "Write a workspace file under `site/` or `blocks/<name>/`. Writing under `site/` publishes a new generation immediately, live on the sandbox; writing under `blocks/` only stages source — nothing serves it until the block is compiled and staged.",
+      "description": "Write a workspace file under `site/` or `blocks/<name>/`. Writing under `site/` publishes a new generation immediately, live on the sandbox; writing under `blocks/` only stages source — nothing serves it until the block is compiled and staged. `expected_sha256` is required: the file's current hash to replace it (a seeded sandbox starts with files such as `site/index.html`; `dev_list_files` lists every hash), `null` to create it.",
       "inputSchema": {
         "properties": {
           "content": {
@@ -9585,8 +9585,7 @@
             ]
           },
           "expected_sha256": {
-            "default": null,
-            "description": "The SHA-256 the file has now, as your last read returned it, or\n`null` if you expect the file not to exist yet. Leaving the field out\nis the same as `null`. If the file changed since you read it, the\nwrite is refused with `409` and the file's current hash: re-read it,\nthen write again.",
+            "description": "Required. The SHA-256 the file has now — as `dev_list_files`,\n`dev_read_file` or your last write reported it — or `null` to say the\nfile does not exist yet. A seeded sandbox starts with files of its own\n(usually `site/index.html`), so look a path up in `dev_list_files`\nbefore writing `null` to it. A hash that no longer matches, or `null`\nfor a path that holds a file, is refused with `409` and the file's\ncurrent hash; nothing is written. Leaving the key out is a `400`\nnaming each such file with its current hash, or saying it does not\nexist yet; send that hash only if it is the one you read.",
             "type": [
               "string",
               "null"
@@ -9599,6 +9598,7 @@
         },
         "required": [
           "content",
+          "expected_sha256",
           "path"
         ],
         "type": "object"
@@ -9845,7 +9845,7 @@
       }
     },
     {
-      "description": "Write several workspace files as ONE change: all under `site/` (publishes one generation) or all under one `blocks/<name>/` (stages only). Every `expected_sha256` is checked before anything is written; any mismatch refuses the whole batch and lists every conflict. Use it for a scaffold of several pages; `dev_write_file` for one file.",
+      "description": "Write several workspace files as ONE change: all under `site/` (publishes one generation) or all under one `blocks/<name>/` (stages only). Every `expected_sha256` is checked before anything is written; any mismatch refuses the whole batch and lists every conflict. Each entry needs its own `expected_sha256`: the current hash for a file that exists (a seeded sandbox starts with `site/index.html`), `null` for a new one. Use it for a scaffold of several pages; `dev_write_file` for one file.",
       "inputSchema": {
         "properties": {
           "files": {
@@ -9874,8 +9874,7 @@
                   ]
                 },
                 "expected_sha256": {
-                  "default": null,
-                  "description": "The SHA-256 the file has now, as your last read returned it, or\n`null` if you expect the file not to exist yet. Leaving the field out\nis the same as `null`. If the file changed since you read it, the\nwrite is refused with `409` and the file's current hash: re-read it,\nthen write again.",
+                  "description": "Required. The SHA-256 the file has now — as `dev_list_files`,\n`dev_read_file` or your last write reported it — or `null` to say the\nfile does not exist yet. A seeded sandbox starts with files of its own\n(usually `site/index.html`), so look a path up in `dev_list_files`\nbefore writing `null` to it. A hash that no longer matches, or `null`\nfor a path that holds a file, is refused with `409` and the file's\ncurrent hash; nothing is written. Leaving the key out is a `400`\nnaming each such file with its current hash, or saying it does not\nexist yet; send that hash only if it is the one you read.",
                   "type": [
                     "string",
                     "null"
@@ -9888,7 +9887,8 @@
               },
               "required": [
                 "path",
-                "content"
+                "content",
+                "expected_sha256"
               ],
               "type": "object"
             },
