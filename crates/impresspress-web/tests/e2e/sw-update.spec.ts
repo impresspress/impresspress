@@ -363,7 +363,7 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     // published, both of which live in OPFS.
     const KEPT = '<!doctype html><title>kept</title><p>written before the update</p>\n';
     await enterFromWelcome(page);
-    const written = await runFromConsole(page, 'dev_write_file', { path: 'site/kept.html', content: KEPT });
+    const written = await runFromConsole(page, 'dev_write_file', { path: 'site/kept.html', content: KEPT, expected_sha256: null });
     expect(written.isError, JSON.stringify(written)).toBe(false);
     expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
 
@@ -430,7 +430,7 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     expect(read.isError, JSON.stringify(read)).toBe(false);
     expect(read.result.content).toBe(KEPT);
     const AFTER = '<!doctype html><title>after</title><p>written after the update</p>\n';
-    const later = await runFromConsole(page, 'dev_write_file', { path: 'site/after.html', content: AFTER });
+    const later = await runFromConsole(page, 'dev_write_file', { path: 'site/after.html', content: AFTER, expected_sha256: null });
     expect(later.isError, JSON.stringify(later)).toBe(false);
     expect(await viaWorker(page, '/after.html')).toEqual({ status: 200, text: AFTER });
 
@@ -480,7 +480,7 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
     await bootServiceWorker(page);
     const KEPT = '<!doctype html><title>kept</title><p>written before the update</p>\n';
     await enterFromWelcome(page);
-    const written = await runFromConsole(page, 'dev_write_file', { path: 'site/kept.html', content: KEPT });
+    const written = await runFromConsole(page, 'dev_write_file', { path: 'site/kept.html', content: KEPT, expected_sha256: null });
     expect(written.isError, JSON.stringify(written)).toBe(false);
     expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
 

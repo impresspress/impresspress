@@ -109,7 +109,7 @@ async fn write(ctx: &TestContext, path: &str, content: &str) -> String {
         dev_post(
             ctx,
             "/b/dev/api/files/write",
-            json!({"path": path, "content": content}),
+            json!({"path": path, "content": content, "expected_sha256": null}),
         )
         .await,
     )
@@ -135,7 +135,7 @@ async fn refused_workspace_storage_is_403_on_every_file_route() {
         (
             "create",
             "/b/dev/api/files/write",
-            json!({"path": "site/new.html", "content": "<p>new</p>"}),
+            json!({"path": "site/new.html", "content": "<p>new</p>", "expected_sha256": null}),
         )
     };
     let delete = || {

@@ -184,6 +184,7 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   const written = await runFromConsole(page, 'dev_write_file', {
     path: 'site/console.html',
     content: CONTENT,
+    expected_sha256: null,
   });
   expect(written.isError, JSON.stringify(written)).toBe(false);
   expect(written.result.path).toBe('site/console.html');
@@ -202,6 +203,7 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   const refused = await runFromConsole(page, 'dev_write_file', {
     path: 'outside/the-workspace.txt',
     content: 'x',
+    expected_sha256: null,
   });
   expect(refused.isError).toBe(true);
   expect(String(refused.result)).toMatch(/^Request failed \(4\d\d\): /);

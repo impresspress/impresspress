@@ -209,6 +209,7 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   const written = await runFromConsole(page, 'dev_write_file', {
     path: 'site/llms.txt',
     content: OWN,
+    expected_sha256: null,
   });
   expect(written.isError, JSON.stringify(written)).toBe(false);
   expect(written.result.path).toBe('site/llms.txt');
@@ -265,6 +266,7 @@ test('the runtime serves a site’s text files with their type and a UTF-8 chars
     const written = await runFromConsole(page, 'dev_write_file', {
       path: `site/${file.path}`,
       content: file.content,
+      expected_sha256: null,
     });
     expect(written.isError, JSON.stringify(written)).toBe(false);
   }

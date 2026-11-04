@@ -277,13 +277,46 @@ pub struct FileWriteRequest {
     /// How `content` is encoded. Defaults to `utf8`.
     #[serde(default)]
     pub encoding: FileEncoding,
-    /// The SHA-256 the file has now, as your last read returned it, or
-    /// `null` if you expect the file not to exist yet. Leaving the field out
-    /// is the same as `null`. If the file changed since you read it, the
-    /// write is refused with `409` and the file's current hash: re-read it,
-    /// then write again.
-    #[serde(default)]
+    /// Required. The SHA-256 the file has now — as `dev_list_files`,
+    /// `dev_read_file` or your last write reported it — or `null` to say the
+    /// file does not exist yet. A seeded sandbox starts with files of its own
+    /// (usually `site/index.html`), so look a path up in `dev_list_files`
+    /// before writing `null` to it. A hash that no longer matches, or `null`
+    /// for a path that holds a file, is refused with `409` and the file's
+    /// current hash; nothing is written.
+    //
+    // Absent used to mean `null`, so a caller that forgot the hash of a file
+    // it meant to replace was taken to be creating it and got a 409 for a
+    // write it never meant as a create. `deserialize_with` makes serde
+    // require the key (a plain `Option` field is `None` when absent);
+    // `RequiredNullableSha256` makes the schema list it as required while
+    // still accepting `null`.
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schemars(with = "RequiredNullableSha256")]
     pub expected_sha256: Option<String>,
+}
+
+/// Schema of `FileWriteRequest::expected_sha256`: a key that must be present
+/// and is a string or `null`.
+///
+/// schemars marks an `Option` field optional, and `#[schemars(required)]`
+/// narrows it to the inner type (no `null`). Neither fits a key whose `null`
+/// is a deliberate answer, so this type states the schema directly. It is not
+/// an `Option`, which is what makes the derive list the field as required.
+struct RequiredNullableSha256;
+
+impl schemars::JsonSchema for RequiredNullableSha256 {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RequiredNullableSha256".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": ["string", "null"] })
+    }
 }
 
 /// Response of `POST /b/dev/api/files/write`.

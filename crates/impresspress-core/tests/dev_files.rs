@@ -157,6 +157,43 @@ async fn write_over_an_existing_file_requires_its_hash() {
     assert_eq!(output_status(out).await, 409);
 }
 
+/// Leaving `expected_sha256` out is a malformed request, not a create.
+///
+/// It used to read as `null`: an agent that forgot the hash of a file it
+/// meant to replace (the seed's `site/index.html`) was taken to be creating
+/// it, and got a 409 for a create it never asked for. The key is required so
+/// every write says which of the two it means.
+#[tokio::test]
+async fn a_write_without_expected_sha256_is_refused_and_writes_nothing() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+
+    let out = dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/a.css", "content": "a{}"}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 400);
+
+    let out = dev_post(
+        &ctx,
+        "/b/dev/api/files/write-batch",
+        json!({"files": [
+            {"path": "site/b.css", "content": "b{}", "expected_sha256": null},
+            {"path": "site/c.css", "content": "c{}"},
+        ]}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 400);
+
+    let listing = output_json(ctx.dispatch_resolved(list_msg(Some("site/"))).await).await;
+    assert_eq!(
+        listing["files"],
+        json!([]),
+        "nothing may be written: {listing}"
+    );
+}
+
 #[tokio::test]
 async fn stale_hash_is_a_conflict_that_reports_the_current_hash() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
@@ -653,22 +690,15 @@ fn the_write_schema_and_the_handler_agree_on_what_is_required() {
         .iter()
         .map(|v| v.as_str().expect("field name"))
         .collect();
-    assert_eq!(required, vec!["path", "content"]);
+    assert_eq!(required, vec!["path", "content", "expected_sha256"]);
 }
 
-/// Omitting `expected_sha256` is the same as sending `null`: "I expect no
-/// file here". Over a file that exists that is a conflict, so a caller cannot
-/// clobber an edit by forgetting the field.
+/// Forgetting `expected_sha256` can never clobber a file: over a file that
+/// exists the write is refused and the file keeps its content.
 #[tokio::test]
-async fn an_omitted_expected_hash_means_the_file_should_not_exist_yet() {
+async fn an_omitted_expected_hash_never_overwrites_a_file() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
-    let out = dev_post(
-        &ctx,
-        "/b/dev/api/files/write",
-        json!({"path": "site/a.css", "content": "a{}"}),
-    )
-    .await;
-    assert_eq!(output_status(out).await, 200);
+    let sha = write_new(&ctx, "site/a.css", "a{}").await;
 
     let out = dev_post(
         &ctx,
@@ -676,7 +706,13 @@ async fn an_omitted_expected_hash_means_the_file_should_not_exist_yet() {
         json!({"path": "site/a.css", "content": "b{}"}),
     )
     .await;
-    assert_eq!(output_status(out).await, 409);
+    assert_eq!(output_http_status(out).await, 400);
+
+    let read =
+        output_json(dev_post(&ctx, "/b/dev/api/files/read", json!({"path": "site/a.css"})).await)
+            .await;
+    assert_eq!(read["content"], "a{}");
+    assert_eq!(read["sha256"], json!(sha));
 }
 
 // ---------------------------------------------------------------------------
@@ -1433,8 +1469,8 @@ async fn a_block_batch_stages_without_publishing() {
             &ctx,
             BATCH,
             json!({"files": [
-                {"path": "blocks/hello/Cargo.toml", "content": "[package]\nname = \"hello\"\n"},
-                {"path": "blocks/hello/src/lib.rs", "content": "// hi\n"},
+                {"path": "blocks/hello/Cargo.toml", "content": "[package]\nname = \"hello\"\n", "expected_sha256": null},
+                {"path": "blocks/hello/src/lib.rs", "content": "// hi\n", "expected_sha256": null},
             ]}),
         )
         .await,
@@ -1453,12 +1489,12 @@ async fn a_batch_that_mixes_areas_is_refused() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     for files in [
         json!([
-            {"path": "site/index.html", "content": "x"},
-            {"path": "blocks/hello/src/lib.rs", "content": "y"},
+            {"path": "site/index.html", "content": "x", "expected_sha256": null},
+            {"path": "blocks/hello/src/lib.rs", "content": "y", "expected_sha256": null},
         ]),
         json!([
-            {"path": "blocks/hello/src/lib.rs", "content": "x"},
-            {"path": "blocks/other/src/lib.rs", "content": "y"},
+            {"path": "blocks/hello/src/lib.rs", "content": "x", "expected_sha256": null},
+            {"path": "blocks/other/src/lib.rs", "content": "y", "expected_sha256": null},
         ]),
     ] {
         let out = dev_post(&ctx, BATCH, json!({"files": files})).await;
@@ -1472,8 +1508,8 @@ async fn a_batch_that_mixes_areas_is_refused() {
 async fn duplicate_paths_and_bad_sizes_of_batch_are_refused() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     let dup = json!({"files": [
-        {"path": "site/a.css", "content": "a{}"},
-        {"path": "site/a.css", "content": "b{}"},
+        {"path": "site/a.css", "content": "a{}", "expected_sha256": null},
+        {"path": "site/a.css", "content": "b{}", "expected_sha256": null},
     ]});
     assert_eq!(
         output_http_status(dev_post(&ctx, BATCH, dup).await).await,
@@ -1484,7 +1520,7 @@ async fn duplicate_paths_and_bad_sizes_of_batch_are_refused() {
         400
     );
     let too_many: Vec<serde_json::Value> = (0..=paths::MAX_BATCH_FILES)
-        .map(|i| json!({"path": format!("site/f{i}.css"), "content": "x{}"}))
+        .map(|i| json!({"path": format!("site/f{i}.css"), "content": "x{}", "expected_sha256": null}))
         .collect();
     assert_eq!(
         output_http_status(dev_post(&ctx, BATCH, json!({"files": too_many})).await).await,
@@ -1499,12 +1535,12 @@ async fn a_batch_that_collides_with_itself_is_refused() {
     // it first, then the file.
     for files in [
         json!([
-            {"path": "site/a", "content": "file"},
-            {"path": "site/a/b.css", "content": "b{}"},
+            {"path": "site/a", "content": "file", "expected_sha256": null},
+            {"path": "site/a/b.css", "content": "b{}", "expected_sha256": null},
         ]),
         json!([
-            {"path": "site/a/b.css", "content": "b{}"},
-            {"path": "site/a", "content": "file"},
+            {"path": "site/a/b.css", "content": "b{}", "expected_sha256": null},
+            {"path": "site/a", "content": "file", "expected_sha256": null},
         ]),
     ] {
         // Status and body from the one rendering, so the message read is the
@@ -1532,8 +1568,8 @@ async fn an_oversized_file_in_a_batch_is_refused_before_anything_is_stored() {
         &ctx,
         BATCH,
         json!({"files": [
-            {"path": "site/ok.css", "content": "a{}"},
-            {"path": "site/big.css", "content": big},
+            {"path": "site/ok.css", "content": "a{}", "expected_sha256": null},
+            {"path": "site/big.css", "content": big, "expected_sha256": null},
         ]}),
     )
     .await;
@@ -1550,8 +1586,8 @@ async fn identical_content_in_one_batch_is_charged_once() {
             &ctx,
             BATCH,
             json!({"files": [
-                {"path": "site/a.css", "content": "same{}"},
-                {"path": "site/b.css", "content": "same{}"},
+                {"path": "site/a.css", "content": "same{}", "expected_sha256": null},
+                {"path": "site/b.css", "content": "same{}", "expected_sha256": null},
             ]}),
         )
         .await,
@@ -1578,8 +1614,8 @@ async fn a_batch_is_held_to_the_quota_as_a_whole_and_charged_once_per_blob() {
         &ctx,
         BATCH,
         json!({"files": [
-            {"path": "site/a.css", "content": "aaaa{}"},
-            {"path": "site/b.css", "content": "bbbb{}"},
+            {"path": "site/a.css", "content": "aaaa{}", "expected_sha256": null},
+            {"path": "site/b.css", "content": "bbbb{}", "expected_sha256": null},
         ]}),
     )
     .await;
@@ -1594,8 +1630,8 @@ async fn a_batch_is_held_to_the_quota_as_a_whole_and_charged_once_per_blob() {
         &ctx,
         BATCH,
         json!({"files": [
-            {"path": "site/a.css", "content": "same{}"},
-            {"path": "site/b.css", "content": "same{}"},
+            {"path": "site/a.css", "content": "same{}", "expected_sha256": null},
+            {"path": "site/b.css", "content": "same{}", "expected_sha256": null},
         ]}),
     )
     .await;
