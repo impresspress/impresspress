@@ -355,6 +355,16 @@ pub(crate) fn log_selection_refusals<B: std::borrow::Borrow<BlockInfo>>(blocks: 
                 reason = %r.reason,
                 "dev tools.json: selection names an unpublished endpoint",
             ),
+            // Two different `SELECTIONS` rows naming one endpoint: the
+            // earlier is published and this one is not. A mistake in the
+            // list worth fixing, not a broken manifest.
+            WebMcpRefusal::SelectionShadowed => tracing::warn!(
+                block = %r.block,
+                path = %r.path,
+                tool = %r.tool_name,
+                reason = %r.reason,
+                "dev tools.json: selection shadowed by an earlier one naming the same endpoint",
+            ),
             // Every other reason is a defect in this file's own
             // declarations (a schema wall the selected endpoint's contract
             // hits) and should never fire against the endpoints
