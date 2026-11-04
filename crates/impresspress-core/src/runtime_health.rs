@@ -10,8 +10,9 @@
 //!   not `Ready` does not serve;
 //! - what the platform knows about the runtime as a whole
 //!   ([`PlatformHealth`]): whether it was published degraded, is serving
-//!   stale config, or is serving on after a rebuild failed permanently, and
-//!   the retry window it will be rebuilt after. The platform registers where
+//!   stale config, or is serving on after a rebuild failed permanently, the
+//!   retry window it will be rebuilt after, and whether its last check of
+//!   the backend answered ([`BackendCheck`]). The platform registers where
 //!   to read it from with [`set_platform_health_source`], as the Cloudflare
 //!   entry does once per isolate; a platform that registers nothing (native,
 //!   the browser) is reported from the slots alone.
@@ -22,12 +23,38 @@
 //! |------------|-----------------------------------------------------------------|
 //! | `failed`   | a block's `Init` failed permanently, or the last rebuild did    |
 //! | `stale`    | the runtime serves config older than the database's             |
-//! | `degraded` | a block does not serve (its `Init` is retrying), or the runtime's variables read failed |
+//! | `degraded` | a block does not serve (its `Init` is retrying), the runtime's variables read failed, or the platform's last check of the backend failed |
 //! | `ok`       | none of the above                                               |
 //!
 //! A runtime that is both stale and degraded (a stale plan hydrated during
 //! an outage usually is) reports `stale`, with the blocks that do not serve
 //! still listed. Every status but `ok` is a 503 with `Retry-After`.
+//!
+//! # The backend, named apart from the runtime
+//!
+//! The status describes the runtime, and a runtime outlives the outage that
+//! shaped it: a runtime whose variables read answered and whose block's
+//! `Init` then failed on the backend stays `degraded`, listing that block,
+//! for as long as the backend is down, because a retry that finds the backend
+//! down builds nothing to replace it. The same body is what a block failing
+//! its own `Init` while the backend answers gives (a query that makes D1
+//! reset, plan I2g). A reader that must tell an outage from a fault of the
+//! version — a deploy gate deciding whether to roll back — cannot tell them
+//! apart from the status and the blocks.
+//!
+//! So a platform that checks its backend before it retries (Cloudflare's
+//! gate, one read of the variables table) reports that check's outcome
+//! beside the status, as `backend` ([`BackendReport`]): `"ok"` when the last
+//! check answered, `"failing"` when it failed, with when the run of checks
+//! with that outcome began (`since`) and when the last one ran (`checked`).
+//! A failing check makes the status at least `degraded`: whatever the
+//! runtime holds, its routes that read the backend do not serve. A
+//! non-`ok` status with the backend `"ok"` is the version's own state; with
+//! it `"failing"`, it is an outage, unless the status is `failed`, which
+//! says the failure is one retrying will not fix. A platform that does not
+//! check its backend apart from a build (native, the browser) reports no
+//! `backend`, and the `ok` body stays `{"status":"ok"}`: an `ok` status
+//! implies the last check, if any, answered.
 //!
 //! The body names each block's state by its class
 //! ([`BlockInitState::as_str`]), never the failure's text, which can quote
@@ -51,6 +78,13 @@
 //!   [`PERSISTENT_RUNTIMES`] (a block failing the same way in every runtime
 //!   built, which a gate that passes and a rebuild that degrades again
 //!   produce: a block causing its own failure).
+//! - `backend` is this isolate's last check, like the window. It is as fresh
+//!   as the window: the first request after the window ends checks again
+//!   before it is answered, so a `/health` request then reports its own
+//!   check. Inside a window it reports the last check before it. A check
+//!   refused by the invocation's own D1 call budget
+//!   (`IMPRESSPRESS_D1_CALLS_PER_INVOCATION`) is `failing` as an outage's is:
+//!   the platform classifies both as transient and cannot tell them apart.
 //! - A runtime's runs move only when a runtime is published. During a
 //!   database-wide outage Cloudflare's retry window checks the backend with
 //!   one read before it rebuilds anything, and a failed check publishes
@@ -219,6 +253,46 @@ pub struct RetryEpisode {
     pub failed: bool,
 }
 
+/// A platform's record of its checks of the backend: the outcome of the last
+/// one, and since when the checks have had that outcome. Cloudflare's gate
+/// (one read of the variables table before a retry builds anything, and
+/// every runtime build's first read) is such a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCheck {
+    /// Whether the last check answered. A check fails whether its failure is
+    /// transient or permanent: the status says which ([`HealthStatus::Failed`]
+    /// for a permanent one, which arms a failed episode).
+    pub answered: bool,
+    /// When the first check of the current run of checks with this outcome
+    /// ran: when the backend began failing, or began answering again.
+    pub since_ms: u64,
+    /// When the last check ran.
+    pub checked_ms: u64,
+}
+
+impl BackendCheck {
+    /// The record after a check at `now_ms` that `answered` or did not,
+    /// given the record before it, if any: the same outcome extends its run,
+    /// the other starts one.
+    #[must_use]
+    pub fn after(previous: Option<Self>, answered: bool, now_ms: u64) -> Self {
+        let since_ms = previous
+            .filter(|previous| previous.answered == answered)
+            .map_or(now_ms, |previous| previous.since_ms);
+        Self {
+            answered,
+            since_ms,
+            checked_ms: now_ms,
+        }
+    }
+
+    /// Whether the last check failed.
+    #[must_use]
+    pub const fn is_failing(&self) -> bool {
+        !self.answered
+    }
+}
+
 /// What the platform knows about the runtime serving this isolate, beyond
 /// its slots. [`Default`] is a platform with nothing to add.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -232,6 +306,9 @@ pub struct PlatformHealth {
     pub stale_since_ms: Option<u64>,
     /// The serving runtime's [`RetryStreaks`].
     pub retry_streaks: RetryStreaks,
+    /// The platform's last check of the backend, if it checks one apart from
+    /// a build and has checked it.
+    pub backend: Option<BackendCheck>,
 }
 
 /// Where [`platform_health`] reads from.
@@ -271,6 +348,46 @@ pub enum HealthStatus {
     Failed,
 }
 
+/// [`BackendReport::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendStatus {
+    /// The last check answered.
+    Ok,
+    /// The last check failed.
+    Failing,
+}
+
+/// The platform's last check of the backend ([`BackendCheck`]), as `/health`
+/// reports it: `backend`, see the module doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackendReport {
+    pub status: BackendStatus,
+    /// When the run of checks with this outcome began, RFC 3339: for
+    /// `failing`, the first failed check of the run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// When the last check ran, RFC 3339: for `failing`, when the backend
+    /// last failed one. The next check runs when the retry window ends
+    /// (`retry_in`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<String>,
+}
+
+impl BackendReport {
+    fn of(check: BackendCheck) -> Self {
+        Self {
+            status: if check.answered {
+                BackendStatus::Ok
+            } else {
+                BackendStatus::Failing
+            },
+            since: rfc3339(check.since_ms),
+            checked: rfc3339(check.checked_ms),
+        }
+    }
+}
+
 /// A block that does not serve, as `/health` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UnavailableBlock {
@@ -295,7 +412,8 @@ pub struct UnavailableBlock {
 
 /// The `/health` report. Serializes to its body: `{"status":"ok"}` when
 /// healthy, otherwise the status with `since` (when known), `retry_in`,
-/// `retries` (on a rebuilding platform) and `unavailable`.
+/// `retries` (on a rebuilding platform), `backend` (on a platform that checks
+/// its backend) and `unavailable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HealthReport {
     pub status: HealthStatus,
@@ -312,6 +430,10 @@ pub struct HealthReport {
     /// has been armed, the first included.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
+    /// The platform's last check of the backend; `None` when `ok`, or on a
+    /// platform that checks none apart from a build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<BackendReport>,
     /// The blocks that do not serve, by name; `None` when `ok`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<Vec<UnavailableBlock>>,
@@ -368,6 +490,7 @@ impl HealthReport {
             .values()
             .any(|state| matches!(state, BlockInitState::Failed { .. }));
         let rebuild_failed = platform.episode.is_some_and(|episode| episode.failed);
+        let backend_failing = platform.backend.filter(BackendCheck::is_failing);
         let (status, since_ms) = if block_failed || rebuild_failed {
             (
                 HealthStatus::Failed,
@@ -378,13 +501,17 @@ impl HealthReport {
             )
         } else if let Some(stale_since) = platform.stale_since_ms {
             (HealthStatus::Stale, Some(stale_since))
-        } else if platform.degraded_since_ms.is_some() || !unavailable.is_empty() {
+        } else if platform.degraded_since_ms.is_some()
+            || backend_failing.is_some()
+            || !unavailable.is_empty()
+        {
             (
                 HealthStatus::Degraded,
                 platform
                     .episode
                     .map(|episode| episode.since_ms)
-                    .or(platform.degraded_since_ms),
+                    .or(platform.degraded_since_ms)
+                    .or(backend_failing.map(|check| check.since_ms)),
             )
         } else {
             return Self {
@@ -392,6 +519,7 @@ impl HealthReport {
                 since: None,
                 retry_in: None,
                 retries: None,
+                backend: None,
                 unavailable: None,
             };
         };
@@ -404,6 +532,7 @@ impl HealthReport {
             since: since_ms.and_then(rfc3339),
             retry_in: Some(retry_in),
             retries: platform.episode.map(|episode| episode.retries),
+            backend: platform.backend.map(BackendReport::of),
             unavailable: Some(unavailable),
         }
     }
@@ -759,6 +888,131 @@ mod tests {
                 ],
             })
         );
+    }
+
+    /// A check that has the last one's outcome extends its run; the other
+    /// outcome starts one. `checked` is always the last.
+    #[test]
+    fn a_backend_check_extends_or_starts_its_run() {
+        let first = BackendCheck::after(None, false, NOW);
+        assert_eq!(
+            (first.answered, first.since_ms, first.checked_ms),
+            (false, NOW, NOW)
+        );
+        let second = BackendCheck::after(Some(first), false, NOW + 2_000);
+        assert_eq!((second.since_ms, second.checked_ms), (NOW, NOW + 2_000));
+        let back = BackendCheck::after(Some(second), true, NOW + 5_000);
+        assert_eq!(
+            (back.answered, back.since_ms, back.checked_ms),
+            (true, NOW + 5_000, NOW + 5_000)
+        );
+        assert!(second.is_failing() && !back.is_failing());
+    }
+
+    /// The reported outage (FOLLOWUPS "health body not naming a failed
+    /// backend check"): a runtime published degraded — its variables read
+    /// answered, then a block's `Init` failed on the backend — that a failed
+    /// check keeps serving. Its slots and episode are those of a block failing
+    /// its own `Init`; `backend` is what tells the two apart.
+    #[test]
+    fn a_degraded_runtime_names_whether_its_backend_check_failed() {
+        let platform = |answered: bool| PlatformHealth {
+            episode: Some(RetryEpisode {
+                since_ms: NOW - 10_000,
+                retry_at_ms: NOW + 3_200,
+                retries: 3,
+                failed: false,
+            }),
+            degraded_since_ms: Some(NOW - 10_000),
+            backend: Some(BackendCheck {
+                answered,
+                since_ms: NOW - 7_000,
+                checked_ms: NOW - 800,
+            }),
+            ..PlatformHealth::default()
+        };
+        let slots = states(&[("a", BlockInitState::Ready), ("b", retrying(QUOTA, 0))]);
+
+        let outage = HealthReport::of(&slots, &platform(false), NOW);
+        assert_eq!(outage.http_status(), 503);
+        assert_eq!(
+            body(&outage),
+            json!({
+                "status": "degraded",
+                "since": "2027-01-15T07:59:50.000Z",
+                "retry_in": 4,
+                "retries": 3,
+                "backend": {
+                    "status": "failing",
+                    "since": "2027-01-15T07:59:53.000Z",
+                    "checked": "2027-01-15T07:59:59.200Z",
+                },
+                "unavailable": [{"block": "b", "class": "retrying", "retry_in": 4}],
+            })
+        );
+
+        let own_fault = HealthReport::of(&slots, &platform(true), NOW);
+        assert_eq!(own_fault.status, HealthStatus::Degraded);
+        assert_eq!(body(&own_fault)["backend"]["status"], "ok");
+    }
+
+    /// A failed check makes the status at least `degraded`, with every block
+    /// ready and nothing else to report: the routes that read the backend do
+    /// not serve. Its run's start is `since` when nothing older is known.
+    #[test]
+    fn a_failing_backend_check_is_degraded_with_every_block_ready() {
+        let platform = PlatformHealth {
+            backend: Some(BackendCheck::after(None, false, NOW - 4_000)),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(&states(&[("a", BlockInitState::Ready)]), &platform, NOW);
+        assert_eq!(report.http_status(), 503);
+        assert_eq!(
+            body(&report),
+            json!({
+                "status": "degraded",
+                "since": "2027-01-15T07:59:56.000Z",
+                "retry_in": 1,
+                "backend": {
+                    "status": "failing",
+                    "since": "2027-01-15T07:59:56.000Z",
+                    "checked": "2027-01-15T07:59:56.000Z",
+                },
+                "unavailable": [],
+            })
+        );
+    }
+
+    /// A healthy runtime whose last check answered is `{"status":"ok"}`, as
+    /// on a platform that checks nothing: `ok` implies the check answered.
+    #[test]
+    fn an_answering_backend_adds_nothing_to_the_ok_body() {
+        let platform = PlatformHealth {
+            backend: Some(BackendCheck::after(None, true, NOW - 1)),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(&states(&[("a", BlockInitState::Ready)]), &platform, NOW);
+        assert_eq!(report.http_status(), 200);
+        assert_eq!(body(&report), json!({"status": "ok"}));
+    }
+
+    /// A permanent failure outranks the failing check: `failed`, with the
+    /// check still named.
+    #[test]
+    fn a_failed_episode_outranks_a_failing_backend_check() {
+        let platform = PlatformHealth {
+            episode: Some(RetryEpisode {
+                since_ms: NOW - 3_000,
+                retry_at_ms: NOW + 1_000,
+                retries: 1,
+                failed: true,
+            }),
+            backend: Some(BackendCheck::after(None, false, NOW - 3_000)),
+            ..PlatformHealth::default()
+        };
+        let report = HealthReport::of(&states(&[("a", BlockInitState::Ready)]), &platform, NOW);
+        assert_eq!(report.status, HealthStatus::Failed);
+        assert_eq!(body(&report)["backend"]["status"], "failing");
     }
 
     /// The registered source is what the report reads; none is the default.

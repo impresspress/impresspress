@@ -15,7 +15,8 @@
 //    throttled.
 // 3. Throughout, the static site file and `/b/static/` answer 200, `/` and
 //    the D1 route 503 with `Retry-After`, `/health` 503 `degraded` with
-//    `retries` counting the windows.
+//    `retries` counting the windows and `backend` `failing`, its run begun
+//    by the cold build's failed check.
 // 4. The wall time of the cold build and of the slowest request after it is
 //    reported. It is not asserted: under Miniflare a cold build can take
 //    tens of milliseconds, so wall time cannot tell it from a gate; the
@@ -89,7 +90,10 @@ export default {
       const what = `${path} at +${((answer.sentAt - cold.sentAt) / 1000).toFixed(1)} s`;
       if (path === "/hello.html") assertServed(answer, what, "a static site file");
       else if (path === asset) assertServed(answer, what);
-      else if (path === "/health") assertHealth(answer, what, "degraded");
+      else if (path === "/health") {
+        const body = assertHealth(answer, what, "degraded");
+        assert.equal(body.backend?.status, "failing", `${what}: backend (${answer.body.slice(0, 300)})`);
+      }
       else assertUnavailable(answer, what);
       assert.equal(answer.built, false, `${what}: built nothing (${answer.cacheOutcome})`);
     }

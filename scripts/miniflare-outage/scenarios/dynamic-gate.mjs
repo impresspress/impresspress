@@ -11,7 +11,11 @@
 //    `block_settings` through to D1; were that read first, the outage would
 //    fail it before the gate and mark the current-config runtime `stale`).
 //    The retry builds nothing (`build=gate`), its request reports `gated`,
-//    and `/health` stays `degraded` (not `stale`), `retries` 2.
+//    and `/health` stays `degraded` (not `stale`), `retries` 2, listing the
+//    same block: the body of a block failing its own `Init`, but for
+//    `backend`, which turns from `ok` to `failing` with the check. That is
+//    the field a deploy gate tells an outage by (FOLLOWUPS "health body not
+//    naming a failed backend check").
 
 import assert from "node:assert/strict";
 
@@ -37,6 +41,7 @@ export default {
     assert.ok(cold.built, `the cold dynamic build published (${cold.cacheOutcome})`);
     assert.deepEqual(await buildsSince(d, mark), ["dynamic"], "the cold isolate's one build");
     assert.equal(degraded.retries, 1, "the degraded publish armed the window");
+    assert.equal(degraded.backend?.status, "ok", `the cold build's check answered: ${cold.body}`);
 
     // 2.
     await d.setMode("quota");
@@ -53,6 +58,13 @@ export default {
     assert.equal(retry.cacheOutcome, "gated", "the retry reports its check");
     assert.equal(body.retries, 2, "the failed gate is one more retry");
     assert.equal(body.since, degraded.since, "the same episode");
+    assert.deepEqual(
+      body.unavailable.map((b) => b.block),
+      degraded.unavailable.map((b) => b.block),
+      "the kept runtime lists what it listed",
+    );
+    assert.equal(body.backend?.status, "failing", `the retry's check failed: ${retry.body}`);
+    assert.equal(body.backend.since, body.backend.checked, "the first failed check starts the run");
     assert.deepEqual(await buildsSince(d, mark), ["gate"], "the retry assembled no runtime");
     assert.ok(
       retry.d1Calls[0].statements.every((sql) => !sql.includes("block_settings")),

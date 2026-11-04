@@ -13,12 +13,15 @@
 //    nothing else: the cold isolate builds anyway (Decision 1) over that
 //    failed read, which sends the table nothing more, and the handler sends
 //    nothing;
-// 3. inside the window, `/health` sends D1 and KV nothing and builds nothing;
+//    Its `backend` is `failing`, the run begun by that cold check;
+// 3. inside the window, `/health` sends D1 and KV nothing and builds nothing,
+//    and reports the same check (`backend.checked` does not move);
 // 4. each retry after a window, still in the outage, is the gate's check of
 //    D1, which fails, so nothing is built (CPU-GATE review): the request is
 //    served the cached runtime (`gated`), the episode's `retries` grows, its
 //    `since` and each block's `since` stay where they were, and each block's
 //    `runtimes` stays 1 — no runtime was published to extend a run (M3);
+//    `backend` stays `failing` since the cold check, `checked` at this one;
 // 5. the window elapsed while its retry runs: a `/health` served from the
 //    cached runtime meanwhile still reports the episode, with a `retry_in`
 //    that is a real wait (PR277-review m1: an underflow here answered
@@ -80,6 +83,18 @@ async function untilRetried(d, retried, everyMs = 100) {
 const gated = (answer) => probedBackend(answer.d1Calls);
 /** A retry that rebuilt and served the new runtime. */
 const rebuilt = (answer) => answer.built;
+
+/**
+ * `backend.checked` of `body` is an instant of `answer`'s flight: the check
+ * was that request's own.
+ */
+function assertCheckedBy(body, answer, what) {
+  const checked = Date.parse(body.backend?.checked);
+  assert.ok(
+    checked >= answer.sentAt && checked <= answer.doneAt,
+    `${what}: backend.checked ${body.backend?.checked} is outside the request that checked`,
+  );
+}
 
 /** `retry_in`, the top-level one and each block's, is inside `bounds`. */
 function assertRetryIn(body, bounds, what) {
@@ -150,7 +165,10 @@ export default {
     let armedBy = cold;
     let windowMs = await armedWindowMs(d, cold.mark);
     assertRetryIn(first, windowRetryIn(cold, windowMs, cold), "outage cold /health");
-    const episode = { status: "degraded", since: first.since, retries: 1 };
+    assert.equal(first.backend?.status, "failing", `the cold check failed: ${cold.body}`);
+    assert.equal(first.backend.since, first.backend.checked, "the cold check starts the failing run");
+    assertCheckedBy(first, cold, "outage cold /health");
+    const episode = { status: "degraded", since: first.since, retries: 1, backend: first.backend };
     const blockSince = Object.fromEntries(first.unavailable.map((b) => [b.block, b.since]));
 
     // 3. A request that is answered before the window can have ended is
@@ -181,7 +199,9 @@ export default {
       assert.equal(retry.built, false, `retry ${retries} built nothing (${retry.cacheOutcome})`);
       assert.equal(retry.cacheOutcome, "gated", `retry ${retries} reports its check`);
       assert.deepEqual(await buildsSince(d, retry.mark), ["gate"], `retry ${retries} assembled no runtime`);
+      assertCheckedBy(body, retry, `retry ${retries} /health`);
       episode.retries = retries;
+      episode.backend = { ...episode.backend, checked: body.backend.checked };
       assert.deepEqual(
         body,
         { ...episode, retry_in: body.retry_in, unavailable: body.unavailable },
@@ -235,7 +255,9 @@ export default {
     const third = assertHealth(held, "retry 3 /health", "degraded");
     assert.ok(gated(held), "the held request was the retry, and its check failed");
     assert.equal(held.built, false, `the held retry built nothing (${held.cacheOutcome})`);
+    assertCheckedBy(third, held, "retry 3 /health");
     episode.retries = 3;
+    episode.backend = { ...episode.backend, checked: third.backend.checked };
     assert.deepEqual(third, { ...episode, retry_in: third.retry_in, unavailable: third.unavailable }, "retry 3");
     for (const block of third.unavailable) {
       assert.equal(block.since, blockSince[block.block], `retry 3: ${block.block}'s run began where it did`);

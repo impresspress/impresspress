@@ -19,6 +19,66 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Cloudflare: `/health` says whether the last check of D1 failed (`backend`)
+
+**What was wrong.** Since a retry checks D1 before it rebuilds (the entry
+below), a check that fails builds nothing, and the runtime the isolate has
+keeps reporting the state of the build that made it. When D1 failed part-way
+through that build (the variables read answered, then a block's `Init`
+failed), the runtime was published `degraded`, listing that block, and stayed
+so for the whole outage. That is also the body of a block whose own `Init`
+keeps failing while D1 answers, a fault of the version. A deploy gate could
+not tell the two apart, and wafer.run's (`health_gate_verdict`) rolled a good
+version back during an outage. Before the check, the failed rebuild marked the
+runtime `stale`, which the gate read as an outage.
+
+**What changes.** A non-`ok` body on Cloudflare carries `backend`: the outcome
+of the isolate's last check of D1, the one read of the variables table that
+starts every build and every retry.
+
+```json
+{"status":"degraded","since":"2026-11-05T10:00:00.000Z","retry_in":4,"retries":3,
+ "backend":{"status":"failing","since":"2026-11-05T10:00:01.200Z","checked":"2026-11-05T10:00:04.500Z"},
+ "unavailable":[{"block":"wafer-run/auth","class":"retrying","retry_in":4,"since":"2026-11-05T10:00:00.000Z","runtimes":1}]}
+```
+
+- `backend.status` is `ok` when the last check answered and `failing` when it
+  did not, transiently or for good. `since` is when the run of checks with
+  that outcome began (for `failing`, the first failed check), and `checked`
+  when the last one ran. The next check runs when the window ends:
+  `retry_in`.
+- A failing check makes the status at least `degraded`. In practice it
+  already was: every path to a failed check keeps a runtime that is degraded,
+  stale or failed, or answers without a runtime. No new status value and no
+  new HTTP status: every non-`ok` status was already a 503 with
+  `Retry-After`. `failed` and `stale` still outrank `degraded`.
+- An `ok` body is still exactly `{"status":"ok"}`: it implies the last check
+  answered.
+- Native and the browser report no `backend`. They do not check the backend
+  apart from a build, and `/health` sends no query of its own.
+- `backend` is per isolate, like `retries`. A `/health` request that arrives
+  after the window has ended runs the check itself before it is answered, so
+  it reports that check.
+
+**Reading it (a deploy gate).** For a 503 body:
+
+1. `status` `failed` means a fault: something failed in a way retrying will
+   not fix, whatever `backend` says.
+2. Otherwise, `backend.status` `failing` means an outage: keep the version.
+3. Otherwise (`backend.status` `ok`), `degraded` with blocks listed means the
+   version's own fault: the blocks fail while D1 answers. Judge it on an
+   answer given after the window has ended: a runtime that D1 failed
+   part-way through building reports `ok` until its first retry checks again.
+   `stale`, and `degraded` with no block listed, mean the same as before
+   this release: D1 failed after a check that passed.
+4. With no `backend` (native, or an older version), use the rules from
+   before this release.
+
+**Who has to act.** Nothing breaks: the field is new and the statuses are
+unchanged. A consumer that compares a non-`ok` body exactly gains the key.
+wafer.run's `health_gate_verdict` should read `.runtime.backend.status` as
+the rules above say.
+
 ### A cold build reads each block's declaration once and copies none; wafer-run #478, #479, #482
 
 **What changes.** The wafer-run pin moves from `54683c50` to the merge of

@@ -14,6 +14,10 @@
 //    the failure reads as persistent rather than as a blip. This is the case
 //    a block's run still carries since the gate: a database-wide outage
 //    builds nothing per window and moves no run.
+//
+// Throughout, `backend` is `ok`: every check of D1 answered. That is what
+// tells this block's own failure from an outage (`dynamic-gate`), whose
+// listed block and status are the same.
 
 import assert from "node:assert/strict";
 
@@ -42,6 +46,7 @@ function onlyBlock(answer, what) {
   assert.deepEqual(body.unavailable.map((b) => b.block), [BLOCK], `${what}: only ${BLOCK} is listed`);
   const [block] = body.unavailable;
   assert.equal(block.class, "retrying", `${what}: class`);
+  assert.equal(body.backend?.status, "ok", `${what}: D1 answered the check (${JSON.stringify(body.backend)})`);
   return { body, block };
 }
 
