@@ -137,9 +137,10 @@ send and read JSON.
   path (e.g. `site/app.json`). The rest of `site/vendor/` is yours.
 - A stale `expected_sha256`, or `null` for a path that already holds a
   file (`409`): the refusal carries the current hash, so re-read and retry.
-- A left-out `expected_sha256` (`400`): the message names each file that
-  left it out with the hash to send if it exists, or `null` if it does not.
-  Nothing was written; resend with those values.
+- A left-out `expected_sha256` (`400`): nothing was written. The message
+  names each such file with its current hash, or says it does not exist yet
+  (send `null`). Send a hash only if it is the one you read; if it differs,
+  read the file first -- it changed since you saw it.
 
 ## Workflow
 

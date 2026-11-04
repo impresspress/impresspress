@@ -103,8 +103,9 @@
 //! * Everything else is an error terminal built by the block's own
 //!   `no_store_error` / `no_store_error_status`: a bad path or body is `400`
 //!   — a write that left `expected_sha256` out among them, its message naming
-//!   each such file with the hash to send or `null` (`missing_expected_hash`)
-//!   — a size or count over quota is `413`, a missing file is `404`, and the
+//!   each such file with its current hash or as not there yet
+//!   (`refuse_missing_expected_hash`) — a size or count over quota is `413`,
+//!   a missing file is `404`, and the
 //!   block-count quota is `409` (the workspace conflicts with a limit — the
 //!   payload is not too large). All of them carry `Cache-Control: no-store`,
 //!   as design §12 requires of every `/b/dev` response.
@@ -223,6 +224,11 @@ pub async fn handle_write(
         Ok(area) => area,
         Err(e) => return no_store_error(ErrorCode::InvalidArgument, &e.to_string()),
     };
+    // From here on `expected` is what the caller asserted: `None` is an
+    // explicit `null`. A left-out key never gets past this line.
+    let Some(expected) = request.expected_sha256.as_ref().map(Option::as_deref) else {
+        return refuse_missing_expected_hash(ctx, &[request.path.as_str()]).await;
+    };
     // Refuse an over-large body BEFORE decoding it. `content` is already in
     // memory as part of the parsed request; decoding would allocate the same
     // payload a second time, so a hostile body must not get that far. The
@@ -264,10 +270,7 @@ pub async fn handle_write(
             Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
         };
         let current = ws.get(&request.path);
-        let Some(expected) = &request.expected_sha256 else {
-            return missing_expected_hash(&[(&request.path, current)]);
-        };
-        if !hash_matches(current, expected.as_deref()) {
+        if !hash_matches(current, expected) {
             return conflict(&request.path, current);
         }
 
@@ -337,9 +340,9 @@ pub async fn handle_write(
 struct DecodedWrite<'a> {
     path: &'a str,
     bytes: Vec<u8>,
-    /// `expected_sha256` as sent: `None` when the key was left out,
-    /// `Some(None)` for an explicit `null`, `Some(Some(hash))` for a hash.
-    expected: Option<Option<&'a str>>,
+    /// The `expected_sha256` the caller sent: `None` is an explicit `null`.
+    /// A left-out key is refused before any entry is built.
+    expected: Option<&'a str>,
 }
 
 /// `POST /b/dev/api/files/write-batch` — create or replace several files as
@@ -384,6 +387,9 @@ pub async fn handle_write_batch(
     let mut area: Option<WorkspaceArea> = None;
     let mut seen = BTreeSet::new();
     let mut decoded: Vec<DecodedWrite> = Vec::with_capacity(request.files.len());
+    // Entries that left `expected_sha256` out. Collected over the whole batch
+    // so one refusal names them all; nothing is decoded once one is found.
+    let mut missing: Vec<&str> = Vec::new();
     for file in &request.files {
         let this_area = match paths::validate_path(&file.path) {
             Ok(area) => area,
@@ -410,6 +416,14 @@ pub async fn handle_write_batch(
                 ErrorCode::InvalidArgument,
                 &format!("{:?} appears twice in the batch", file.path),
             );
+        }
+        let Some(expected) = file.expected_sha256.as_ref().map(Option::as_deref) else {
+            missing.push(&file.path);
+            continue;
+        };
+        if !missing.is_empty() {
+            // The batch is refused anyway; keep checking paths and keys only.
+            continue;
         }
         // Before decoding, for the reason `handle_write` gives: a hostile
         // body must not be allocated a second time.
@@ -441,8 +455,11 @@ pub async fn handle_write_batch(
         decoded.push(DecodedWrite {
             path: &file.path,
             bytes,
-            expected: file.expected_sha256.as_ref().map(Option::as_deref),
+            expected,
         });
+    }
+    if !missing.is_empty() {
+        return refuse_missing_expected_hash(ctx, &missing).await;
     }
     let Some(area) = area else {
         unreachable!("a batch of at least one file has the area of its first file");
@@ -464,22 +481,11 @@ pub async fn handle_write_batch(
             Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
         };
 
-        // Every left-out `expected_sha256` first, named with what each one
-        // needs, so the caller fixes them all in one resend.
-        let missing: Vec<(&str, Option<&FileEntry>)> = decoded
-            .iter()
-            .filter(|file| file.expected.is_none())
-            .map(|file| (file.path, ws.get(file.path)))
-            .collect();
-        if !missing.is_empty() {
-            return missing_expected_hash(&missing);
-        }
-
-        // Then every hash. One stale entry refuses the whole batch and names
+        // Every hash first. One stale entry refuses the whole batch and names
         // every stale entry, so a caller that has fallen behind re-reads once.
         let conflicts: Vec<FileConflict> = decoded
             .iter()
-            .filter(|file| !hash_matches(ws.get(file.path), file.expected.flatten()))
+            .filter(|file| !hash_matches(ws.get(file.path), file.expected))
             .map(|file| FileConflict::new(file.path, ws.get(file.path)))
             .collect();
         if !conflicts.is_empty() {
@@ -872,28 +878,40 @@ fn hash_matches(current: Option<&FileEntry>, expected: Option<&str>) -> bool {
     }
 }
 
-/// The `400` for writes that left `expected_sha256` out, one clause per file
-/// saying what to send: the hash of a file that exists, `null` for one that
-/// does not.
+/// The `400` for writes that left `expected_sha256` out, one clause per file:
+/// for a file that exists, its current hash; for one that does not, `null`.
 ///
-/// It names the hash so a caller that meant to replace a file can resend at
-/// once, with no read in between — and so one that meant to create a file
-/// learns, before anything is written, that the path is taken.
-fn missing_expected_hash(files: &[(&str, Option<&FileEntry>)]) -> OutputStream {
-    let clauses: Vec<String> = files
+/// The hash is there so a caller can compare it with the one it read. Equal,
+/// it can resend at once; different, the file changed since it read it — or
+/// it never did — and it must read the file before replacing it, exactly as a
+/// `409` asks. The message says so: handing out the hash as "send this" would
+/// let a caller that never saw an edit write over it, which is what the
+/// guard exists to stop. A caller that meant to create a file learns, before
+/// anything is written, that the path is taken.
+///
+/// The workspace is read without `shared.workspace_manifest`: nothing is
+/// written, and the hash is a hint the caller checks against its own read —
+/// a write landing in between shows up as a `409` on the resend.
+async fn refuse_missing_expected_hash(ctx: &dyn Context, paths: &[&str]) -> OutputStream {
+    let ws = match workspace::load(ctx).await {
+        Ok(ws) => ws,
+        Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
+    };
+    let clauses: Vec<String> = paths
         .iter()
-        .map(|(path, current)| match current {
+        .map(|path| match ws.get(path) {
             Some(entry) => format!(
-                "{path:?} exists (sha256 {}, {} bytes): send that hash to replace it",
-                entry.sha256, entry.size
+                "{path:?} exists with sha256 {} — send it only if that is the hash you read, \
+                 otherwise read the file first",
+                entry.sha256
             ),
-            None => format!("{path:?} does not exist yet: send null to create it"),
+            None => format!("{path:?} does not exist yet — send null to create it"),
         })
         .collect();
     no_store_error(
         ErrorCode::InvalidArgument,
         &format!(
-            "`expected_sha256` is required on every write and was left out. {}. Nothing was \
+            "`expected_sha256` is required on every write and was left out: {}. Nothing was \
              written.",
             clauses.join("; ")
         ),

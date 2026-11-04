@@ -30,8 +30,9 @@ hash of a file it meant to replace — an agent replacing the seed's
 
 **What changes.** The key is required: the file's current hash to replace
 it, `null` to create it. Leaving it out is a `400` whose message names each
-file that left it out, with the hash to send if it exists or `null` if it
-does not; nothing is written. A stale hash, or `null` over an existing file,
+file that left it out, with its current hash (send it only if it is the hash
+you read) or as not there yet (send `null`); nothing is written. A stale
+hash, or `null` over an existing file,
 is still a `409` with the current hash. The Tool console pre-fills the key
 as `null`.
 

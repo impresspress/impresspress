@@ -1349,7 +1349,7 @@
                     ]
                   },
                   "expected_sha256": {
-                    "description": "Required. The SHA-256 the file has now — as `dev_list_files`,\n`dev_read_file` or your last write reported it — or `null` to say the\nfile does not exist yet. A seeded sandbox starts with files of its own\n(usually `site/index.html`), so look a path up in `dev_list_files`\nbefore writing `null` to it. A hash that no longer matches, or `null`\nfor a path that holds a file, is refused with `409` and the file's\ncurrent hash; nothing is written. Leaving the key out is a `400`\nwhose message gives, for each such file, the hash to send if it exists\nor `null` if it does not.",
+                    "description": "Required. The SHA-256 the file has now — as `dev_list_files`,\n`dev_read_file` or your last write reported it — or `null` to say the\nfile does not exist yet. A seeded sandbox starts with files of its own\n(usually `site/index.html`), so look a path up in `dev_list_files`\nbefore writing `null` to it. A hash that no longer matches, or `null`\nfor a path that holds a file, is refused with `409` and the file's\ncurrent hash; nothing is written. Leaving the key out is a `400`\nnaming each such file with its current hash, or saying it does not\nexist yet; send that hash only if it is the one you read.",
                     "type": [
                       "string",
                       "null"
@@ -1651,7 +1651,7 @@
                           ]
                         },
                         "expected_sha256": {
-                          "description": "Required. The SHA-256 the file has now — as `dev_list_files`,\n`dev_read_file` or your last write reported it — or `null` to say the\nfile does not exist yet. A seeded sandbox starts with files of its own\n(usually `site/index.html`), so look a path up in `dev_list_files`\nbefore writing `null` to it. A hash that no longer matches, or `null`\nfor a path that holds a file, is refused with `409` and the file's\ncurrent hash; nothing is written. Leaving the key out is a `400`\nwhose message gives, for each such file, the hash to send if it exists\nor `null` if it does not.",
+                          "description": "Required. The SHA-256 the file has now — as `dev_list_files`,\n`dev_read_file` or your last write reported it — or `null` to say the\nfile does not exist yet. A seeded sandbox starts with files of its own\n(usually `site/index.html`), so look a path up in `dev_list_files`\nbefore writing `null` to it. A hash that no longer matches, or `null`\nfor a path that holds a file, is refused with `409` and the file's\ncurrent hash; nothing is written. Leaving the key out is a `400`\nnaming each such file with its current hash, or saying it does not\nexist yet; send that hash only if it is the one you read.",
                           "type": [
                             "string",
                             "null"

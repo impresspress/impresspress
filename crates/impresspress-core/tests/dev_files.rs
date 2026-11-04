@@ -165,16 +165,19 @@ async fn refusal(out: wafer_run::OutputStream) -> (u16, String) {
     (response.status, message)
 }
 
-/// Leaving `expected_sha256` out is a malformed request, not a create — and
-/// the refusal says, per file, what to send instead.
+/// Leaving `expected_sha256` out is a malformed request, not a create: it is
+/// refused, nothing is written, and the refusal names each file with its
+/// current hash or as not there yet.
 ///
 /// It used to read as `null`: an agent that forgot the hash of a file it
 /// meant to replace (the seed's `site/index.html`) was taken to be creating
 /// it, and got a 409 for a create it never asked for. The key is required so
-/// every write says which of the two it means, and the 400 names the hash of
-/// each file that exists so the resend needs no read first.
+/// every write says which of the two it means. The hash in the refusal is for
+/// the caller to compare with the one it read — the message says to send it
+/// only then, so it is no way round the guard against overwriting an edit
+/// the caller never saw.
 #[tokio::test]
-async fn a_write_without_expected_sha256_is_refused_with_what_to_send() {
+async fn a_write_without_expected_sha256_is_refused_and_names_each_file() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     let sha = write_new(&ctx, "site/index.html", "<p>seed</p>").await;
 
@@ -189,7 +192,26 @@ async fn a_write_without_expected_sha256_is_refused_with_what_to_send() {
     .await;
     assert_eq!(status, 400, "{message}");
     assert!(
-        message.contains("\"site/a.css\" does not exist yet: send null"),
+        message.contains("\"site/a.css\" does not exist yet — send null"),
+        "{message}"
+    );
+
+    // Over a file that exists: refused, and the file keeps its content.
+    let (status, message) = refusal(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/index.html", "content": "<p>clobbered</p>"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, 400, "{message}");
+    assert!(
+        message.contains(&format!(
+            "\"site/index.html\" exists with sha256 {sha} — send it only if that is the hash \
+             you read, otherwise read the file first"
+        )),
         "{message}"
     );
 
@@ -210,16 +232,18 @@ async fn a_write_without_expected_sha256_is_refused_with_what_to_send() {
     .await;
     assert_eq!(status, 400, "{message}");
     assert!(
-        message.contains(&format!("\"site/index.html\" exists (sha256 {sha}")),
+        message.contains(&format!("\"site/index.html\" exists with sha256 {sha}")),
         "{message}"
     );
     assert!(
-        message.contains("\"site/c.css\" does not exist yet: send null"),
+        message.contains("\"site/c.css\" does not exist yet — send null"),
         "{message}"
     );
     assert!(!message.contains("site/b.css"), "{message}");
     assert!(!message.contains("  "), "a run of spaces in: {message:?}");
 
+    // Nothing was written by any of the three: the one file is the seed, as
+    // it was.
     let listing = output_json(ctx.dispatch_resolved(list_msg(Some("site/"))).await).await;
     let paths: Vec<&str> = listing["files"]
         .as_array()
@@ -232,6 +256,17 @@ async fn a_write_without_expected_sha256_is_refused_with_what_to_send() {
         vec!["site/index.html"],
         "nothing may be written: {listing}"
     );
+    let read = output_json(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/read",
+            json!({"path": "site/index.html"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(read["content"], "<p>seed</p>");
+    assert_eq!(read["sha256"], json!(sha));
 }
 
 #[tokio::test]
@@ -731,28 +766,6 @@ fn the_write_schema_and_the_handler_agree_on_what_is_required() {
         .map(|v| v.as_str().expect("field name"))
         .collect();
     assert_eq!(required, vec!["path", "content", "expected_sha256"]);
-}
-
-/// Forgetting `expected_sha256` can never clobber a file: over a file that
-/// exists the write is refused and the file keeps its content.
-#[tokio::test]
-async fn an_omitted_expected_hash_never_overwrites_a_file() {
-    let ctx = TestContext::with_dev(FakeControl::new()).await;
-    let sha = write_new(&ctx, "site/a.css", "a{}").await;
-
-    let out = dev_post(
-        &ctx,
-        "/b/dev/api/files/write",
-        json!({"path": "site/a.css", "content": "b{}"}),
-    )
-    .await;
-    assert_eq!(output_http_status(out).await, 400);
-
-    let read =
-        output_json(dev_post(&ctx, "/b/dev/api/files/read", json!({"path": "site/a.css"})).await)
-            .await;
-    assert_eq!(read["content"], "a{}");
-    assert_eq!(read["sha256"], json!(sha));
 }
 
 // ---------------------------------------------------------------------------

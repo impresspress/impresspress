@@ -285,8 +285,8 @@ pub struct FileWriteRequest {
     /// before writing `null` to it. A hash that no longer matches, or `null`
     /// for a path that holds a file, is refused with `409` and the file's
     /// current hash; nothing is written. Leaving the key out is a `400`
-    /// whose message gives, for each such file, the hash to send if it exists
-    /// or `null` if it does not.
+    /// naming each such file with its current hash, or saying it does not
+    /// exist yet; send that hash only if it is the one you read.
     //
     // Absent used to mean `null`, so a caller that forgot the hash of a file
     // it meant to replace was taken to be creating it and got a 409 for a

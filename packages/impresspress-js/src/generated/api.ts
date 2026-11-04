@@ -2470,8 +2470,8 @@ export interface paths {
                          *     before writing `null` to it. A hash that no longer matches, or `null`
                          *     for a path that holds a file, is refused with `409` and the file's
                          *     current hash; nothing is written. Leaving the key out is a `400`
-                         *     whose message gives, for each such file, the hash to send if it exists
-                         *     or `null` if it does not.
+                         *     naming each such file with its current hash, or saying it does not
+                         *     exist yet; send that hash only if it is the one you read.
                          */
                         expected_sha256: string | null;
                         /** @description Workspace-relative path under `site/` or `blocks/<name>/`. */
@@ -2611,8 +2611,8 @@ export interface paths {
                              *     before writing `null` to it. A hash that no longer matches, or `null`
                              *     for a path that holds a file, is refused with `409` and the file's
                              *     current hash; nothing is written. Leaving the key out is a `400`
-                             *     whose message gives, for each such file, the hash to send if it exists
-                             *     or `null` if it does not.
+                             *     naming each such file with its current hash, or saying it does not
+                             *     exist yet; send that hash only if it is the one you read.
                              */
                             expected_sha256: string | null;
                             /** @description Workspace-relative path under `site/` or `blocks/<name>/`. */
