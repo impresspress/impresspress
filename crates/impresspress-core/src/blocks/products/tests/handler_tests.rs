@@ -1928,7 +1928,7 @@ impl wafer_run::context::Context for RaceTheRestoreWrite {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+    fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
         self.inner.registered_blocks()
     }
 
@@ -5306,7 +5306,7 @@ impl wafer_run::context::Context for DeleteBetweenProductReads {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+    fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
         self.inner.registered_blocks()
     }
 

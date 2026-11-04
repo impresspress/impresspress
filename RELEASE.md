@@ -19,10 +19,10 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
-### A cold build reads each block's declaration once; wafer-run e9646371
+### A cold build reads each block's declaration once and copies none; wafer-run #478, #479, #482
 
-**What changes.** The wafer-run pin moves from `54683c50` to `e9646371`
-(wafer-run#478, #479).
+**What changes.** The wafer-run pin moves from `54683c50` to the merge of
+wafer-run#482, which carries #478 and #479.
 
 - A runtime reads each block's declaration (`BlockInfo`) once, when the block
   is registered, and every later pass uses that copy (#478). Before, it
@@ -34,6 +34,13 @@ what it did happens on every native boot.
   Worker's block set, built and booted natively in release: 129 ms → 18 ms.
   The same build as a Worker with every block, on local workerd (Miniflare),
   cold isolate's first request: 245–263 ms → 86–88 ms (medians).
+- No declaration is copied any more (#482). The runtime lends the registered
+  declarations as `Arc`s, and the router, the request log, the enablement
+  gate and the discovery documents read them as they are. The discovery
+  documents (`/openapi.json`, the agent card, `/b/webmcp/manifest.json`)
+  used to copy every enabled block's declaration on each request to drop
+  the ones they do not publish; they now tell the generators which
+  endpoints are unpublished. The documents are unchanged.
 - A name is a block or an alias, never both, and both are fixed once the
   runtime is sealed (#479). impresspress registers every block and alias
   before it seals, so a deployment sees no difference.
@@ -45,17 +52,29 @@ what it did happens on every native boot.
   gone: an exporter needs the registered blocks. Call
   `ImpresspressBuilder::build_with_plan_exporter()`, which builds the runtime
   and answers it with its exporter (error: `PreparedBuildError`).
-- `apply_prepared_plan` no longer compares the plan's application block
-  inventory; `build()` does, once it has registered the blocks, and refuses a
-  mismatch with `RuntimeError::Config`.
+- `apply_prepared_plan` answers an `AppliedPlanBuilder`, which builds only
+  through its `build_with_plan_exporter()`. That compares the application
+  blocks it registered with the plan's and refuses a mismatch with
+  `PreparedPlanError::StructureMismatch`. Inject the services before
+  importing the plan.
+- `Context::registered_blocks()` returns `&[Arc<BlockInfo>]`, and
+  `Wafer::block_infos()` returns `Vec<Arc<BlockInfo>>`. A `Context`
+  implementation returns the `Arc`s; field access reads through them as
+  before.
+- `wafer_core::discovery`'s generators take `&[B]` with
+  `B: Borrow<BlockInfo>`, and their `effective_auth` returns
+  `Option<AuthLevel>` (`None`: the endpoint is not published). Wrap a level as
+  `Some(ep.auth)`.
+- `routing::routes_config`, `routing::admits_page`, `routing::publish_gate`,
+  `routing::route_to_block`, `pipeline::handle_request` and
+  `features::is_enabled` are generic over `B: Borrow<BlockInfo>`; an empty
+  `&[]` names its element type. `ImpresspressRouterBlock`'s constructors and
+  `BodyLimitBlock::new` take `impl Into<Arc<[Arc<BlockInfo>]>>`, and
+  `blocks::register_feature_blocks` answers the names it registered.
 - A block or alias an embedder registers after `Wafer::seal()` is refused
   (`RuntimeError::RegisteredAfterSeal`, `AliasError::AfterSeal`) where it
   used to be silently unreachable; impresspress's own hooks, including
-  `register_post_build`, run before the seal. `Wafer::block_infos()` returns
-  `Vec<Arc<BlockInfo>>`.
-- `ImpresspressRouterBlock`'s constructors and `BodyLimitBlock::new` take
-  `impl Into<Arc<[BlockInfo]>>` (a `Vec<BlockInfo>` still works), and
-  `blocks::register_feature_blocks` answers the names it registered.
+  `register_post_build`, run before the seal.
 
 No stored data changes.
 

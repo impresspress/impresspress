@@ -1793,7 +1793,7 @@ mod test_support {
             self.inner.is_cancelled()
         }
 
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.inner.registered_blocks()
         }
 

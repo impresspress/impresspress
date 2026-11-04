@@ -3,7 +3,7 @@
 //! Both Cloudflare and native adapters call `handle_request()` after
 //! converting their platform-specific HTTP types into a WAFER Message.
 
-use std::cell::Cell;
+use std::{borrow::Borrow, cell::Cell};
 
 use wafer_block::{http_codec, stream::StreamEvent};
 use wafer_core::clients::config as config_client;
@@ -50,40 +50,38 @@ fn caller_auth_level(msg: &Message) -> AuthLevel {
     AuthLevel::Authenticated
 }
 
-/// The registered blocks every discovery projection (`/openapi.json`, the
-/// agent card and the WebMCP manifest) is generated from, in this runtime.
+/// How every discovery projection (`/openapi.json`, the agent card and the
+/// WebMCP manifest) publishes `ep` of `block` in this runtime: at the level
+/// the router enforces on it ([`routing::effective_access`]), or not at all.
 ///
 /// `block_infos` is every REGISTERED block, but `route_to_block` 404s any
 /// block the toggle has turned off (routing.rs's feature gate, backed by the
 /// live `block_settings` row). Describing a disabled block's endpoints would
-/// hand the reader routes that 404 on every call, so the documents are built
-/// from the enabled subset only — gated under the same name the router gates
+/// hand the reader routes that 404 on every call, so such a block's
+/// endpoints are not published — gated under the same name the router gates
 /// with (`feature_gate_name`; the inspector's `BlockInfo` name and its
 /// route's `block` name differ).
 ///
-/// In the browser runtime every endpoint declared `server_only` is dropped
-/// as well: it needs something only a server holds and can never succeed
-/// there. Both discovery branches call this one function, so the three
-/// documents agree.
-fn discoverable_infos(
+/// In the browser runtime every endpoint declared `server_only` is not
+/// published either: it needs something only a server holds and can never
+/// succeed there. Both discovery branches use this one resolver, so the
+/// three documents agree. The generators leave an unpublished endpoint out
+/// entirely (wafer-run#482), so no declaration is copied to filter it.
+fn published_access<'a, B: Borrow<BlockInfo>>(
     ctx: &dyn Context,
-    block_infos: &[BlockInfo],
-    features: &dyn FeatureConfig,
-) -> Vec<BlockInfo> {
+    block_infos: &'a [B],
+    features: &'a dyn FeatureConfig,
+    extra_routes: &'a [ExtraRoute],
+) -> impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel> + Copy + 'a {
     let browser = crate::runtime_kind::is_browser(ctx);
-    block_infos
-        .iter()
-        .filter(|b| {
-            crate::features::is_enabled(features, block_infos, routing::feature_gate_name(&b.name))
-        })
-        .cloned()
-        .map(|mut info| {
-            if browser {
-                info.endpoints.retain(|ep| !ep.server_only);
-            }
-            info
-        })
-        .collect()
+    move |block: &BlockInfo, ep: &BlockEndpoint| {
+        let served = crate::features::is_enabled(
+            features,
+            block_infos,
+            routing::feature_gate_name(&block.name),
+        ) && !(browser && ep.server_only);
+        served.then(|| routing::effective_access(block, ep, extra_routes))
+    }
 }
 
 /// The 413 a request whose body exceeded
@@ -139,10 +137,10 @@ pub fn payload_too_large_error() -> OutputStream {
 /// the 413, the duration — is what a routed refusal records, and
 /// `block_infos` / `extra_routes` are what keep the path out of the
 /// `<unmatched>` collapse.
-pub async fn refuse_oversized_body(
+pub async fn refuse_oversized_body<B: Borrow<BlockInfo>>(
     ctx: &dyn Context,
     msg: &Message,
-    block_infos: &[BlockInfo],
+    block_infos: &[B],
     extra_routes: &[ExtraRoute],
 ) -> OutputStream {
     write_request_log(
@@ -169,11 +167,11 @@ pub async fn refuse_oversized_body(
 ///
 /// The row carries no user id: the credential that would have named one is
 /// exactly what could not be checked.
-async fn refuse_unchecked_credential(
+async fn refuse_unchecked_credential<B: Borrow<BlockInfo>>(
     ctx: &dyn Context,
     msg: &Message,
     error: WaferError,
-    block_infos: &[BlockInfo],
+    block_infos: &[B],
     extra_routes: &[ExtraRoute],
 ) -> OutputStream {
     write_request_log(
@@ -224,7 +222,7 @@ async fn refuse_unchecked_credential(
     reason = "the single request-pipeline entry point: each argument is a distinct \
               piece of request or runtime context, none derivable here from another"
 )]
-pub async fn handle_request(
+pub async fn handle_request<B: Borrow<BlockInfo>>(
     ctx: &dyn Context,
     mut msg: Message,
     input: InputStream,
@@ -232,7 +230,7 @@ pub async fn handle_request(
     jwt_secret: &str,
     cookie_authenticated: bool,
     features: &dyn FeatureConfig,
-    block_infos: &[BlockInfo],
+    block_infos: &[B],
     extra_routes: &[ExtraRoute],
 ) -> OutputStream {
     // 0. (Discovery documents moved below step 2 — they are filtered by the
@@ -333,14 +331,11 @@ pub async fn handle_request(
         // each operation's OpenAPI `security` requirement, so a Public
         // endpoint the router gates as Admin is published with `bearerAuth`.
         let caller = caller_auth_level(&msg);
-        let discoverable = discoverable_infos(ctx, block_infos, features);
-        let effective_auth = |block: &BlockInfo, ep: &BlockEndpoint| {
-            routing::effective_access(block, ep, extra_routes)
-        };
+        let effective_auth = published_access(ctx, block_infos, features, extra_routes);
 
         let body = if is_openapi {
             wafer_core::discovery::generate_openapi(
-                &discoverable,
+                block_infos,
                 caller,
                 effective_auth,
                 &project_name,
@@ -349,7 +344,7 @@ pub async fn handle_request(
             )
         } else {
             wafer_core::discovery::generate_agent_card(
-                &discoverable,
+                block_infos,
                 caller,
                 effective_auth,
                 &project_name,
@@ -392,7 +387,6 @@ pub async fn handle_request(
     // identity, like the discovery documents above.
     if path == "/b/webmcp/manifest.json" {
         let caller = caller_auth_level(&msg);
-        let discoverable = discoverable_infos(ctx, block_infos, features);
 
         // MUST resolve the auth ceiling with `routing::effective_access`, not
         // the plain `ep.auth`. This router admits on `max(prefix_tier,
@@ -427,10 +421,11 @@ pub async fn handle_request(
         // manifest content emitted here is unaffected either way: `_report`
         // runs the identical generation and only changes where the refusal
         // list goes. Refusals discarded on purpose — see the comment above.
-        let (body, _refused) =
-            wafer_core::discovery::generate_webmcp_report(&discoverable, caller, |block, ep| {
-                routing::effective_access(block, ep, extra_routes)
-            });
+        let (body, _refused) = wafer_core::discovery::generate_webmcp_report(
+            block_infos,
+            caller,
+            published_access(ctx, block_infos, features, extra_routes),
+        );
 
         // Per-session by construction: a shared cache serving one visitor's
         // manifest to another would leak the privileged tool surface.
@@ -683,9 +678,8 @@ fn template_vars(template: &str) -> impl Iterator<Item = &str> {
 /// its path is covered the day it is declared, with nothing to remember to add
 /// here. `exactly_one_declared_route_carries_a_capability_in_its_path` is
 /// where a reviewer is told that the set changed.
-fn capability_path_templates(block_infos: &[BlockInfo]) -> Vec<&str> {
-    block_infos
-        .iter()
+fn capability_path_templates<B: Borrow<BlockInfo>>(block_infos: &[B]) -> Vec<&str> {
+    crate::declarations::declared(block_infos)
         .flat_map(|info| info.endpoints.iter())
         .map(|ep| ep.path.as_str())
         .filter(|template| template_vars(template).any(path_var_is_capability))
@@ -741,7 +735,10 @@ fn normalize_for_match(path: &str) -> String {
 /// segments. Those change how the path splits rather than how a segment reads,
 /// and no adapter this runtime ships hands them through — but a path shaped
 /// that way is matched by no template and so is logged as it arrived.
-fn redact_capability_path_vars(path: &str, block_infos: &[BlockInfo]) -> Option<String> {
+fn redact_capability_path_vars<B: Borrow<BlockInfo>>(
+    path: &str,
+    block_infos: &[B],
+) -> Option<String> {
     let normalized = normalize_for_match(path);
     for template in capability_path_templates(block_infos) {
         if endpoint_match::match_template(template, &normalized).is_none() {
@@ -830,9 +827,9 @@ pub const UNMATCHED_PATH_LABEL: &str = "<unmatched>";
 /// Consulting the prefixes would keep exactly those rows — the unbounded
 /// attacker-minted key space this collapse exists to close. A real endpoint
 /// under the same prefix matches its own template and is kept.
-fn resembles_a_declared_route(
+fn resembles_a_declared_route<B: Borrow<BlockInfo>>(
     path: &str,
-    block_infos: &[BlockInfo],
+    block_infos: &[B],
     extra_routes: &[ExtraRoute],
 ) -> bool {
     if path == "/" {
@@ -845,8 +842,7 @@ fn resembles_a_declared_route(
     {
         return true;
     }
-    block_infos
-        .iter()
+    crate::declarations::declared(block_infos)
         .flat_map(|info| info.endpoints.iter())
         .any(|endpoint| endpoint_match::match_template(&endpoint.path, &normalized).is_some())
 }
@@ -1007,10 +1003,10 @@ pub(crate) fn reset_request_log_budget_for_test() {
 /// per-isolate ceiling ([`claim_request_log_budget`]). Only then is the path
 /// rewritten — credential redaction, then the unmatched-path collapse — so a
 /// row that is never stored costs no template matching at all.
-async fn write_request_log(
+async fn write_request_log<B: Borrow<BlockInfo>>(
     ctx: &dyn Context,
     row: NewRequestLog<'_>,
-    block_infos: &[BlockInfo],
+    block_infos: &[B],
     extra_routes: &[ExtraRoute],
 ) {
     if row.path.starts_with(routing::STATIC_PREFIX) || row.path == "/health" {
@@ -2811,7 +2807,7 @@ mod discovery_tests {
         let (_, refused) = wafer_core::discovery::generate_webmcp_report(
             &infos,
             AuthLevel::Admin,
-            |_block, ep| ep.auth,
+            |_block, ep| Some(ep.auth),
         );
         assert_eq!(
             refused.len(),
@@ -3148,7 +3144,7 @@ mod streaming_audit_tests {
     }
 
     async fn drive(ctx: &TestContext, path: &str, routes: &[ExtraRoute]) {
-        let out = handle_request(
+        let out = handle_request::<BlockInfo>(
             ctx,
             anon_msg("retrieve", path),
             InputStream::empty(),
@@ -3256,7 +3252,7 @@ mod streaming_audit_tests {
             Arc::new(SseUntilCancelled(std::sync::Mutex::new(Some(cancelled_tx)))),
         );
         let routes = route("/x/sse", "test/sse-hang");
-        let mut out = handle_request(
+        let mut out = handle_request::<BlockInfo>(
             &ctx,
             anon_msg("retrieve", "/x/sse"),
             InputStream::empty(),
@@ -3783,7 +3779,7 @@ mod request_log_policy_tests {
 
     /// [`drive`] with a caller-built request, for a test that needs headers.
     async fn drive_msg(ctx: &TestContext, msg: Message) {
-        let out = handle_request(
+        let out = handle_request::<BlockInfo>(
             ctx,
             msg,
             InputStream::empty(),
@@ -4260,7 +4256,7 @@ mod oversized_body_tests {
     }
 
     async fn drive(ctx: &TestContext, msg: Message) -> OutputStream {
-        handle_request(
+        handle_request::<BlockInfo>(
             ctx,
             msg,
             InputStream::empty(),

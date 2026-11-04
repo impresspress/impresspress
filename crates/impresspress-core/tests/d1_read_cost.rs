@@ -347,19 +347,18 @@ async fn try_build(
         .block_settings(settings)
         .config_source(source.clone())
         .variables_snapshot(variables.clone());
-    let builder = match prepared {
+    let block_settings = builder.block_settings_handle();
+    let (wafer, exporter) = match prepared {
         Some(plan) => {
             let (sha, lock, assets) = identity();
             builder
                 .apply_prepared_plan(plan, APP_ID, &sha, &lock, &assets)
                 .expect("the plan applies")
+                .build_with_plan_exporter()
         }
-        None => builder,
-    };
-    let block_settings = builder.block_settings_handle();
-    let (wafer, exporter) = builder
-        .build_with_plan_exporter()
-        .expect("the runtime builds");
+        None => builder.build_with_plan_exporter(),
+    }
+    .expect("the runtime builds");
     Ok(Built {
         wafer,
         exporter,
@@ -2306,6 +2305,37 @@ async fn a_failed_gate_costs_a_sliver_of_a_cold_build() {
         gated * 50 < build,
         "a failed gate took {gated:?}, not under 2 % of a cold prepared build's {build:?}"
     );
+}
+
+/// **A request-path build constructs no block set.** A cold isolate's build
+/// and boot — the prepared one and the database one, from the variables gate
+/// through every block's `Init` — read each block's declaration once, at its
+/// registration (wafer-run#478), and every later reader takes the registered
+/// copies. `blocks::block_set_sweeps` counts `blocks::all_block_infos()`,
+/// which constructs every feature block again: called directly or through a
+/// wrapper (`block_enabled_defaults`, the declared-key memo), it would show
+/// here. Before this pin a prepared build swept twice: the plan import and
+/// the plan exporter.
+#[tokio::test]
+async fn a_request_path_build_constructs_no_block_set() {
+    let _generation = GENERATION.lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("d1.sqlite3");
+    let ledger = Arc::new(Ledger::default());
+    let plan = provision(&cold(&path, &ledger)).await;
+
+    for build_kind in [RequestBuild::Prepared, RequestBuild::Database] {
+        let db = cold(&path, &ledger);
+        let before = impresspress_core::blocks::block_set_sweeps();
+        let (wafer, _, _) = boot_request(&db, build_kind, &plan, &HashMap::new()).await;
+        assert_eq!(
+            impresspress_core::blocks::block_set_sweeps(),
+            before,
+            "a {build_kind:?} request build constructed the feature blocks again"
+        );
+        drop(wafer);
+    }
+    ledger.take();
 }
 
 /// The blocks of `wafer` that declare config keys, by registered name.

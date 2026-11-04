@@ -247,7 +247,7 @@ impl Context for MessagesWriteFails {
     fn is_cancelled(&self) -> bool {
         self.inner.is_cancelled()
     }
-    fn registered_blocks(&self) -> &[BlockInfo] {
+    fn registered_blocks(&self) -> &[std::sync::Arc<BlockInfo>] {
         self.inner.registered_blocks()
     }
     fn caller_id(&self) -> Option<&str> {

@@ -273,7 +273,9 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
 /// — there is no tier this route's mount could raise the ceiling to that the
 /// declaration does not already claim. See `pipeline.rs`'s
 /// `/b/webmcp/manifest.json` handler for the case where that is not true.
-fn generate(blocks: &[BlockInfo]) -> (serde_json::Value, Vec<WebMcpRefusalReport>) {
+fn generate<B: std::borrow::Borrow<BlockInfo>>(
+    blocks: &[B],
+) -> (serde_json::Value, Vec<WebMcpRefusalReport>) {
     let selections: Vec<ToolSelection> = SELECTIONS
         .iter()
         .map(|(block, method, path, name, description)| ToolSelection {
@@ -284,7 +286,12 @@ fn generate(blocks: &[BlockInfo]) -> (serde_json::Value, Vec<WebMcpRefusalReport
             description: (*description).into(),
         })
         .collect();
-    generate_webmcp_selected(blocks, AuthLevel::Admin, |_b, ep| ep.auth, &selections)
+    generate_webmcp_selected(
+        blocks,
+        AuthLevel::Admin,
+        |_b, ep| Some(ep.auth),
+        &selections,
+    )
 }
 
 /// Serve the manifest: [`SELECTIONS`] projected against the runtime's
@@ -317,8 +324,8 @@ pub async fn handle(ctx: &dyn Context) -> OutputStream {
 /// serves [`handle`], and every `SELECTIONS` row would refuse for the same
 /// uninteresting reason. Returning early keeps those 21 lines out of the
 /// logs of every runtime that simply is not a sandbox.
-pub(crate) fn log_selection_refusals(blocks: &[BlockInfo]) {
-    if !blocks.iter().any(|b| b.name == super::BLOCK_NAME) {
+pub(crate) fn log_selection_refusals<B: std::borrow::Borrow<BlockInfo>>(blocks: &[B]) {
+    if !crate::declarations::declared(blocks).any(|b| b.name == super::BLOCK_NAME) {
         return;
     }
     let (_doc, refused) = generate(blocks);

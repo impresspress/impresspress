@@ -420,7 +420,7 @@ impl Context for MessagesRefused {
     fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+    fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
         self.0.registered_blocks()
     }
     fn config_get(&self, key: &str) -> Option<&str> {
@@ -476,7 +476,7 @@ async fn refused_page_reads_are_the_403_page() {
         fn is_cancelled(&self) -> bool {
             self.0.is_cancelled()
         }
-        fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
             self.0.registered_blocks()
         }
         fn config_get(&self, key: &str) -> Option<&str> {
@@ -551,7 +551,7 @@ impl Context for ThreadListUnreadable {
     fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+    fn registered_blocks(&self) -> &[std::sync::Arc<wafer_run::BlockInfo>] {
         self.0.registered_blocks()
     }
     fn config_get(&self, key: &str) -> Option<&str> {

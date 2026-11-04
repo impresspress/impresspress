@@ -886,7 +886,7 @@ fn reject_secret_values(value: &serde_json::Value, path: &str) -> Result<(), Pre
     Ok(())
 }
 
-fn canonicalize_json(value: &mut serde_json::Value) {
+pub(crate) fn canonicalize_json(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             for child in map.values_mut() {

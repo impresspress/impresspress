@@ -75,8 +75,8 @@ pub mod vector;
 /// - [`all_block_infos`] — `.info()` over every entry (config-var discovery,
 ///   inspector route granularity, the route/auth policy table);
 /// - [`register_feature_blocks`] — `register_block(name, Arc::new(Ctor::new()))`
-///   over every entry, called from `ImpresspressBuilder::build` on **both** native
-///   and wasm32. It answers the names it registered, which start the prepared
+///   over every entry, called from `ImpresspressBuilder::register` (behind
+///   `build`) on **both** native and wasm32. It answers the names it registered, which start the prepared
 ///   plan's application block inventory: a runtime build reads that inventory
 ///   from its own registrations, never from [`all_block_infos`].
 ///
@@ -111,6 +111,8 @@ macro_rules! feature_block_manifest {
         /// policy, before block registration runs.
         pub fn all_block_infos() -> Vec<wafer_run::BlockInfo> {
             use wafer_run::Block as _;
+            #[cfg(any(test, feature = "test-support"))]
+            BLOCK_SET_SWEEPS.with(|sweeps| sweeps.set(sweeps.get() + 1));
             let mut infos: Vec<wafer_run::BlockInfo> = Vec::new();
             $(
                 $(#[$cfg])?
@@ -149,7 +151,8 @@ macro_rules! feature_block_manifest {
 
         /// Register every zero-arg impresspress feature block on the runtime.
         ///
-        /// Called from `ImpresspressBuilder::build` on **both** native and wasm32 —
+        /// Called from `ImpresspressBuilder::register` (behind `build` and
+        /// `build_with_plan_exporter`) on **both** native and wasm32 —
         /// there is no longer a native (linkme) / wasm32 (manual list) split.
         /// The `impresspress/llm`, `wafer-run/auth` and
         /// `impresspress/transformers-embed` blocks are registered explicitly by
@@ -197,6 +200,30 @@ feature_block_manifest! {
     vector::VectorBlock,
     #[cfg(feature = "block-signal")]
     signal::SignalBlock,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static BLOCK_SET_SWEEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times [`all_block_infos`] has constructed the block set on this
+/// thread. Test support only.
+///
+/// A runtime build reads each block's declaration once, at registration
+/// (wafer-run#478), and every later reader takes the registered copies. A
+/// sweep is `all_block_infos()` constructing every feature block again —
+/// directly or through a wrapper such as [`block_enabled_defaults`] or the
+/// declared-key memo in `config_vars` — and the request-path tests assert
+/// that a build adds none. Per thread, so tests running in parallel do not
+/// count each other's sweeps; a build and boot run on the test's own thread.
+///
+/// It counts the block set, not single reads: a caller that constructs one
+/// block and calls its `info()` is not counted, which is what the counting
+/// consumer block in `builder::prepared`'s tests is for.
+#[cfg(any(test, feature = "test-support"))]
+pub fn block_set_sweeps() -> usize {
+    BLOCK_SET_SWEEPS.with(std::cell::Cell::get)
 }
 
 /// Bytes for a block-owned entry of the shared `/b/static/` asset manifest,

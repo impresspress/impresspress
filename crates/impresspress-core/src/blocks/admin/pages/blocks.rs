@@ -67,7 +67,9 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     // `registered_blocks` is already deterministically ordered by the runtime.
-    let mut all_blocks: Vec<wafer_run::BlockInfo> = ctx.registered_blocks().to_vec();
+    // The runtime's own declarations, shared, not copied.
+    let mut all_blocks: Vec<std::sync::Arc<wafer_run::BlockInfo>> =
+        ctx.registered_blocks().to_vec();
 
     // Load block enabled/disabled state from block_settings table. Collect
     // into a `BTreeMap` so the downstream iteration order is stable across
@@ -114,13 +116,13 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             } else {
                 "(disabled \u{2014} restart to load)"
             };
-            all_blocks.push(
+            all_blocks.push(std::sync::Arc::new(
                 wafer_run::BlockInfo::new(name, "0.0.1", "http.handler", summary)
                     .instance_mode(wafer_run::InstanceMode::Singleton)
                     .category(wafer_run::BlockCategory::Feature)
                     .can_disable(true)
                     .default_enabled(false),
-            );
+            ));
         }
     }
     // Sort the combined list deterministically by block name. The runtime

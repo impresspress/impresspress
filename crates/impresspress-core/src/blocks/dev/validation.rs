@@ -424,10 +424,11 @@ pub fn agent_tool_names<'a>(infos: impl IntoIterator<Item = &'a BlockInfo>) -> B
 /// what the generation it belongs to actually accepted — by
 /// `super::blocks_api::claimed_tool_names` on the staging path and by
 /// `super::seed::import` on the seed path.
-pub fn builtin_agent_tool_names(registered: &[BlockInfo]) -> BTreeSet<String> {
+pub fn builtin_agent_tool_names<B: std::borrow::Borrow<BlockInfo>>(
+    registered: &[B],
+) -> BTreeSet<String> {
     agent_tool_names(
-        registered
-            .iter()
+        crate::declarations::declared(registered)
             .filter(|info| !info.name.starts_with(BLOCK_NAMESPACE)),
     )
 }

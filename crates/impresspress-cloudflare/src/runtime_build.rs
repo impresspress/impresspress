@@ -421,28 +421,30 @@ where
 
             // 5. Consumer registers its blocks.
             let builder = register_blocks(builder)?;
-            let builder = match (prepared_plan, prepared_identity.as_ref()) {
-                (Some(plan), Some(identity)) => builder.apply_prepared_plan(
-                    plan,
-                    &identity.application_id,
-                    &identity.application_build_sha256,
-                    &identity.dependency_lock,
-                    &identity.release_assets,
-                )?,
-                (None, None) => builder,
-                _ => return Err("prepared runtime identity invariant violated".into()),
-            };
             let block_settings_handle = builder.block_settings_handle();
 
-            // 6. Build runtime. `build()` installs the synchronous
-            // `ctx.config_get` snapshot that `RuntimeConfig::install`
-            // handed over alongside the service map, so blocks can read
-            // embedder-provided keys with no I/O. That is immutable
-            // configuration data, not a request-derived service handle;
-            // Worker-version identity still forces a rebuild when it
-            // changes. The plan exporter's block inventory is read from
-            // the declarations this registration read, not rebuilt.
-            let (mut wafer, plan_exporter) = builder.build_with_plan_exporter()?;
+            // 6. Build runtime — through the imported plan when there is one,
+            // which also holds the registered application blocks to the
+            // plan's. `build()` installs the synchronous `ctx.config_get`
+            // snapshot that `RuntimeConfig::install` handed over alongside the
+            // service map, so blocks can read embedder-provided keys with no
+            // I/O. That is immutable configuration data, not a request-derived
+            // service handle; Worker-version identity still forces a rebuild
+            // when it changes. The plan exporter's block inventory is read
+            // from the declarations this registration read, not rebuilt.
+            let (mut wafer, plan_exporter) = match (prepared_plan, prepared_identity.as_ref()) {
+                (Some(plan), Some(identity)) => builder
+                    .apply_prepared_plan(
+                        plan,
+                        &identity.application_id,
+                        &identity.application_build_sha256,
+                        &identity.dependency_lock,
+                        &identity.release_assets,
+                    )?
+                    .build_with_plan_exporter()?,
+                (None, None) => builder.build_with_plan_exporter()?,
+                _ => return Err("prepared runtime identity invariant violated".into()),
+            };
 
             // 6a. The consumer receives the scoped storage proxy, never the
             // request's concrete R2 Bucket. A block may safely retain this

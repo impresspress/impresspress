@@ -85,10 +85,9 @@ pub(super) struct Registered {
 impl ImpresspressBuilder {
     /// Register every block, flow and config on a new runtime, ready to seal.
     ///
-    /// A builder that imported a prepared plan ([`Self::apply_prepared_plan`])
-    /// is refused here if the application blocks it registered differ from
-    /// the plan's: a target with a different feature set cannot silently
-    /// accept the artifact.
+    /// A builder that imported a prepared plan builds through
+    /// [`super::AppliedPlanBuilder::build_with_plan_exporter`] instead, which
+    /// also holds the registered application blocks to the plan's.
     pub fn build(self) -> Result<Wafer, RuntimeError> {
         self.register().map(|registered| registered.wafer)
     }
@@ -97,14 +96,27 @@ impl ImpresspressBuilder {
     /// prepared plan describes, so the exporter reads it from this runtime's
     /// registrations instead of constructing every block again.
     ///
-    /// The application blocks are the ones this function registers on the
-    /// application's behalf: the feature-block manifest,
-    /// `impresspress/fastembed`, `impresspress/admin`, `impresspress/llm` and
-    /// the consumer's [`Self::extra_block`]s. Service, middleware, router and
-    /// framework-auth blocks are the runtime's, not the application's. Each
+    /// The application blocks are the blocks this build compiles in for the
+    /// application, whose implementations a prepared plan pins so that a
+    /// Worker compiled differently cannot hydrate it: the feature-block
+    /// manifest, `impresspress/fastembed`, `impresspress/admin`,
+    /// `impresspress/llm`, and the consumer's [`Self::extra_block`]s. Each
     /// implementation comes from the `BlockInfo` the runtime read once, at
     /// registration (wafer-run#478), so taking the inventory reads no block's
     /// `info()`.
+    ///
+    /// `register` also registers blocks that are not application blocks,
+    /// and the inventory leaves them out:
+    ///
+    /// - the runtime's own service, middleware, router, body-limit and
+    ///   framework-auth blocks, which every build of this crate registers the
+    ///   same way;
+    /// - `impresspress/transformers-embed`, registered over an embedding
+    ///   service the browser injects (`Self::embedding_service`), and the
+    ///   blocks discovered under the working directory's `blocks/` (the
+    ///   native `wasm` feature). Both depend on what the host supplies at
+    ///   build time rather than on the compile, and neither exists on
+    ///   Cloudflare, the only target that prepares and hydrates plans.
     pub(super) fn register(self) -> Result<Registered, RuntimeError> {
         // 1. Validate required services
         let database = self
@@ -414,18 +426,10 @@ impl ImpresspressBuilder {
         }
 
         // 8. The application block inventory, from the declarations the
-        //    runtime read at registration, checked against an imported plan's.
+        //    runtime read at registration.
         let registered_infos = wafer.block_infos();
         let application_blocks =
             super::prepared::application_inventory(&registered_infos, &application);
-        if let Some(expected) = &self.prepared_application_blocks {
-            if *expected != application_blocks {
-                return Err(RuntimeError::Config(
-                    "compiled application block inventory does not match the prepared plan"
-                        .to_string(),
-                ));
-            }
-        }
 
         // 10. Build and register the impresspress router.
         //     Collect BlockInfo from the registry AFTER all blocks are registered
@@ -436,16 +440,12 @@ impl ImpresspressBuilder {
         // sees post-build mutations via the same RwLock. See the doc comment
         // on `block_settings_handle()` for why this matters.
         let feature_config: Arc<dyn FeatureConfig> = self.block_settings.clone();
-        // One copy of the registration-time declarations, shared by the
-        // router and the body-limit block below and read by the boot-time
-        // passes in between. The runtime lends them as `Arc<BlockInfo>`;
-        // the routing and discovery functions read `&[BlockInfo]`, so this is
-        // the build's one deep copy (about 1 ms native for the Worker's block
-        // set), and no block's `info()` runs again.
-        let block_infos: Arc<[wafer_run::BlockInfo]> = registered_infos
-            .iter()
-            .map(|info| wafer_run::BlockInfo::clone(info))
-            .collect();
+        // The registration-time declarations, as the runtime lends them: one
+        // list of `Arc`s, shared by the router and the body-limit block below
+        // and read by the boot-time passes in between. Every reader takes the
+        // `Arc`s as they are (`crate::declarations`), so no declaration is
+        // copied and no block's `info()` runs again.
+        let block_infos: Arc<[Arc<wafer_run::BlockInfo>]> = registered_infos.into();
         let routes_cfg = crate::routing::routes_config(&block_infos);
 
         // WebMCP refusals are *mostly* structural — a defect in a block's
@@ -516,7 +516,7 @@ impl ImpresspressBuilder {
         let (_, webmcp_refusals) = wafer_core::discovery::generate_webmcp_report(
             &block_infos,
             wafer_run::AuthLevel::Admin,
-            |_block, ep| ep.auth,
+            |_block, ep| Some(ep.auth),
         );
         for refusal in &webmcp_refusals {
             tracing::warn!(

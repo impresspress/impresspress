@@ -120,14 +120,18 @@ pub(super) fn empty_wafer() -> wafer_run::Wafer {
 ///
 /// The same goes for its grant declarations: a grant `Wafer::seal` would
 /// refuse boot over is refused here ([`refuse_rejected_grants`]).
-pub(super) fn admit(name: &str, block: Arc<dyn Block>) -> wafer_run::BlockInfo {
+pub(super) fn admit(name: &str, block: Arc<dyn Block>) -> Arc<wafer_run::BlockInfo> {
     let mut wafer = empty_wafer();
-    let info = block.info();
     wafer
         .register_block(name, block)
         .unwrap_or_else(|e| panic!("the runtime refuses to register {name}: {e}"));
     refuse_rejected_grants(&wafer);
-    info
+    // The declaration the registration read, as the runtime lends it.
+    wafer
+        .block_infos()
+        .into_iter()
+        .find(|info| info.name == name)
+        .unwrap_or_else(|| panic!("{name} is registered"))
 }
 
 /// Panic with the runtime's own refusal if `wafer` holds a grant declaration

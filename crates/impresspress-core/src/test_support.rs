@@ -151,7 +151,7 @@ pub struct TestContext {
     /// interior mutability is needed to update it, and `registered_blocks()`
     /// can return a borrowed slice directly instead of cloning through a
     /// lock guard.
-    block_infos: Vec<wafer_run::BlockInfo>,
+    block_infos: Vec<Arc<wafer_run::BlockInfo>>,
     /// Whose code runs on this context — what a block reached through
     /// [`Context::call_block`] sees as its caller. See [`dispatch::Frame`]:
     /// a constructor hands back an unframed context, [`Self::running_as`]
@@ -3164,7 +3164,7 @@ impl Context for TestContext {
         self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<wafer_run::BlockInfo>] {
         &self.block_infos
     }
 
@@ -3327,7 +3327,7 @@ impl Context for FailingDbOpContext {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<wafer_run::BlockInfo>] {
         self.inner.registered_blocks()
     }
 
@@ -3432,7 +3432,7 @@ impl Context for FailingServiceOpContext {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<wafer_run::BlockInfo>] {
         self.inner.registered_blocks()
     }
 
@@ -3580,7 +3580,7 @@ impl Context for RendezvousDbOpContext {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<BlockInfo>] {
         self.inner.registered_blocks()
     }
 
@@ -3728,7 +3728,7 @@ impl Context for AfterDbOpContext {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<BlockInfo>] {
         self.inner.registered_blocks()
     }
 
@@ -3879,7 +3879,7 @@ impl Context for FloatAggregateContext {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<BlockInfo>] {
         self.inner.registered_blocks()
     }
 
@@ -4017,7 +4017,7 @@ impl Context for EcholessWriteContext {
         self.inner.is_cancelled()
     }
 
-    fn registered_blocks(&self) -> &[BlockInfo] {
+    fn registered_blocks(&self) -> &[Arc<BlockInfo>] {
         self.inner.registered_blocks()
     }
 

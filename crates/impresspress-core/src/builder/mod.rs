@@ -41,7 +41,7 @@ pub use boot::{
     InitPolicy, SeedError, StepOutcome, DEPLOY_RESPONSE_SCHEMA_VERSION, PREPARE_RUNTIME_PLAN_KEY,
 };
 pub use config::{fill_config_service, RuntimeConfig, ServiceOnlyKey};
-pub use prepared::{PreparedBuildError, PreparedPlanExporter};
+pub use prepared::{AppliedPlanBuilder, PreparedBuildError, PreparedPlanExporter};
 /// Re-exported so `impresspress-cloudflare`'s wasm test lane can assert what
 /// this crate's own test code cannot: that a runtime built for wasm32 really
 /// does carry all six middleware blocks. See
@@ -149,12 +149,6 @@ pub struct ImpresspressBuilder {
     variables_snapshot: Arc<crate::config_source::VariablesSnapshot>,
     /// See [`Self::init_wait`].
     init_wait: wafer_run::InitWait,
-    /// The application block inventory of the prepared plan
-    /// [`Self::apply_prepared_plan`] imported, if one was. `build()` compares
-    /// it with the inventory it registered, read from the runtime's
-    /// registration-time `BlockInfo`s, and refuses a runtime whose compiled
-    /// blocks differ from the plan's.
-    prepared_application_blocks: Option<Vec<crate::prepared_plan::PreparedBlockImplementation>>,
 }
 
 impl Default for ImpresspressBuilder {
@@ -193,7 +187,6 @@ impl ImpresspressBuilder {
             config_source: None,
             variables_snapshot: Arc::default(),
             init_wait: wafer_run::InitWait::Await,
-            prepared_application_blocks: None,
         }
     }
 
