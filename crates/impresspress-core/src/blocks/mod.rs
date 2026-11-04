@@ -112,7 +112,7 @@ macro_rules! feature_block_manifest {
         pub fn all_block_infos() -> Vec<wafer_run::BlockInfo> {
             use wafer_run::Block as _;
             #[cfg(any(test, feature = "test-support"))]
-            BLOCK_SET_SWEEPS.with(|sweeps| sweeps.set(sweeps.get() + 1));
+            note_block_set_sweep();
             let mut infos: Vec<wafer_run::BlockInfo> = Vec::new();
             $(
                 $(#[$cfg])?
@@ -207,16 +207,25 @@ thread_local! {
     static BLOCK_SET_SWEEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// How many times [`all_block_infos`] has constructed the block set on this
-/// thread. Test support only.
+/// How many times this thread has used the constructed block set. Test
+/// support only.
 ///
 /// A runtime build reads each block's declaration once, at registration
 /// (wafer-run#478), and every later reader takes the registered copies. A
-/// sweep is `all_block_infos()` constructing every feature block again —
-/// directly or through a wrapper such as [`block_enabled_defaults`] or the
-/// declared-key memo in `config_vars` — and the request-path tests assert
-/// that a build adds none. Per thread, so tests running in parallel do not
-/// count each other's sweeps; a build and boot run on the test's own thread.
+/// sweep is a use of the block set [`all_block_infos`] constructs —
+/// constructing every feature block again — and the request-path tests
+/// assert that a build adds none. Two kinds of use count:
+///
+/// - every call of `all_block_infos()`, directly or through a wrapper such
+///   as [`block_enabled_defaults`];
+/// - every read of `config_vars`' declared-key memo, a process-wide set built
+///   from `all_block_infos()` once. A read counts whether or not it is the
+///   one that builds the memo: on a cold process (a new Worker isolate) the
+///   first read *is* the sweep, so a test that warmed the memo earlier must
+///   still see a request path reach it.
+///
+/// Per thread, so tests running in parallel do not count each other's
+/// sweeps; a build and boot run on the test's own thread.
 ///
 /// It counts the block set, not single reads: a caller that constructs one
 /// block and calls its `info()` is not counted, which is what the counting
@@ -224,6 +233,12 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn block_set_sweeps() -> usize {
     BLOCK_SET_SWEEPS.with(std::cell::Cell::get)
+}
+
+/// Record one use of the constructed block set; see [`block_set_sweeps`].
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn note_block_set_sweep() {
+    BLOCK_SET_SWEEPS.with(|sweeps| sweeps.set(sweeps.get() + 1));
 }
 
 /// Bytes for a block-owned entry of the shared `/b/static/` asset manifest,
@@ -299,9 +314,10 @@ pub fn block_enabled_defaults() -> Vec<(String, bool)> {
 /// The rule behind [`block_enabled_defaults`], over an explicit slice so it can
 /// be exercised on constructed `BlockInfo`s rather than only on whatever the
 /// current feature set happens to register.
-fn enabled_defaults_from(infos: &[wafer_run::BlockInfo]) -> Vec<(String, bool)> {
-    infos
-        .iter()
+pub fn enabled_defaults_from<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
+    infos: &[B],
+) -> Vec<(String, bool)> {
+    crate::declarations::declared(infos)
         .filter(|i| i.can_disable)
         .map(|i| (i.name.clone(), i.default_enabled))
         .collect()

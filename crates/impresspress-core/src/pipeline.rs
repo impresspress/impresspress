@@ -72,14 +72,22 @@ fn published_access<'a, B: Borrow<BlockInfo>>(
     block_infos: &'a [B],
     features: &'a dyn FeatureConfig,
     extra_routes: &'a [ExtraRoute],
-) -> impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel> + Copy + 'a {
+) -> impl Fn(&BlockInfo, &BlockEndpoint) -> Option<AuthLevel> + 'a {
     let browser = crate::runtime_kind::is_browser(ctx);
+    // Enablement is a property of the block, decided once per document for
+    // each registered block; only `server_only` is asked per endpoint.
+    let disabled: std::collections::HashSet<&'a str> = crate::declarations::declared(block_infos)
+        .filter(|block| {
+            !crate::features::is_enabled(
+                features,
+                block_infos,
+                routing::feature_gate_name(&block.name),
+            )
+        })
+        .map(|block| block.name.as_str())
+        .collect();
     move |block: &BlockInfo, ep: &BlockEndpoint| {
-        let served = crate::features::is_enabled(
-            features,
-            block_infos,
-            routing::feature_gate_name(&block.name),
-        ) && !(browser && ep.server_only);
+        let served = !disabled.contains(block.name.as_str()) && !(browser && ep.server_only);
         served.then(|| routing::effective_access(block, ep, extra_routes))
     }
 }
@@ -414,7 +422,7 @@ pub async fn handle_request<B: Borrow<BlockInfo>>(
         // the same for every caller — with one exception"), so it is not
         // static across callers, only across repeated calls by the same
         // caller. Either way they are computed and logged exactly once, at
-        // runtime construction, in `builder::registration::build()` (using
+        // runtime construction, in `ImpresspressBuilder::register` (using
         // an `AuthLevel::Admin` ceiling, which — because the auth filter is
         // monotone — still sees every collision that exists anywhere,
         // including ones invisible at this route's actual `caller`). The
@@ -2750,7 +2758,7 @@ mod discovery_tests {
     use crate::test_support::MessageCapture;
 
     /// The exact text `generate_webmcp`'s wrapper (and now
-    /// `builder::registration::build()`) attaches to the refusal warning —
+    /// `ImpresspressBuilder::register`) attaches to the refusal warning —
     /// duplicated here rather than imported so this test does not depend on
     /// the message staying byte-for-byte in sync with production wording
     /// beyond this recognizable substring.

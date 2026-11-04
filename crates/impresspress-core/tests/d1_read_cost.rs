@@ -2311,11 +2311,13 @@ async fn a_failed_gate_costs_a_sliver_of_a_cold_build() {
 /// and boot — the prepared one and the database one, from the variables gate
 /// through every block's `Init` — read each block's declaration once, at its
 /// registration (wafer-run#478), and every later reader takes the registered
-/// copies. `blocks::block_set_sweeps` counts `blocks::all_block_infos()`,
-/// which constructs every feature block again: called directly or through a
-/// wrapper (`block_enabled_defaults`, the declared-key memo), it would show
-/// here. Before this pin a prepared build swept twice: the plan import and
-/// the plan exporter.
+/// copies. `blocks::block_set_sweeps` counts every use of the block set
+/// `blocks::all_block_infos()` constructs: a call, directly or through a
+/// wrapper (`block_enabled_defaults`), and every read of `config_vars`'
+/// declared-key memo — which `provision` below has already built in this
+/// process, so a read here would be the sweep on a cold isolate and is
+/// counted as one. Before this pin a prepared build swept twice: the plan
+/// import and the plan exporter.
 #[tokio::test]
 async fn a_request_path_build_constructs_no_block_set() {
     let _generation = GENERATION.lock().await;

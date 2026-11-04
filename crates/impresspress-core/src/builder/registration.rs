@@ -35,10 +35,7 @@ wafer_block::use_static_blocks!(
 #[cfg(feature = "native-embedding")]
 use super::boot::register_vector_block;
 use super::ImpresspressBuilder;
-use crate::{
-    blocks::router::ImpresspressRouterBlock, features::FeatureConfig,
-    prepared_plan::PreparedBlockImplementation,
-};
+use crate::{blocks::router::ImpresspressRouterBlock, features::FeatureConfig};
 
 /// The six `wafer-run/*` middleware blocks, by the name each crate's
 /// `register_static_block!` gives it.
@@ -74,12 +71,13 @@ pub fn register_middleware_blocks(wafer: &mut Wafer) -> Result<(), RuntimeError>
 }
 
 /// What [`ImpresspressBuilder::register`] produced: the built (unsealed)
-/// runtime, and the implementations of the application blocks it registered.
+/// runtime, and the names of the application blocks it registered.
 pub(super) struct Registered {
     pub(super) wafer: Wafer,
-    /// Every application block's implementation, read from the runtime's
-    /// registration-time `BlockInfo` — see [`ImpresspressBuilder::register`].
-    pub(super) application_blocks: Vec<PreparedBlockImplementation>,
+    /// The application blocks, by name — see [`ImpresspressBuilder::register`].
+    /// The prepared plan's inventory is read for them from the runtime's
+    /// registration-time `BlockInfo`s, only where a plan is wanted.
+    pub(super) application: Vec<String>,
 }
 
 impl ImpresspressBuilder {
@@ -92,8 +90,8 @@ impl ImpresspressBuilder {
         self.register().map(|registered| registered.wafer)
     }
 
-    /// [`Self::build`], also answering the application block inventory the
-    /// prepared plan describes, so the exporter reads it from this runtime's
+    /// [`Self::build`], also answering the names of the application blocks
+    /// it registered, so a plan's inventory is read from this runtime's
     /// registrations instead of constructing every block again.
     ///
     /// The application blocks are the blocks this build compiles in for the
@@ -425,11 +423,7 @@ impl ImpresspressBuilder {
             application.push(name);
         }
 
-        // 8. The application block inventory, from the declarations the
-        //    runtime read at registration.
         let registered_infos = wafer.block_infos();
-        let application_blocks =
-            super::prepared::application_inventory(&registered_infos, &application);
 
         // 10. Build and register the impresspress router.
         //     Collect BlockInfo from the registry AFTER all blocks are registered
@@ -505,7 +499,7 @@ impl ImpresspressBuilder {
         // is monotone in caller rank — see the doc comment cited above).
         // Any lower placeholder would silently miss collisions that only
         // become visible to a higher-privilege caller. `effective_auth`
-        // (`|_block, ep| ep.auth`) is genuinely arbitrary here, though,
+        // (`|_block, ep| Some(ep.auth)`) is genuinely arbitrary here, though,
         // *because* `caller` is pinned to the ceiling: with the filter above
         // trivially true for every endpoint regardless of which resolver
         // computed it, using the router's real `routing::effective_access`
@@ -614,10 +608,7 @@ impl ImpresspressBuilder {
         // `builder::RuntimeConfig`.
         super::config::write_snapshot(&mut wafer, self.config_snapshot);
 
-        Ok(Registered {
-            wafer,
-            application_blocks,
-        })
+        Ok(Registered { wafer, application })
     }
 }
 

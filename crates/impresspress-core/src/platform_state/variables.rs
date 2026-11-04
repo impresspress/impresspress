@@ -916,9 +916,11 @@ pub enum Wrote {
 /// occupies in [`crate::builder::boot`]. Native seeds pre-wafer, so it applies
 /// admin's list itself first, through
 /// [`crate::migration_helper::apply_pending_via_service`].
-pub async fn seed_auto_generated(db: &Arc<dyn DatabaseService>) {
-    let block_infos = crate::blocks::all_block_infos();
-    for info in &block_infos {
+pub async fn seed_auto_generated<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
+    db: &Arc<dyn DatabaseService>,
+    block_infos: &[B],
+) {
+    for info in crate::declarations::declared(block_infos) {
         let block_col = crate::config_vars::screaming_block(&info.name);
         for var in &info.config_keys {
             if !var.auto_generate {
@@ -1304,8 +1306,10 @@ pub async fn seed_and_load(
         record_transition(db).await;
     }
 
-    // 2. Auto-generate declared secrets (incl. the auth JWT secret).
-    seed_auto_generated(db).await;
+    // 2. Auto-generate declared secrets (incl. the auth JWT secret). This
+    //    runs before any runtime exists (native, browser), so the declared
+    //    set is the compiled block set.
+    seed_auto_generated(db, &crate::blocks::all_block_infos()).await;
     seed_jwt_secret(db).await;
 
     // 3. Load the full set back, reconciling any row whose stored `sensitive`

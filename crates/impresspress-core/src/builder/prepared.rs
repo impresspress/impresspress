@@ -17,10 +17,9 @@ use super::ImpresspressBuilder;
 use crate::{
     features::BlockSettings,
     prepared_plan::{
-        canonicalize_json, PreparedBlockImplementation, PreparedBlockRuntime, PreparedGrantWrite,
-        PreparedPlanError, PreparedReleaseAssets, PreparedResourceGrant, PreparedResourceType,
-        PreparedRoute, PreparedRouteAccess, PreparedRuntimePlan, PreparedRuntimeStructure,
-        WaferLockIdentity,
+        PreparedBlockImplementation, PreparedBlockRuntime, PreparedGrantWrite, PreparedPlanError,
+        PreparedReleaseAssets, PreparedResourceGrant, PreparedResourceType, PreparedRoute,
+        PreparedRouteAccess, PreparedRuntimePlan, PreparedRuntimeStructure, WaferLockIdentity,
     },
     routing::{ExtraRoute, RouteAccess, ROUTES},
 };
@@ -29,21 +28,21 @@ use crate::{
 ///
 /// A Cloudflare candidate gets this from
 /// [`ImpresspressBuilder::build_with_plan_exporter`], after executing the real
-/// consumer registration closure. The exporter retains only immutable descriptor data plus the shared
-/// `BlockSettings` snapshot handle. After deploy initialization seeds and
-/// republishes those settings, `prepare_runtime_plan()` observes the final
-/// snapshot and can return the plan through the candidate endpoint.
+/// consumer registration closure. The exporter retains the runtime's
+/// structure as a plan stores it — normalized by
+/// [`PreparedRuntimeStructure::normalize`], the one place that decides it —
+/// plus the shared `BlockSettings` snapshot handle and the deploy-time grants.
+/// After deploy initialization seeds and republishes those settings,
+/// `prepare_runtime_plan()` observes the final snapshot and can return the
+/// plan through the candidate endpoint.
 ///
 /// This type is control-plane state and is never serialized into the plan.
 #[derive(Clone)]
 pub struct PreparedPlanExporter {
-    application_blocks: Vec<PreparedBlockImplementation>,
-    routes: Vec<PreparedRoute>,
-    built_in_route_count: usize,
+    /// Everything but the two live parts below, normalized. Its own
+    /// `block_settings` and `deployment_wrap_grants` are not read.
+    structure: PreparedRuntimeStructure,
     block_settings: Arc<RwLock<BlockSettings>>,
-    block_configs: BTreeMap<String, serde_json::Value>,
-    final_block_configs: BTreeMap<String, serde_json::Value>,
-    wrap_grants: Vec<PreparedResourceGrant>,
     deployment_wrap_grants: Arc<RwLock<Vec<PreparedResourceGrant>>>,
 }
 
@@ -86,32 +85,25 @@ impl PreparedPlanExporter {
     pub fn prepared_runtime_structure(
         &self,
     ) -> Result<PreparedRuntimeStructure, PreparedPlanError> {
-        let mut structure = PreparedRuntimeStructure {
-            application_blocks: self.application_blocks.clone(),
-            routes: self.routes.clone(),
-            built_in_route_count: self.built_in_route_count,
-            block_settings: self
-                .block_settings
-                .read()
-                .map_err(|_| {
-                    PreparedPlanError::StructureMismatch(
-                        "BlockSettings lock poisoned during plan export".into(),
-                    )
-                })?
-                .to_sorted_map(),
-            block_configs: self.block_configs.clone(),
-            final_block_configs: self.final_block_configs.clone(),
-            wrap_grants: self.wrap_grants.clone(),
-            deployment_wrap_grants: self
-                .deployment_wrap_grants
-                .read()
-                .map_err(|_| {
-                    PreparedPlanError::StructureMismatch(
-                        "WRAP grant lock poisoned during plan export".into(),
-                    )
-                })?
-                .clone(),
-        };
+        let mut structure = self.structure.clone();
+        structure.block_settings = self
+            .block_settings
+            .read()
+            .map_err(|_| {
+                PreparedPlanError::StructureMismatch(
+                    "BlockSettings lock poisoned during plan export".into(),
+                )
+            })?
+            .to_sorted_map();
+        structure.deployment_wrap_grants = self
+            .deployment_wrap_grants
+            .read()
+            .map_err(|_| {
+                PreparedPlanError::StructureMismatch(
+                    "WRAP grant lock poisoned during plan export".into(),
+                )
+            })?
+            .clone();
         structure.normalize();
         structure.validate()?;
         Ok(structure)
@@ -159,8 +151,13 @@ impl PreparedPlanExporter {
 #[derive(Debug, thiserror::Error)]
 pub enum PreparedBuildError {
     /// The runtime did not build (`ImpresspressBuilder::build`'s error).
-    #[error("builder.build")]
-    Build(#[source] wafer_run::RuntimeError),
+    ///
+    /// The cause is in the message and not also a `source()`: every caller
+    /// renders this with `to_string()` (the request's 500 log,
+    /// `/_deploy/init`'s report), and a chain-walker that also followed a
+    /// source would print the cause twice.
+    #[error("builder.build: {0}")]
+    Build(wafer_run::RuntimeError),
     /// The runtime built, but the plan it was asked to hydrate describes
     /// another application.
     #[error(transparent)]
@@ -190,7 +187,9 @@ impl From<wafer_run::RuntimeError> for PreparedBuildError {
 /// the blocks, never their seal or `Init`.
 pub struct AppliedPlanBuilder {
     builder: ImpresspressBuilder,
-    application_blocks: Vec<PreparedBlockImplementation>,
+    /// The verified plan's structure, which this runtime is built from and
+    /// its exporter describes.
+    plan: PreparedRuntimeStructure,
 }
 
 impl AppliedPlanBuilder {
@@ -203,11 +202,16 @@ impl AppliedPlanBuilder {
     /// Build the runtime with the plan's settings, configs, routes and
     /// grants, and refuse it unless the application blocks it registered are
     /// the plan's.
+    ///
+    /// The compile's own routes, final configs and grants were compared with
+    /// the plan's by the import, and the plan itself was verified there, so
+    /// nothing is validated again before registration.
     pub fn build_with_plan_exporter(
         self,
     ) -> Result<(wafer_run::Wafer, PreparedPlanExporter), PreparedBuildError> {
-        let (wafer, exporter) = self.builder.build_with_plan_exporter()?;
-        if exporter.application_blocks != self.application_blocks {
+        let expected = self.plan.application_blocks.clone();
+        let (wafer, exporter) = self.builder.register_with_exporter(self.plan)?;
+        if exporter.structure.application_blocks != expected {
             return Err(PreparedPlanError::StructureMismatch(
                 "compiled application block inventory does not match".into(),
             )
@@ -218,15 +222,16 @@ impl AppliedPlanBuilder {
 }
 
 /// The implementations of the application blocks named in `application`, from
-/// the runtime's registration-time declarations, sorted as a plan stores them.
+/// the runtime's registration-time declarations. Unsorted: the structure's
+/// [`PreparedRuntimeStructure::normalize`] orders them.
 ///
 /// `infos` is [`wafer_run::Wafer::block_infos`]: the `BlockInfo` each block's
 /// registration read once, so this reads no block's `info()`.
-pub(super) fn application_inventory(
+fn application_inventory(
     infos: &[Arc<wafer_run::BlockInfo>],
     application: &[String],
 ) -> Vec<PreparedBlockImplementation> {
-    let mut blocks: Vec<_> = infos
+    infos
         .iter()
         .filter(|info| application.contains(&info.name))
         .map(|info| PreparedBlockImplementation {
@@ -238,24 +243,17 @@ pub(super) fn application_inventory(
                 BlockRuntime::Wasm => PreparedBlockRuntime::Wasm,
             },
         })
-        .collect();
-    blocks.sort_by(|a, b| {
-        (&a.name, &a.version, &a.interface).cmp(&(&b.name, &b.version, &b.interface))
-    });
-    blocks
+        .collect()
 }
 
-/// A builder's block-config list as a plan stores it: in name order, each
-/// value canonicalized. Wafer's registration map has last-write-wins
-/// semantics, so a later entry for a name replaces an earlier one here too.
+/// A builder's block-config list by name. Wafer's registration map has
+/// last-write-wins semantics, so a later entry for a name replaces an
+/// earlier one here too; the values are canonicalized by `normalize`.
 fn config_map(configs: &[(String, serde_json::Value)]) -> BTreeMap<String, serde_json::Value> {
-    let mut map = BTreeMap::new();
-    for (name, value) in configs {
-        let mut value = value.clone();
-        canonicalize_json(&mut value);
-        map.insert(name.clone(), value);
-    }
-    map
+    configs
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 impl ImpresspressBuilder {
@@ -266,36 +264,65 @@ impl ImpresspressBuilder {
     /// after boot to package the final seeded structural snapshot. The
     /// exporter's application block inventory is the one `build()`
     /// registered, read from the runtime's registration-time `BlockInfo`s.
+    ///
+    /// What this builder will put in a plan is validated first, before any
+    /// block is registered, so an invalid route, config or grant is refused
+    /// before a migration or a seed can run.
     pub fn build_with_plan_exporter(
         self,
     ) -> Result<(wafer_run::Wafer, PreparedPlanExporter), PreparedBuildError> {
-        let mut exporter = self.unregistered_exporter();
-        let registered = self.register()?;
-        exporter.application_blocks = registered.application_blocks;
-        // Not validated here: on the request path nothing exports a plan, and
-        // `prepared_runtime_structure` validates whenever one is.
-        Ok((registered.wafer, exporter))
+        let structure = self.descriptor()?;
+        self.register_with_exporter(structure)
     }
 
-    /// The exporter of everything this builder holds that a plan carries,
-    /// except the application block inventory, which only registration
-    /// knows: [`Self::build_with_plan_exporter`] fills it in.
-    fn unregistered_exporter(&self) -> PreparedPlanExporter {
-        PreparedPlanExporter {
+    /// Register the runtime, and an exporter of `structure` completed with
+    /// the application blocks it registered.
+    fn register_with_exporter(
+        self,
+        mut structure: PreparedRuntimeStructure,
+    ) -> Result<(wafer_run::Wafer, PreparedPlanExporter), PreparedBuildError> {
+        let block_settings = self.block_settings.clone();
+        let deployment_wrap_grants =
+            Arc::new(RwLock::new(structure.deployment_wrap_grants.clone()));
+        let registered = self.register()?;
+        structure.application_blocks =
+            application_inventory(&registered.wafer.block_infos(), &registered.application);
+        structure.normalize();
+        Ok((
+            registered.wafer,
+            PreparedPlanExporter {
+                structure,
+                block_settings,
+                deployment_wrap_grants,
+            },
+        ))
+    }
+
+    /// What this builder will put in a plan, except the application block
+    /// inventory, which only registration knows: normalized and validated
+    /// the way a plan is. No block is constructed.
+    fn descriptor(&self) -> Result<PreparedRuntimeStructure, PreparedPlanError> {
+        let mut structure = PreparedRuntimeStructure {
             application_blocks: Vec::new(),
             routes: self.prepared_routes(),
             built_in_route_count: ROUTES.len(),
-            block_settings: self.block_settings.clone(),
+            block_settings: BTreeMap::new(),
             block_configs: config_map(&self.block_configs),
             final_block_configs: config_map(&self.final_block_configs),
-            wrap_grants: self.prepared_wrap_grants(),
-            deployment_wrap_grants: Arc::new(RwLock::new(
-                self.deployment_wrap_grants
-                    .iter()
-                    .map(PreparedResourceGrant::from)
-                    .collect(),
-            )),
-        }
+            wrap_grants: self
+                .wrap_grants
+                .iter()
+                .map(PreparedResourceGrant::from)
+                .collect(),
+            deployment_wrap_grants: self
+                .deployment_wrap_grants
+                .iter()
+                .map(PreparedResourceGrant::from)
+                .collect(),
+        };
+        structure.normalize();
+        structure.validate()?;
+        Ok(structure)
     }
 
     /// The built-in routes followed by this builder's consumer routes, as a
@@ -323,28 +350,17 @@ impl ImpresspressBuilder {
             .collect()
     }
 
-    /// This builder's consumer-declared WRAP grants, sorted and de-duplicated
-    /// as a plan stores them.
-    fn prepared_wrap_grants(&self) -> Vec<PreparedResourceGrant> {
-        let mut grants: Vec<_> = self
-            .wrap_grants
-            .iter()
-            .map(PreparedResourceGrant::from)
-            .collect();
-        grants.sort();
-        grants.dedup();
-        grants
-    }
-
     /// Verify and apply a prepared plan to the normal builder path.
     ///
-    /// Call the consumer's usual registration function first, then invoke
-    /// this method, inject current platform services, and call `build()`. The
-    /// complete route declaration, final block configs and consumer grants
-    /// must match the target compile, or this refuses the plan; the
-    /// application block inventory must too, which `build()` checks against
-    /// the blocks it registers. Deployment-owned block settings and non-secret
-    /// structural configs are then replaced from the plan without external
+    /// Inject the platform services and run the consumer's usual registration
+    /// function first, then invoke this method, and build the runtime with
+    /// the returned [`AppliedPlanBuilder::build_with_plan_exporter`] — the only
+    /// way an imported plan builds. The complete route declaration, final
+    /// block configs and consumer grants must match the target compile, or
+    /// this refuses the plan; the application block inventory must too, which
+    /// `build_with_plan_exporter` checks against the blocks it registers.
+    /// Deployment-owned block settings, non-secret structural configs and
+    /// deploy-time grants are then replaced from the plan without external
     /// I/O. Executable block objects and service backends remain those already
     /// installed on this builder.
     ///
@@ -376,19 +392,20 @@ impl ImpresspressBuilder {
         // The rest of the plan is the deployment's, not the compile's, and is
         // taken from it unread below: the block settings, the structural block
         // configs and the deploy-time grants replace this builder's.
-        if self.prepared_routes() != plan.structure.routes
-            || ROUTES.len() != plan.structure.built_in_route_count
+        let current = self.descriptor()?;
+        if current.routes != plan.structure.routes
+            || current.built_in_route_count != plan.structure.built_in_route_count
         {
             return Err(PreparedPlanError::StructureMismatch(
                 "compiled built-in/consumer routes do not match".into(),
             ));
         }
-        if config_map(&self.final_block_configs) != plan.structure.final_block_configs {
+        if current.final_block_configs != plan.structure.final_block_configs {
             return Err(PreparedPlanError::StructureMismatch(
                 "compiled final block-config overrides do not match".into(),
             ));
         }
-        if self.prepared_wrap_grants() != plan.structure.wrap_grants {
+        if current.wrap_grants != plan.structure.wrap_grants {
             return Err(PreparedPlanError::StructureMismatch(
                 "consumer-declared WRAP grants do not match".into(),
             ));
@@ -455,7 +472,7 @@ impl ImpresspressBuilder {
 
         Ok(AppliedPlanBuilder {
             builder: self,
-            application_blocks: plan.structure.application_blocks.clone(),
+            plan: plan.structure.clone(),
         })
     }
 }
@@ -561,31 +578,61 @@ pub(super) mod tests {
     /// and the embedder's model cache directory, which a build only records —
     /// it is read when the block loads a model, which no test here does.
     pub(in crate::builder) fn serviced(builder: ImpresspressBuilder) -> ImpresspressBuilder {
-        let database = Arc::new(
-            wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
-                .expect("open in-memory sqlite"),
-        );
-        let (builder, ()) = crate::builder::RuntimeConfig::new()
+        let database: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            Arc::new(
+                wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+                    .expect("open in-memory sqlite"),
+            );
+        serviced_over(builder, database, false).0
+    }
+
+    /// [`serviced`] over `database`, answering the config service the
+    /// runtime's boot publishes through. `run_migrations` puts the deploy
+    /// funnel's migration switch on both config surfaces.
+    fn serviced_over(
+        builder: ImpresspressBuilder,
+        database: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+        run_migrations: bool,
+    ) -> (
+        ImpresspressBuilder,
+        Arc<dyn wafer_core::interfaces::config::service::ConfigService>,
+    ) {
+        let mut config = crate::builder::RuntimeConfig::new();
+        if run_migrations {
+            config.both(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
+        }
+        let (builder, service) = config
             .install(
-                builder.database(database, wafer_sql_utils::Backend::Sqlite),
+                builder.database(database.clone(), wafer_sql_utils::Backend::Sqlite),
                 |map| {
-                    (
-                        crate::builder::fill_config_service(
-                            Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
-                            map,
-                        ),
-                        (),
-                    )
+                    let service = crate::builder::fill_config_service(
+                        Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                        map,
+                    );
+                    (service.clone(), service)
                 },
             )
             .expect("install the config surfaces");
-        builder
+        let builder = builder
             .storage(Arc::new(crate::test_support::InMemoryStorageService::new()))
             .crypto(Arc::new(crate::test_support::real_crypto_service()))
             .network(Arc::new(NoNetwork))
             .logger(Arc::new(wafer_core::service_blocks::logger::TracingLogger))
             .sqlite_db_path(":memory:")
-            .model_cache_dir(std::env::temp_dir().join("impresspress-prepared-plan-tests-models"))
+            .model_cache_dir(std::env::temp_dir().join("impresspress-prepared-plan-tests-models"));
+        // The hosted targets' config source, over the same database, so a
+        // block's `Init` resolves the secrets the deploy funnel generated.
+        let variables = Arc::new(crate::config_source::VariablesSnapshot::new(
+            crate::config_source::RetryMode::Rebuild,
+        ));
+        let builder = builder
+            .config_source(crate::builder::request_config_source(
+                database,
+                HashMap::new(),
+                variables.clone(),
+            ))
+            .variables_snapshot(variables);
+        (builder, service)
     }
 
     /// The exporter of `builder`'s runtime, built.
@@ -748,45 +795,93 @@ pub(super) mod tests {
 
     /// The request-path build reads each block's declaration once, at its
     /// registration (wafer-run#478): importing a plan, building the runtime
-    /// with its exporter, sealing, initializing the block and exporting the
-    /// plan read none again — neither a consumer block's (the counted block)
-    /// nor the feature blocks' (no `blocks::all_block_infos` sweep, through
-    /// any wrapper). Before, the import and the exporter each constructed the
-    /// application block inventory from `info()`. A full request boot is held
-    /// to the same in `tests/d1_read_cost.rs`.
+    /// with its exporter, and booting it as a cold isolate does — seal and
+    /// every block's `Init` — then exporting the plan, read none again:
+    /// neither a consumer block's (the counted block) nor the feature blocks'
+    /// (no use of the block set `blocks::all_block_infos` constructs, through
+    /// any wrapper; see `blocks::block_set_sweeps`). The plan comes from the
+    /// deploy funnel over the same database, as on Cloudflare. Before, the
+    /// import and the exporter each constructed the application block
+    /// inventory from `info()`.
     #[tokio::test]
     async fn a_prepared_build_reads_each_declaration_once() {
+        let database: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            Arc::new(
+                wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+                    .expect("open in-memory sqlite"),
+            );
         let lock = WaferLockIdentity::absent();
         let counted = |reads: &Arc<std::sync::atomic::AtomicUsize>| -> Arc<dyn wafer_run::Block> {
             Arc::new(Counted(Arc::clone(reads)))
         };
+
+        // The deploy funnel: migrate, seed, and seal the plan.
         let source_reads = Arc::default();
-        let plan = plan(
+        let (source, config) = serviced_over(
             ImpresspressBuilder::new().extra_block("example/counted", counted(&source_reads)),
-            &lock,
+            database.clone(),
+            true,
         );
+        let settings = source.block_settings_handle();
+        let (mut wafer, exporter) = source
+            .build_with_plan_exporter()
+            .expect("the deploy runtime builds");
+        let report = crate::builder::boot_deploy_runtime(&mut wafer, &database, &settings, config)
+            .await
+            .expect("the deploy funnel runs");
+        assert!(report.ok, "provisioning must succeed: {report:#?}");
+        crate::builder::seal_prepared_plan(&database, &exporter)
+            .await
+            .expect("the plan seals");
+        let plan = exporter
+            .prepare_runtime_plan_with_config_generation(
+                "example",
+                hash('b'),
+                "0".repeat(32),
+                lock.clone(),
+                PreparedReleaseAssets::absent(),
+            )
+            .expect("the plan exports");
+        drop(wafer);
         assert_eq!(
             source_reads.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "exporting a plan reads the declaration only at registration"
+            "the deploy funnel reads the declaration only at registration"
         );
 
+        // A cold isolate: import, build, boot, export.
         let reads = Arc::default();
-        let target = apply(
-            ImpresspressBuilder::new().extra_block("example/counted", counted(&reads)),
-            &plan,
-            &lock,
-        )
-        .expect("the plan applies");
         let sweeps = crate::blocks::block_set_sweeps();
+        let (target, config) = serviced_over(
+            ImpresspressBuilder::new().extra_block("example/counted", counted(&reads)),
+            database.clone(),
+            false,
+        );
+        let target = target
+            // As a Worker's request path builds it: its `Serving` boot
+            // requires it.
+            .init_wait(wafer_run::InitWait::Refuse)
+            .apply_prepared_plan(
+                &plan,
+                "example",
+                &hash('b'),
+                &lock,
+                &PreparedReleaseAssets::absent(),
+            )
+            .expect("the plan applies");
+        let settings = target.block_settings_handle();
         let (mut wafer, exporter) = target
             .build_with_plan_exporter()
             .expect("the runtime builds");
-        wafer.seal().await.expect("the runtime seals");
-        wafer
-            .init_block("example/counted")
-            .await
-            .expect("the counted block initializes");
+        crate::builder::boot_request_runtime(
+            &mut wafer,
+            &database,
+            &settings,
+            config,
+            crate::builder::RequestBuild::Prepared,
+        )
+        .await
+        .expect("the prepared runtime boots");
         exporter
             .prepare_runtime_plan(
                 "example",
@@ -799,8 +894,52 @@ pub(super) mod tests {
         assert_eq!(
             crate::blocks::block_set_sweeps(),
             sweeps,
-            "a prepared build constructed the feature blocks again"
+            "a prepared build and boot used the constructed block set"
         );
+    }
+
+    /// What a builder would put in a plan is validated before any block is
+    /// registered: a secret in a structural block config is refused before
+    /// a block is constructed, let alone migrated or seeded.
+    #[test]
+    fn an_invalid_plan_input_is_refused_before_registration() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let builder = serviced(
+            ImpresspressBuilder::new()
+                .block_config("example/counted", serde_json::json!({ "api_key": "k" }))
+                .extra_block("example/counted", Arc::new(Counted(Arc::clone(&reads)))),
+        );
+        let Err(error) = builder.build_with_plan_exporter() else {
+            panic!("a secret in a plan's block config must be refused");
+        };
+        assert!(
+            matches!(
+                error,
+                PreparedBuildError::Plan(PreparedPlanError::InvalidField { .. })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no block was registered"
+        );
+    }
+
+    /// A build failure names its cause in its message, once: every caller
+    /// renders it with `to_string()`, and it carries no separate `source()`
+    /// a chain-walker would print the cause from again.
+    #[test]
+    fn a_build_failure_names_its_cause_once() {
+        let error = PreparedBuildError::from(wafer_run::RuntimeError::Config(
+            "the database service is missing".into(),
+        ));
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("the database service is missing"),
+            "{rendered}"
+        );
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     #[test]

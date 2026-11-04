@@ -678,6 +678,10 @@ struct DeclaredKeys {
 }
 
 fn declared_key_sets() -> &'static DeclaredKeys {
+    // Every read counts as a use of the block set, the first one on a cold
+    // process being the sweep that builds it: see `blocks::block_set_sweeps`.
+    #[cfg(any(test, feature = "test-support"))]
+    crate::blocks::note_block_set_sweep();
     static SETS: std::sync::OnceLock<DeclaredKeys> = std::sync::OnceLock::new();
     SETS.get_or_init(|| {
         let vars = collect_all_config_vars(&crate::blocks::all_block_infos());

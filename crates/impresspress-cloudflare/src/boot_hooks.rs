@@ -368,6 +368,15 @@ mod boot_hook_tests {
         ))
     }
 
+    /// The compiled block set's declarations, standing in for a deploy
+    /// runtime's registered ones in these hook-only tests.
+    fn compiled_declarations() -> Vec<Arc<wafer_run::BlockInfo>> {
+        impresspress_core::blocks::all_block_infos()
+            .into_iter()
+            .map(Arc::new)
+            .collect()
+    }
+
     /// One block that ships enabled. Held here rather than taken from
     /// `blocks::block_enabled_defaults()` so the fixture proves the same thing
     /// in every feature build: this crate's default feature set has no
@@ -420,6 +429,7 @@ mod boot_hook_tests {
             settings_handle(),
             request_services::config_proxy(),
             seed_defaults_fixture(),
+            compiled_declarations(),
         );
         deploy.seed_and_load().await.expect("deploy seed");
         assert!(
@@ -507,6 +517,7 @@ mod boot_hook_tests {
             settings_handle(),
             request_services::config_proxy(),
             seed_defaults_fixture(),
+            compiled_declarations(),
         );
         deploy
             .seed_and_load()
@@ -614,6 +625,7 @@ mod boot_hook_tests {
             settings_handle(),
             request_services::config_proxy(),
             seed_defaults_fixture(),
+            compiled_declarations(),
         );
         deploy.seed_and_load().await.expect("deploy seed");
         block_settings::load(&db)

@@ -71,6 +71,12 @@ wafer-run#482, which carries #478 and #479.
   `&[]` names its element type. `ImpresspressRouterBlock`'s constructors and
   `BodyLimitBlock::new` take `impl Into<Arc<[Arc<BlockInfo>]>>`, and
   `blocks::register_feature_blocks` answers the names it registered.
+- The deploy funnel seeds from the runtime's registered declarations:
+  `DeployBootHooks::new` and `DeployBootHooks::seeding_towards` take them
+  (`Vec<Arc<BlockInfo>>`, `Wafer::block_infos()`),
+  `platform_state::variables::seed_auto_generated` takes the declarations to
+  generate secrets for, and `blocks::enabled_defaults_from` (the rule behind
+  `block_enabled_defaults`) is public.
 - A block or alias an embedder registers after `Wafer::seal()` is refused
   (`RuntimeError::RegisteredAfterSeal`, `AliasError::AfterSeal`) where it
   used to be silently unreachable; impresspress's own hooks, including

@@ -266,7 +266,7 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
 /// serves and the diagnostic [`log_selection_refusals`] reports are derived
 /// from the same call rather than two that could drift apart.
 ///
-/// `|_b, ep| ep.auth` (rather than a router-aware resolver like
+/// `|_b, ep| Some(ep.auth)` (rather than a router-aware resolver like
 /// `routing::effective_access`) is correct here specifically because every
 /// row in [`SELECTIONS`] names an `Admin`-declared endpoint mounted under an
 /// `Admin`-only prefix (`/b/dev`'s own routes, and `/b/products/api/admin/*`)
@@ -314,7 +314,7 @@ pub async fn handle(ctx: &dyn Context) -> OutputStream {
 /// Log what [`SELECTIONS`] could not project, once, from the block set the
 /// runtime was built with.
 ///
-/// Called from `builder::registration::build()`, alongside the deployment-
+/// Called from `ImpresspressBuilder::register` (behind `build()`), alongside the deployment-
 /// wide WebMCP refusal pass it mirrors — the one place refusals are turned
 /// into operator-visible warnings. `build()` runs once per `Wafer`
 /// construction (on Cloudflare Workers, once per isolate), so this is
