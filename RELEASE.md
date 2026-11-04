@@ -32,7 +32,8 @@ what it did happens on every native boot.
   before, importing the plan and creating its exporter each constructed every
   block again, on every Cloudflare cold build. A cold prepared build of the
   Worker's block set, built and booted natively in release: 129 ms → 18 ms.
-  (Cloudflare cold-build timing to follow)
+  The same build as a Worker with every block, on local workerd (Miniflare),
+  cold isolate's first request: 245–263 ms → 86–88 ms (medians).
 - A name is a block or an alias, never both, and both are fixed once the
   runtime is sealed (#479). impresspress registers every block and alias
   before it seals, so a deployment sees no difference.
