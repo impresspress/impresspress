@@ -34,9 +34,12 @@
 //! not be polled on behalf of another, and a waker the owner fired would run
 //! the waiter's continuation inside the owner's I/O context. A waiter sleeps
 //! on a timer of its own and re-checks the isolate cells — plain data — on
-//! each tick, bounded by the build leases. When the wait ends without a
-//! runtime it re-enters [`get_or_build`] once; a second miss is a retryable
-//! [`RuntimeBuildBusy`] 503. A failed owner is recorded in
+//! each tick, the ticks backing off from 25 to 200 ms, because each costs
+//! CPU ([`BUILD_WAIT_FIRST_TICK_MS`]). A wait lasts at most
+//! [`BUILD_WAIT_MAX_MS`] (3 s), far shorter than the build leases: a slot
+//! still owned then answers a retryable [`RuntimeBuildBusy`] 503. When the
+//! slot frees without a runtime the waiter re-enters [`get_or_build`] once;
+//! a second miss is the same 503. A failed owner is recorded in
 //! `BUILD_LAST_FAILURE`, so its waiters answer 503 rather than rebuilding one
 //! after another.
 //!
@@ -162,17 +165,74 @@ const BUILD_LEASE_MS: u64 = 5_000;
 /// well inside this window; after it, availability is safer than trusting a
 /// token whose owning request may no longer exist.
 const BUILD_HARD_LEASE_MS: u64 = 10_000;
-/// How often a waiting cold request re-checks the cache, on its own timer.
+/// A waiting cold request's first tick: it re-checks the cache this long
+/// after it began waiting, on its own timer, and each tick after waits twice
+/// as long as the one before, up to [`BUILD_WAIT_MAX_TICK_MS`]
+/// ([`wait_tick_ms`]).
 ///
-/// A tick is a handful of `Cell` reads, so the cost is the latency it adds
-/// after the owner publishes (at most one tick) — small beside a cold build's
-/// 0.9–1.5 s of wall time on Cloudflare.
-const BUILD_WAIT_POLL_MS: u64 = 25;
-/// Longest one wait lasts, from when it began. A single owner's slot already
-/// ends by [`BUILD_HARD_LEASE_MS`]; this also bounds a wait that spans
-/// successive owners (a prepared owner that bypasses its stale plan hands the
-/// slot to a dynamic build in the same poll).
-const BUILD_WAIT_MAX_MS: u64 = BUILD_HARD_LEASE_MS;
+/// A tick is not free. Each is a `worker::Delay`: a `setTimeout` promise, a
+/// wasm-bindgen closure, a microtask, a waker and a new `Delay`, beside the
+/// `Cell` reads. The 2026-11-03 live outage check measured 0.22–0.28 ms of
+/// CPU per tick — the round trip, plus whatever the shared executor ran on
+/// that wake on other requests' behalf — so a waiter at the old fixed 25 ms
+/// spent about 10 ms of CPU per second of waiting, all of the Free plan's
+/// per-request budget, which made waiters a third of the requests Cloudflare
+/// killed. The short first
+/// ticks keep the latency after a quick owner low; the backoff keeps a long
+/// wait to about 5 ticks a second.
+const BUILD_WAIT_FIRST_TICK_MS: u64 = 25;
+/// The longest tick of a wait: at most this much latency after the owner
+/// publishes, small beside a cold build's 0.9–1.5 s of wall time on
+/// Cloudflare.
+const BUILD_WAIT_MAX_TICK_MS: u64 = 200;
+/// Longest one wait lasts, from when it began: about 18 ticks, some 4–5 ms of
+/// CPU.
+///
+/// A cold prepared build publishes in 0.9–1.5 s on Cloudflare. A slot still
+/// owned after 3 s is an owner the platform stopped (CPU-killed, so its guard
+/// was never dropped), a slow dynamic build (a read-through cold dynamic
+/// build has been measured at up to 8.4 s), or an owner held up by backend
+/// I/O. A stopped owner's slot is reclaimed only at [`BUILD_LEASE_MS`] (5 s,
+/// when its liveness token was freed with it — the 2026-11-03 tail's one
+/// 5,133 ms reclaim fits that) or [`BUILD_HARD_LEASE_MS`] (10 s, when it was
+/// not; which one Workers does is not documented), and on the Free plan a
+/// waiter that spends CPU for that long is killed before it gets there. So a
+/// wait that reaches this with the slot still owned answers
+/// [`RuntimeBuildBusy::SlotHeld`] at once: a 503 whose `Retry-After` is when
+/// the slot's lease ends ([`slot_frees_in_secs`]), and at least the retry
+/// window's. The reclaimer is a request whose wait crosses the lease (its
+/// next tick finds the slot inactive, and it re-enters and builds), or a
+/// later one. The cap also bounds a wait that spans successive owners (a
+/// prepared owner that bypasses its stale plan hands the slot to a dynamic
+/// build in the same poll).
+///
+/// On a plan with a larger CPU limit a long dynamic build costs its
+/// concurrent cold requests a 503 at about 3.2 s where they used to be served
+/// when it finished; the cap is sized for the Free plan's 10 ms.
+const BUILD_WAIT_MAX_MS: u64 = 3_000;
+
+/// Whole seconds until the current slot owner's lease ends and the slot can
+/// be reclaimed, at least 1: [`BUILD_HARD_LEASE_MS`] after it was taken while
+/// its liveness token is alive, [`BUILD_LEASE_MS`] once it is gone. The
+/// latest the slot frees, for the `Retry-After` of a waiter that gave up.
+fn slot_frees_in_secs(now: u64) -> u32 {
+    let started = BUILD_STARTED_MS.with(Cell::get);
+    let lease = if owner_liveness_token_alive() {
+        BUILD_HARD_LEASE_MS
+    } else {
+        BUILD_LEASE_MS
+    };
+    let ms = started.saturating_add(lease).saturating_sub(now);
+    u32::try_from(ms.div_ceil(1_000)).unwrap_or(u32::MAX).max(1)
+}
+
+/// The `tick`th wait of one request (0-based): 25, 50, 100, then 200 ms.
+fn wait_tick_ms(tick: u32) -> u64 {
+    BUILD_WAIT_FIRST_TICK_MS
+        .checked_shl(tick.min(16))
+        .unwrap_or(BUILD_WAIT_MAX_TICK_MS)
+        .min(BUILD_WAIT_MAX_TICK_MS)
+}
 
 pub(crate) struct ReadyRuntime {
     pub wafer: wafer_run::Wafer,
@@ -353,27 +413,37 @@ struct BuildGuard {
 /// awaiting request-owned work or leaving a response future pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeBuildBusy {
-    /// This request already waited once and re-entered, and the slot is owned
-    /// again.
+    /// The slot was freed while this request waited, and was owned again
+    /// when it re-entered: a new owner has just started.
     SlotBusy,
+    /// The slot was still owned when this request's one wait reached its cap
+    /// ([`BUILD_WAIT_MAX_MS`]). `retry_after_secs` is when the owner's lease
+    /// ends ([`slot_frees_in_secs`]), the latest the slot frees.
+    SlotHeld { retry_after_secs: u32 },
     /// The owner this request waited on failed its build. The next cold
     /// request that is not a waiter retries it.
     LeaderFailed,
 }
 
 impl RuntimeBuildBusy {
-    /// Seconds a client should wait before retrying. One: a successful owner
-    /// publishes within a cold build's wall time, and a failed one is retried
-    /// by the next cold request.
+    /// Seconds a client should wait before retrying (the edge raises it to
+    /// the retry window, where one is armed). One for `SlotBusy`, whose owner
+    /// has just started and publishes within a cold build's wall time, and
+    /// for `LeaderFailed`, which the next cold request retries; for
+    /// `SlotHeld`, when the stuck owner's lease ends.
     pub(crate) fn retry_after_secs(self) -> u32 {
-        1
+        match self {
+            Self::SlotBusy | Self::LeaderFailed => 1,
+            Self::SlotHeld { retry_after_secs } => retry_after_secs,
+        }
     }
 }
 
 impl std::fmt::Display for RuntimeBuildBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::SlotBusy => "runtime build still in progress after one wait",
+            Self::SlotBusy => "runtime build slot taken again after one wait",
+            Self::SlotHeld { .. } => "runtime build still in progress after one bounded wait",
             Self::LeaderFailed => "the runtime build this request waited for failed",
         })
     }
@@ -657,18 +727,24 @@ fn build_failed_since(waited_on: u64) -> bool {
 impl BuildGuard {
     fn try_acquire(now: u64) -> Option<Self> {
         let owner_alive = owner_liveness_token_alive();
-        let stale = BUILDING.with(|building| {
-            building.get()
-                && BUILD_STARTED_MS.with(|started| {
-                    let acquired_at = started.get();
-                    acquired_at == 0
-                        || now.saturating_sub(acquired_at) >= BUILD_HARD_LEASE_MS
-                        || (!owner_alive && now.saturating_sub(acquired_at) >= BUILD_LEASE_MS)
-                })
-        });
+        let acquired_at = BUILD_STARTED_MS.with(Cell::get);
+        let held_ms = now.saturating_sub(acquired_at);
+        let stale = BUILDING.with(Cell::get)
+            && (acquired_at == 0
+                || held_ms >= BUILD_HARD_LEASE_MS
+                || (!owner_alive && held_ms >= BUILD_LEASE_MS));
         if stale {
+            // Which lease applied tells whether a hard-stopped request's
+            // liveness token survives it on Workers (5 s if freed, 10 s if
+            // not), which is undocumented.
             tracing::warn!(
-                lease_ms = BUILD_LEASE_MS,
+                lease_ms = if owner_alive {
+                    BUILD_HARD_LEASE_MS
+                } else {
+                    BUILD_LEASE_MS
+                },
+                held_ms,
+                owner_token_alive = owner_alive,
                 "reclaiming stale runtime-build slot after an interrupted builder"
             );
             BUILDING.with(|building| building.set(false));
@@ -900,15 +976,24 @@ async fn admit_cold(
 /// - the cache holds a runtime `accept` takes → serve it;
 /// - the owner waited on, or a later one, recorded a failure → 503;
 /// - the slot is no longer active (released, or past a lease — a hard-stopped
-///   owner included) or [`BUILD_WAIT_MAX_MS`] passed → re-enter once.
+///   owner included) → re-enter once;
+/// - [`BUILD_WAIT_MAX_MS`] passed with the slot still owned → 503
+///   ([`RuntimeBuildBusy::SlotHeld`]).
+///
+/// It ticks on a timer of its own, backing off ([`wait_tick_ms`]), rather
+/// than being woken when the owner publishes: a waker the owner fired would
+/// run this request's continuation inside the owner's I/O context (see the
+/// module docs).
 async fn wait_for_owner(
     timer: &dyn WaitTimer,
     accept: impl Fn(&ReadyRuntime, u64) -> bool,
 ) -> Result<ColdAdmission, RuntimeBuildBusy> {
     let started = timer.now_ms();
     let waited_on = BUILD_OWNER.with(Cell::get);
+    let mut tick = 0u32;
     loop {
-        timer.sleep(BUILD_WAIT_POLL_MS).await;
+        timer.sleep(wait_tick_ms(tick)).await;
+        tick = tick.saturating_add(1);
         let now = timer.now_ms();
         let waited_ms = now.saturating_sub(started);
         if let Some(rt) = cached().filter(|rt| accept(rt, now)) {
@@ -925,8 +1010,13 @@ async fn wait_for_owner(
             }
             return Err(RuntimeBuildBusy::LeaderFailed);
         }
-        if !build_slot_active(now) || waited_ms >= BUILD_WAIT_MAX_MS {
+        if !build_slot_active(now) {
             return Ok(ColdAdmission::Reenter);
+        }
+        if waited_ms >= BUILD_WAIT_MAX_MS {
+            return Err(RuntimeBuildBusy::SlotHeld {
+                retry_after_secs: slot_frees_in_secs(now),
+            });
         }
     }
 }
@@ -2917,13 +3007,41 @@ pub(crate) mod tests {
         }
     }
 
-    /// A clock the test owns. `sleep` advances it by the requested time and
-    /// yields one turn, so every request in a `join_all` is polled between
-    /// ticks. A wait that outlives every bound fails the test instead of
-    /// hanging it.
+    /// A clock the test owns. A `sleep` yields one turn, so every request in
+    /// a `join_all` is polled between ticks, and when it wakes the clock is at
+    /// least its deadline (`now` when it began, plus the requested time).
+    /// Concurrent sleeps overlap, as real timers do: seven waiters each
+    /// sleeping 200 ms move the clock 200 ms, not 1.4 s. A wait that outlives
+    /// every bound fails the test instead of hanging it.
     struct FakeTimer {
-        now: Cell<u64>,
+        now: Rc<Cell<u64>>,
         sleeps: Cell<u32>,
+    }
+
+    /// One [`FakeTimer`] sleep: pending once, then the clock moved to its
+    /// deadline if it is not past it already.
+    struct FakeSleep {
+        now: Rc<Cell<u64>>,
+        deadline: u64,
+        yielded: bool,
+    }
+
+    impl std::future::Future for FakeSleep {
+        type Output = ();
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if self.yielded {
+                self.now.set(self.now.get().max(self.deadline));
+                std::task::Poll::Ready(())
+            } else {
+                self.yielded = true;
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }
     }
 
     impl FakeTimer {
@@ -2932,7 +3050,7 @@ pub(crate) mod tests {
 
         fn starting_at(now: u64) -> Self {
             Self {
-                now: Cell::new(now),
+                now: Rc::new(Cell::new(now)),
                 sleeps: Cell::new(0),
             }
         }
@@ -2950,8 +3068,11 @@ pub(crate) mod tests {
                 sleeps <= Self::MAX_SLEEPS,
                 "a waiting request outlived every bound on its wait"
             );
-            self.now.set(self.now.get() + ms);
-            Box::pin(YieldOnce(false))
+            Box::pin(FakeSleep {
+                now: self.now.clone(),
+                deadline: self.now.get() + ms,
+                yielded: false,
+            })
         }
     }
 
@@ -3106,55 +3227,125 @@ pub(crate) mod tests {
         );
     }
 
-    /// A wait is bounded by the build leases, a request re-enters once, and a
-    /// re-entered request that finds the slot owned again answers the
-    /// retryable 503 at once — it never waits a second time. Driven through
-    /// [`with_one_reentry`], so a production loop whose second pass waited
-    /// again would hold the request for another full lease.
+    /// **One wait is cheap and bounded** (CPU-GATE review M2): against a live
+    /// owner that never publishes, a waiter ticks with backoff (25, 50, 100,
+    /// then 200 ms) and answers the retryable 503 at [`BUILD_WAIT_MAX_MS`],
+    /// with the slot still owned: about 18 ticks, where a fixed 25 ms poll
+    /// took 400 to reach the 10 s hard lease. On Workers each tick is a
+    /// timer round trip measured at ~0.25 ms of CPU.
     #[wasm_bindgen_test]
-    async fn a_wait_is_bounded_and_a_second_miss_is_a_retryable_503() {
+    async fn a_wait_is_cheap_and_ends_at_its_cap() {
         reset_isolate();
         let timer = FakeTimer::starting_at(1_000);
         let builds = Cell::new(0);
         // A live owner that never publishes: its request is suspended, not
         // stopped, so its liveness token protects it until the hard lease.
         let stuck = BuildGuard::try_acquire(timer.now_ms()).unwrap();
-        let waiter_done = Cell::new(false);
-        // Another request that takes the slot the moment the lease frees it
-        // (polled first each turn), and holds it while the waiter re-enters.
-        let reclaimer = async {
-            loop {
-                timer.sleep(BUILD_WAIT_POLL_MS).await;
-                if let Some(guard) = BuildGuard::try_acquire(timer.now_ms()) {
-                    while !waiter_done.get() {
-                        timer.sleep(BUILD_WAIT_POLL_MS).await;
-                    }
-                    drop(guard);
-                    return;
+
+        let served = cold_request(&timer, &builds, 1, false).await;
+
+        let elapsed = timer.now_ms() - 1_000;
+        // The live owner's slot frees at the hard lease: Retry-After is what
+        // is left of it, not one second.
+        let frees_in = u32::try_from((BUILD_HARD_LEASE_MS - elapsed).div_ceil(1_000)).unwrap();
+        assert_eq!(
+            served,
+            Served::Refused(RuntimeBuildBusy::SlotHeld {
+                retry_after_secs: frees_in
+            }),
+            "the cap's answer, not a re-entry's `SlotBusy`"
+        );
+        assert!(frees_in >= 6, "{frees_in} s");
+        assert_eq!(builds.get(), 0);
+        assert!(
+            (BUILD_WAIT_MAX_MS..BUILD_WAIT_MAX_MS + BUILD_WAIT_MAX_TICK_MS).contains(&elapsed),
+            "the wait ends at its cap, after {elapsed} ms"
+        );
+        assert!(
+            timer.sleeps.get() <= 30,
+            "{} ticks for one wait",
+            timer.sleeps.get()
+        );
+        assert_eq!(
+            (0..6).map(wait_tick_ms).collect::<Vec<_>>(),
+            [25, 50, 100, 200, 200, 200],
+            "the tick backs off to its cap"
+        );
+        assert!(
+            BUILDING.with(Cell::get),
+            "the stuck owner still holds the slot"
+        );
+        drop(stuck);
+    }
+
+    /// A request re-enters once, and a re-entered pass that finds the slot
+    /// owned answers the retryable 503 at once — it never waits a second
+    /// time. Driven through [`with_one_reentry`] and [`admit_cold`], the loop
+    /// and admission `get_or_build` runs, so a production loop whose second
+    /// pass waited again would hold the request for another full wait.
+    #[wasm_bindgen_test]
+    async fn a_reentered_request_never_waits_again() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(1_000);
+        let held = BuildGuard::try_acquire(timer.now_ms()).unwrap();
+        let passes = Cell::new(0);
+
+        let served: Result<(), RuntimeBuildBusy> = with_one_reentry(|attempt| {
+            passes.set(passes.get() + 1);
+            let timer = &timer;
+            async move {
+                if attempt == Attempt::First {
+                    return Ok(Pass::Reenter);
+                }
+                let sleeps = timer.sleeps.get();
+                let admitted = admit_cold(attempt, timer, |_, _| false).await;
+                assert_eq!(timer.sleeps.get(), sleeps, "a re-entered pass never waits");
+                match admitted {
+                    Err(busy) => Err(busy),
+                    Ok(_) => panic!("the slot is held"),
                 }
             }
-        };
-        let waiter = async {
-            let served = cold_request(&timer, &builds, 1, false).await;
-            waiter_done.set(true);
-            served
-        };
+        })
+        .await;
 
-        let ((), served) = futures::future::join(reclaimer, waiter).await;
-
-        assert_eq!(served, Served::Refused(RuntimeBuildBusy::SlotBusy));
-        assert_eq!(builds.get(), 0);
-        let elapsed = timer.now_ms() - 1_000;
-        assert!(
-            elapsed < BUILD_HARD_LEASE_MS + 4 * BUILD_WAIT_POLL_MS,
-            "one bounded wait, then 503 — not a second wait ({elapsed} ms)"
-        );
+        assert_eq!(served, Err(RuntimeBuildBusy::SlotBusy));
+        assert_eq!(passes.get(), 2, "one pass, one re-entry");
         assert_eq!(
             RuntimeBuildBusy::SlotBusy.retry_after_secs(),
             1,
-            "lib.rs sends this as Retry-After"
+            "lib.rs sends this as Retry-After, raised to the window where one is armed"
         );
+        drop(held);
+    }
+
+    /// **A waiter at its cap is told to come back no earlier than the retry
+    /// window** (CPU-GATE review M2): a cold isolate inside a window whose
+    /// stale-plan hydrate is held by an owner that never finishes answers
+    /// `SlotHeld` at the cap, with the window's remaining time as its
+    /// `Retry-After` rather than one second.
+    #[wasm_bindgen_test]
+    async fn a_waiter_at_its_cap_answers_at_least_the_window() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(Some(packaged_plan()));
+        for _ in 0..4 {
+            arm_window(START, WindowCause::BuildUnavailable);
+        }
+        let stuck = BuildGuard::try_acquire(timer.now_ms()).unwrap();
+
+        let served = get_or_build_with(&io, &timer).await;
+
+        let now = timer.now_ms();
+        let window = armed_window(now).expect("still armed after the wait");
+        assert!(
+            matches!(&served, Err(RuntimeBuildError::Unavailable { retry_after_secs, .. })
+                if *retry_after_secs >= window.remaining_secs(now) && *retry_after_secs > 1),
+            "{served:?}"
+        );
+        assert!(now - START >= BUILD_WAIT_MAX_MS, "it waited to its cap");
+        assert_eq!(io.hydrates.get(), 0, "and built nothing");
         drop(stuck);
+        reset_isolate();
     }
 
     /// A prepared owner that bypasses its stale plan hands the slot to the
@@ -3183,49 +3374,94 @@ pub(crate) mod tests {
         );
     }
 
-    /// A hard stop runs no destructor, so the owner's guard and its liveness
-    /// token stay in the heap. Its waiter rides the existing lease reclaim:
-    /// the wait ends at the hard lease, the re-entry reclaims the slot, and
-    /// the runtime it builds becomes the isolate's. An owner whose token is
-    /// gone is reclaimed at the soft lease.
+    /// A hard stop runs no destructor, so the owner's guard, and perhaps its
+    /// liveness token, stay in the heap. A waiter whose wait ends before the
+    /// lease answers the retryable 503 at its cap, having spent a few
+    /// milliseconds of CPU rather than the Free plan's whole budget, with
+    /// `Retry-After` the time left on the lease. A request after the lease —
+    /// the hard one while the token is alive, the soft one once it is gone —
+    /// reclaims the slot, and its runtime becomes the isolate's.
     #[wasm_bindgen_test]
-    async fn a_hard_stopped_owner_is_reclaimed_by_its_waiter() {
+    async fn a_hard_stopped_owner_is_reclaimed_by_a_later_request() {
+        for token_freed in [false, true] {
+            reset_isolate();
+            let timer = FakeTimer::starting_at(1_000);
+            let builds = Cell::new(0);
+            std::mem::forget(BuildGuard::try_acquire(timer.now_ms()).unwrap());
+            if token_freed {
+                BUILD_LIVENESS.with(IsolateCell::clear);
+            }
+            let stopped_at = timer.now_ms();
+
+            let waiter = cold_request(&timer, &builds, 1, false).await;
+            let lease = if token_freed {
+                BUILD_LEASE_MS
+            } else {
+                BUILD_HARD_LEASE_MS
+            };
+            let left = lease - (timer.now_ms() - stopped_at);
+            assert_eq!(
+                waiter,
+                Served::Refused(RuntimeBuildBusy::SlotHeld {
+                    retry_after_secs: u32::try_from(left.div_ceil(1_000)).unwrap()
+                }),
+                "token freed: {token_freed}: told to come back when the lease ends"
+            );
+            assert_eq!(builds.get(), 0, "token freed: {token_freed}");
+
+            assert!(
+                timer.now_ms() - stopped_at < lease,
+                "token freed: {token_freed}: the waiter gave up before the lease"
+            );
+            timer.now.set(stopped_at + lease);
+            let later = cold_request(&timer, &builds, 1, false).await;
+            assert_eq!(later, Served::Built, "token freed: {token_freed}");
+            assert_eq!(builds.get(), 1);
+            assert!(
+                cached().is_some(),
+                "the reclaimer's runtime is the isolate's"
+            );
+            assert!(!BUILDING.with(Cell::get), "and it released the slot");
+        }
         reset_isolate();
-        let timer = FakeTimer::starting_at(1_000);
-        let builds = Cell::new(0);
-        std::mem::forget(BuildGuard::try_acquire(timer.now_ms()).unwrap());
-        let stopped_at = timer.now_ms();
+    }
 
-        let served = cold_request(&timer, &builds, 1, false).await;
+    /// **A waiter whose wait crosses the lease is the reclaimer**: a request
+    /// that starts waiting one second before a
+    /// hard-stopped owner's lease ends finds the slot inactive on the tick
+    /// after it, re-enters, reclaims it and builds — at the soft lease once
+    /// the token is gone, the hard one while it is alive — rather than
+    /// waiting on to its cap and answering 503.
+    #[wasm_bindgen_test]
+    async fn a_waiter_whose_wait_crosses_the_lease_reclaims_the_slot() {
+        for token_freed in [false, true] {
+            reset_isolate();
+            let lease = if token_freed {
+                BUILD_LEASE_MS
+            } else {
+                BUILD_HARD_LEASE_MS
+            };
+            let stopped_at = 1_000;
+            std::mem::forget(BuildGuard::try_acquire(stopped_at).unwrap());
+            if token_freed {
+                BUILD_LIVENESS.with(IsolateCell::clear);
+            }
+            let timer = FakeTimer::starting_at(stopped_at + lease - 1_000);
+            let builds = Cell::new(0);
 
-        assert_eq!(served, Served::Built);
-        assert_eq!(builds.get(), 1);
-        assert!(
-            timer.now_ms() - stopped_at >= BUILD_HARD_LEASE_MS,
-            "a live token is reclaimed only after the hard lease"
-        );
-        assert!(
-            cached().is_some(),
-            "the reclaimer's runtime is the isolate's"
-        );
-        assert!(!BUILDING.with(Cell::get), "and it released the slot");
+            let served = cold_request(&timer, &builds, 1, false).await;
 
-        // The same, with the token gone: the soft lease applies.
+            assert_eq!(served, Served::Built, "token freed: {token_freed}");
+            assert_eq!(builds.get(), 1);
+            let at = timer.now_ms() - stopped_at;
+            assert!(
+                (lease..lease + BUILD_WAIT_MAX_TICK_MS).contains(&at),
+                "token freed: {token_freed}: reclaimed {at} ms after the stop"
+            );
+            assert!(cached().is_some(), "the waiter's runtime is the isolate's");
+            assert!(!BUILDING.with(Cell::get), "and it released the slot");
+        }
         reset_isolate();
-        let timer = FakeTimer::starting_at(1_000);
-        let builds = Cell::new(0);
-        std::mem::forget(BuildGuard::try_acquire(timer.now_ms()).unwrap());
-        BUILD_LIVENESS.with(IsolateCell::clear);
-
-        let served = cold_request(&timer, &builds, 1, false).await;
-
-        assert_eq!(served, Served::Built);
-        let reclaimed_after = timer.now_ms() - 1_000;
-        assert!(
-            (BUILD_LEASE_MS..BUILD_HARD_LEASE_MS).contains(&reclaimed_after),
-            "an orphaned slot is reclaimed at the soft lease, after {reclaimed_after} ms"
-        );
-        assert!(cached().is_some());
     }
 
     /// Publishing a runtime drops the isolate's memoized schema. That is the
