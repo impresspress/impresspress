@@ -157,39 +157,79 @@ async fn write_over_an_existing_file_requires_its_hash() {
     assert_eq!(output_status(out).await, 409);
 }
 
-/// Leaving `expected_sha256` out is a malformed request, not a create.
+/// The status and the `message` of one refusal, read from the one rendering.
+async fn refusal(out: wafer_run::OutputStream) -> (u16, String) {
+    let response = wafer_block::http_codec::collect_http_response(out).await;
+    let body: serde_json::Value = serde_json::from_slice(&response.body).expect("JSON refusal");
+    let message = body["message"].as_str().expect("message").to_string();
+    (response.status, message)
+}
+
+/// Leaving `expected_sha256` out is a malformed request, not a create — and
+/// the refusal says, per file, what to send instead.
 ///
 /// It used to read as `null`: an agent that forgot the hash of a file it
 /// meant to replace (the seed's `site/index.html`) was taken to be creating
 /// it, and got a 409 for a create it never asked for. The key is required so
-/// every write says which of the two it means.
+/// every write says which of the two it means, and the 400 names the hash of
+/// each file that exists so the resend needs no read first.
 #[tokio::test]
-async fn a_write_without_expected_sha256_is_refused_and_writes_nothing() {
+async fn a_write_without_expected_sha256_is_refused_with_what_to_send() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let sha = write_new(&ctx, "site/index.html", "<p>seed</p>").await;
 
-    let out = dev_post(
-        &ctx,
-        "/b/dev/api/files/write",
-        json!({"path": "site/a.css", "content": "a{}"}),
+    let (status, message) = refusal(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/a.css", "content": "a{}"}),
+        )
+        .await,
     )
     .await;
-    assert_eq!(output_http_status(out).await, 400);
+    assert_eq!(status, 400, "{message}");
+    assert!(
+        message.contains("\"site/a.css\" does not exist yet: send null"),
+        "{message}"
+    );
 
-    let out = dev_post(
-        &ctx,
-        "/b/dev/api/files/write-batch",
-        json!({"files": [
-            {"path": "site/b.css", "content": "b{}", "expected_sha256": null},
-            {"path": "site/c.css", "content": "c{}"},
-        ]}),
+    // A batch names every entry that left the key out — and only those —
+    // with the hash of the one that exists.
+    let (status, message) = refusal(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write-batch",
+            json!({"files": [
+                {"path": "site/b.css", "content": "b{}", "expected_sha256": null},
+                {"path": "site/index.html", "content": "<p>new</p>"},
+                {"path": "site/c.css", "content": "c{}"},
+            ]}),
+        )
+        .await,
     )
     .await;
-    assert_eq!(output_http_status(out).await, 400);
+    assert_eq!(status, 400, "{message}");
+    assert!(
+        message.contains(&format!("\"site/index.html\" exists (sha256 {sha}")),
+        "{message}"
+    );
+    assert!(
+        message.contains("\"site/c.css\" does not exist yet: send null"),
+        "{message}"
+    );
+    assert!(!message.contains("site/b.css"), "{message}");
+    assert!(!message.contains("  "), "a run of spaces in: {message:?}");
 
     let listing = output_json(ctx.dispatch_resolved(list_msg(Some("site/"))).await).await;
+    let paths: Vec<&str> = listing["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|f| f["path"].as_str().expect("path"))
+        .collect();
     assert_eq!(
-        listing["files"],
-        json!([]),
+        paths,
+        vec!["site/index.html"],
         "nothing may be written: {listing}"
     );
 }

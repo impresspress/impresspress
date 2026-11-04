@@ -180,8 +180,11 @@ send and read JSON.
   `site/vendor/sql-wasm*` files, or anything under `site/snippets/`,
   `site/seed/` or `site/cdn-cgi/`. The refusal names the rule; pick another
   path (e.g. `site/app.json`). The rest of `site/vendor/` is yours.
-- A stale `expected_sha256`: the refusal carries the current hash, so
-  re-read and retry.
+- A stale `expected_sha256`, or `null` for a path that already holds a
+  file (`409`): the refusal carries the current hash, so re-read and retry.
+- A left-out `expected_sha256` (`400`): the message names each file that
+  left it out with the hash to send if it exists, or `null` if it does not.
+  Nothing was written; resend with those values.
 
 ## Workflow
 

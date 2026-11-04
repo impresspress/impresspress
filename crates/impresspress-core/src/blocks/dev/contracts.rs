@@ -269,6 +269,7 @@ pub struct FileReadResponse {
 
 /// Request of `POST /b/dev/api/files/write`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(transform = require_expected_sha256)]
 pub struct FileWriteRequest {
     /// Workspace-relative path under `site/` or `blocks/<name>/`.
     pub path: String,
@@ -283,39 +284,59 @@ pub struct FileWriteRequest {
     /// (usually `site/index.html`), so look a path up in `dev_list_files`
     /// before writing `null` to it. A hash that no longer matches, or `null`
     /// for a path that holds a file, is refused with `409` and the file's
-    /// current hash; nothing is written.
+    /// current hash; nothing is written. Leaving the key out is a `400`
+    /// whose message gives, for each such file, the hash to send if it exists
+    /// or `null` if it does not.
     //
     // Absent used to mean `null`, so a caller that forgot the hash of a file
     // it meant to replace was taken to be creating it and got a 409 for a
-    // write it never meant as a create. `deserialize_with` makes serde
-    // require the key (a plain `Option` field is `None` when absent);
-    // `RequiredNullableSha256` makes the schema list it as required while
-    // still accepting `null`.
-    #[serde(deserialize_with = "Option::deserialize")]
-    #[schemars(with = "RequiredNullableSha256")]
-    pub expected_sha256: Option<String>,
+    // write it never meant as a create.
+    //
+    // The outer `Option` is whether the key was sent at all: `None` absent,
+    // `Some(None)` an explicit `null`, `Some(Some(hash))` a hash. serde's
+    // `default` gives `None` for an absent key, and `deserialize_present`
+    // wraps any value that is there — `null` included — in `Some`. The
+    // handlers refuse `None` themselves rather than leaving it to serde, so
+    // the refusal can name each file and the hash it needs; a serde error
+    // knows only a byte column.
+    //
+    // The published schema is `string | null` (`with`) and lists the key as
+    // required (`require_expected_sha256`): the key is lenient on the way in
+    // only so the refusal can be specific, not because it is optional.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub expected_sha256: Option<Option<String>>,
 }
 
-/// Schema of `FileWriteRequest::expected_sha256`: a key that must be present
-/// and is a string or `null`.
+/// Deserialize a key that is present — whatever its value, `null` included —
+/// as `Some`. Paired with `#[serde(default)]`, which supplies `None` when the
+/// key is absent, it tells "left out" apart from "sent as `null`".
+fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// List `expected_sha256` as required in `FileWriteRequest`'s schema.
 ///
-/// schemars marks an `Option` field optional, and `#[schemars(required)]`
-/// narrows it to the inner type (no `null`). Neither fits a key whose `null`
-/// is a deliberate answer, so this type states the schema directly. It is not
-/// an `Option`, which is what makes the derive list the field as required.
-struct RequiredNullableSha256;
-
-impl schemars::JsonSchema for RequiredNullableSha256 {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "RequiredNullableSha256".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": ["string", "null"] })
+/// schemars marks a field with `#[serde(default)]` optional, and no field
+/// attribute overrides that: `#[schemars(required)]` is ignored beside
+/// `default`, and on an `Option` it would drop the `null` the key must
+/// accept. So the struct's schema adds the key to `required` itself.
+fn require_expected_sha256(schema: &mut schemars::Schema) {
+    let required = schema
+        .ensure_object()
+        .entry("required")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(list) = required.as_array_mut() {
+        if !list.iter().any(|name| name == "expected_sha256") {
+            list.push("expected_sha256".into());
+        }
     }
 }
 

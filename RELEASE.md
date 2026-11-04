@@ -19,6 +19,27 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
+### Dev sandbox: every file write states `expected_sha256`
+
+**What was wrong.** `expected_sha256` on `POST /b/dev/api/files/write` and on
+each `POST /b/dev/api/files/write-batch` entry was optional, and a missing
+key meant `null` ("this file should not exist yet"). A caller that forgot the
+hash of a file it meant to replace — an agent replacing the seed's
+`site/index.html`, in a live test — was taken to be creating it and got a
+`409`. In a batch, the whole batch was refused and had to be resent.
+
+**What changes.** The key is required: the file's current hash to replace
+it, `null` to create it. Leaving it out is a `400` whose message names each
+file that left it out, with the hash to send if it exists or `null` if it
+does not; nothing is written. A stale hash, or `null` over an existing file,
+is still a `409` with the current hash. The Tool console pre-fills the key
+as `null`.
+
+**Dev sandbox API, breaking.** A write that sends only `{path, content}` to
+create a file now gets that `400`; send `"expected_sha256": null`. In
+`impresspress-js`, the generated request types make `expected_sha256`
+required (`string | null`). No stored data changes.
+
 ### Cloudflare: a retry checks D1 before it rebuilds; `/health` says `retries`
 
 **What was wrong.** During a D1 outage each isolate retried its runtime by

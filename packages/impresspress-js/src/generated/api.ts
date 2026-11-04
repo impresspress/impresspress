@@ -2469,7 +2469,9 @@ export interface paths {
                          *     (usually `site/index.html`), so look a path up in `dev_list_files`
                          *     before writing `null` to it. A hash that no longer matches, or `null`
                          *     for a path that holds a file, is refused with `409` and the file's
-                         *     current hash; nothing is written.
+                         *     current hash; nothing is written. Leaving the key out is a `400`
+                         *     whose message gives, for each such file, the hash to send if it exists
+                         *     or `null` if it does not.
                          */
                         expected_sha256: string | null;
                         /** @description Workspace-relative path under `site/` or `blocks/<name>/`. */
@@ -2608,7 +2610,9 @@ export interface paths {
                              *     (usually `site/index.html`), so look a path up in `dev_list_files`
                              *     before writing `null` to it. A hash that no longer matches, or `null`
                              *     for a path that holds a file, is refused with `409` and the file's
-                             *     current hash; nothing is written.
+                             *     current hash; nothing is written. Leaving the key out is a `400`
+                             *     whose message gives, for each such file, the hash to send if it exists
+                             *     or `null` if it does not.
                              */
                             expected_sha256: string | null;
                             /** @description Workspace-relative path under `site/` or `blocks/<name>/`. */
