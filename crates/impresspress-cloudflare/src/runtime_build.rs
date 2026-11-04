@@ -307,8 +307,12 @@ where
         None => None,
     };
     // Through the imported plan when there is one, which also holds the
-    // registered application blocks to the plan's; a failure renders as
-    // `builder.build: …` on both paths (`PreparedBuildError`).
+    // registered application blocks to the plan's. What renders: a runtime
+    // that does not build is `builder.build: …` on both paths; a plan this
+    // compile refuses is the plan's own error — the import's
+    // (`PreparedPlanError`, e.g. "compiled built-in/consumer routes do not
+    // match") or, after registration, "compiled application block inventory
+    // does not match".
     let build = move |builder: ImpresspressBuilder| -> Result<(wafer_run::Wafer, ()), Box<dyn std::error::Error>> {
         let wafer = match prepared {
             Some((plan, identity)) => builder
@@ -322,7 +326,7 @@ where
                 .build()?,
             None => builder
                 .build()
-                .map_err(impresspress_core::builder::PreparedBuildError::from)?,
+                .map_err(|e| format!("builder.build: {e}"))?,
         };
         Ok((wafer, ()))
     };

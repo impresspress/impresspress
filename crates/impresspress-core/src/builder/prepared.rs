@@ -257,9 +257,11 @@ fn application_inventory(
     infos: &[Arc<wafer_run::BlockInfo>],
     application: &[String],
 ) -> Vec<PreparedBlockImplementation> {
+    let application: std::collections::HashSet<&str> =
+        application.iter().map(String::as_str).collect();
     infos
         .iter()
-        .filter(|info| application.contains(&info.name))
+        .filter(|info| application.contains(info.name.as_str()))
         .map(|info| PreparedBlockImplementation {
             name: info.name.clone(),
             version: info.version.clone(),
@@ -834,98 +836,6 @@ pub(super) mod tests {
             _event: wafer_run::LifecycleEvent,
         ) -> Result<(), wafer_run::WaferError> {
             Ok(())
-        }
-    }
-
-    /// A consumer block: off by default (operators may switch it on), and
-    /// declaring one auto-generated secret, `{ORG}__{BLOCK}__SIGNING_SECRET`.
-    struct Consumer(&'static str, &'static str);
-
-    #[wafer_block::wafer_async_trait]
-    impl wafer_run::Block for Consumer {
-        fn info(&self) -> wafer_run::BlockInfo {
-            wafer_run::BlockInfo::new(self.0, "0.1.0", "http-handler@v1", "consumer")
-                .can_disable(true)
-                .default_enabled(false)
-                .config_keys(vec![wafer_run::ConfigVar::new(
-                    self.1,
-                    "signing secret",
-                    "",
-                )
-                .auto_generate()])
-        }
-        async fn handle(
-            &self,
-            _ctx: &dyn wafer_run::context::Context,
-            _msg: wafer_run::Message,
-            _input: wafer_run::InputStream,
-        ) -> wafer_run::OutputStream {
-            crate::http::ResponseBuilder::new()
-                .status(200)
-                .body(Vec::new(), "text/plain")
-        }
-        async fn lifecycle(
-            &self,
-            _ctx: &dyn wafer_run::context::Context,
-            _event: wafer_run::LifecycleEvent,
-        ) -> Result<(), wafer_run::WaferError> {
-            Ok(())
-        }
-    }
-
-    /// The deploy funnel (Cloudflare's `/_deploy/*`) seeds from the
-    /// runtime's registered declarations: a consumer block registered on the
-    /// builder, and one registered on the built runtime before boot, each get
-    /// their declared enablement default and their auto-generated secret.
-    #[tokio::test]
-    async fn the_deploy_funnel_seeds_consumer_blocks_declarations() {
-        let database: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
-            Arc::new(
-                wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
-                    .expect("open in-memory sqlite"),
-            );
-        let (builder, config) = serviced_over(
-            ImpresspressBuilder::new().extra_block(
-                "example/consumer",
-                Arc::new(Consumer(
-                    "example/consumer",
-                    "EXAMPLE__CONSUMER__SIGNING_SECRET",
-                )),
-            ),
-            database.clone(),
-            true,
-        );
-        let settings = builder.block_settings_handle();
-        let (mut wafer, _exporter) = builder
-            .build_with_plan_exporter()
-            .expect("the deploy runtime builds");
-        wafer
-            .register_block(
-                "example/late",
-                Arc::new(Consumer("example/late", "EXAMPLE__LATE__SIGNING_SECRET")),
-            )
-            .expect("a post-build block registers");
-        let report = crate::builder::boot_deploy_runtime(&mut wafer, &database, &settings, config)
-            .await
-            .expect("the deploy funnel runs");
-        assert!(report.ok, "{report:#?}");
-
-        let stored = crate::platform_state::block_settings::load(&database)
-            .await
-            .expect("block settings");
-        for (block, key) in [
-            ("example/consumer", "EXAMPLE__CONSUMER__SIGNING_SECRET"),
-            ("example/late", "EXAMPLE__LATE__SIGNING_SECRET"),
-        ] {
-            assert!(
-                !stored.state(block).enabled,
-                "{block}'s declared default (off) is seeded"
-            );
-            let secret = crate::platform_state::variables::find_by_key(&database, key)
-                .await
-                .expect("read the secret")
-                .unwrap_or_else(|| panic!("{key} is generated"));
-            assert!(!secret.value.is_empty(), "{key} is generated");
         }
     }
 

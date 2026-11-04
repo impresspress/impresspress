@@ -368,17 +368,8 @@ mod boot_hook_tests {
         ))
     }
 
-    /// The compiled block set's declarations, standing in for a deploy
-    /// runtime's registered ones in these hook-only tests.
-    fn compiled_declarations() -> Vec<Arc<wafer_run::BlockInfo>> {
-        impresspress_core::blocks::all_block_infos()
-            .into_iter()
-            .map(Arc::new)
-            .collect()
-    }
-
     /// One block that ships enabled. Held here rather than taken from
-    /// `blocks::enabled_defaults_from(&all_block_infos())` so the fixture proves the same thing
+    /// `blocks::block_enabled_defaults()` so the fixture proves the same thing
     /// in every feature build: this crate's default feature set has no
     /// `can_disable` block at all, so the real defaults list is empty there and
     /// a seeding call over it would write nothing for a reason that has nothing
@@ -429,7 +420,6 @@ mod boot_hook_tests {
             settings_handle(),
             request_services::config_proxy(),
             seed_defaults_fixture(),
-            compiled_declarations(),
         );
         deploy.seed_and_load().await.expect("deploy seed");
         assert!(
@@ -472,7 +462,7 @@ mod boot_hook_tests {
     ///
     /// Note which build catches a regression here. This crate's DEFAULT
     /// feature set enables no `can_disable` block, so
-    /// `blocks::enabled_defaults_from(&all_block_infos())` is empty and a seeding hook wired
+    /// `blocks::block_enabled_defaults()` is empty and a seeding hook wired
     /// back onto the request path would write nothing in that build and keep
     /// this green. The `--features full` lane is where it fails, which is why
     /// CI now runs this suite twice.
@@ -517,7 +507,6 @@ mod boot_hook_tests {
             settings_handle(),
             request_services::config_proxy(),
             seed_defaults_fixture(),
-            compiled_declarations(),
         );
         deploy
             .seed_and_load()
@@ -625,7 +614,6 @@ mod boot_hook_tests {
             settings_handle(),
             request_services::config_proxy(),
             seed_defaults_fixture(),
-            compiled_declarations(),
         );
         deploy.seed_and_load().await.expect("deploy seed");
         block_settings::load(&db)

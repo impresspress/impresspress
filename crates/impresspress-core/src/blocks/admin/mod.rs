@@ -946,7 +946,7 @@ fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -
             //
             // It does NOT make an admin toggle for the inspector work: every
             // writer keys rows by `BlockInfo::name` (`set_enabled` from the
-            // blocks page, `enabled_defaults_from` from the seed), so a row
+            // blocks page, `block_enabled_defaults` from the seed), so a row
             // would be keyed `wafer-run/inspector` and this read would miss
             // it. Moot in practice — `can_disable` defaults to false and the
             // inspector never declares otherwise, so it is seeded no row and

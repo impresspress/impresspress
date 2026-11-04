@@ -151,7 +151,7 @@ crate::impresspress_feature_block! {
         // page that holds the account's one change-password form
         // (`/b/auth/change-password` redirects there). Turning it off would
         // leave no way to change a password. A block that cannot be disabled
-        // gets no enablement row (`blocks::enabled_defaults_from`) and the
+        // gets no enablement row (`blocks::block_enabled_defaults`) and the
         // admin Blocks page offers it no toggle; the router reads an absent
         // row as enabled.
     },

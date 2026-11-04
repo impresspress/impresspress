@@ -153,15 +153,7 @@ pub async fn boot_deploy_runtime(
     block_settings: &Arc<RwLock<BlockSettings>>,
     config: Arc<dyn ConfigService>,
 ) -> Result<BootReport, BootError> {
-    // The runtime's own declarations, as its registration read them: the
-    // seeding derives its defaults and its auto-generated secrets from them,
-    // so the funnel constructs no block set.
-    let hooks = DeployBootHooks::new(
-        db.clone(),
-        block_settings.clone(),
-        config,
-        wafer.block_infos(),
-    );
+    let hooks = DeployBootHooks::new(db.clone(), block_settings.clone(), config);
     boot(
         wafer,
         &hooks,
@@ -272,29 +264,21 @@ pub struct DeployBootHooks {
     /// means visibly giving the request hook a defaults set, not quietly
     /// swapping one function call for another.
     seed_defaults: Vec<(String, bool)>,
-    /// The declarations the auto-generated secret pass reads: the runtime's
-    /// registered ones on the deploy funnel ([`Self::new`]).
-    declarations: Vec<Arc<wafer_run::BlockInfo>>,
 }
 
 impl DeployBootHooks {
-    /// The deploy hooks over `db`, seeding towards the defaults
-    /// `declarations` — the runtime's registered `BlockInfo`s — declare
-    /// ([`crate::blocks::enabled_defaults_from`]), and generating the secrets
-    /// they declare.
+    /// The deploy hooks over `db`, seeding towards
+    /// [`crate::blocks::block_enabled_defaults`].
     pub fn new(
         db: Arc<dyn DatabaseService>,
         block_settings_handle: Arc<RwLock<BlockSettings>>,
         config: Arc<dyn ConfigService>,
-        declarations: Vec<Arc<wafer_run::BlockInfo>>,
     ) -> Self {
-        let seed_defaults = crate::blocks::enabled_defaults_from(&declarations);
         Self::seeding_towards(
             db,
             block_settings_handle,
             config,
-            seed_defaults,
-            declarations,
+            crate::blocks::block_enabled_defaults(),
         )
     }
 
@@ -306,14 +290,12 @@ impl DeployBootHooks {
         block_settings_handle: Arc<RwLock<BlockSettings>>,
         config: Arc<dyn ConfigService>,
         seed_defaults: Vec<(String, bool)>,
-        declarations: Vec<Arc<wafer_run::BlockInfo>>,
     ) -> Self {
         Self {
             db,
             block_settings_handle,
             config,
             seed_defaults,
-            declarations,
         }
     }
 
@@ -323,7 +305,7 @@ impl DeployBootHooks {
     /// `&mut Wafer` that a target's wrapper tests cannot produce, and what
     /// those tests are about is the writes.
     pub async fn seed_and_load(&self) -> Result<BlockSettings, DatabaseError> {
-        crate::platform_state::variables::seed_auto_generated(&self.db, &self.declarations).await;
+        crate::platform_state::variables::seed_auto_generated(&self.db).await;
 
         // The hosted target's only call site for the sensitive-flag repair.
         // Cloudflare never runs `variables::seed_and_load` — it has no process
@@ -488,7 +470,7 @@ fn hook_error(step: &str, e: DatabaseError) -> SeedError {
 /// Publish a freshly loaded `BlockSettings` everywhere the rest of the boot
 /// reads it from: the router's shared handle, and both config surfaces (via
 /// `RuntimeConfig`, so neither can be filled without the other).
-pub fn publish_block_settings(
+fn publish_block_settings(
     wafer: &mut Wafer,
     config: &Arc<dyn ConfigService>,
     handle: &Arc<RwLock<BlockSettings>>,

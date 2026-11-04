@@ -306,17 +306,15 @@ pub fn static_asset_bytes(logical: &str) -> Option<&'static [u8]> {
 }
 
 /// The `(block_name, default_enabled)` pairs the boot-time enablement seed
-/// writes into `impresspress__admin__block_settings`, for the blocks
-/// `infos` declares — a runtime's registered declarations
-/// (`Wafer::block_infos()`), consumer blocks included.
+/// writes into `impresspress__admin__block_settings`.
 ///
 /// Derived, not listed: a block declares whether an operator may turn it off
 /// (`can_disable`) and what it ships as (`default_enabled`) in its own
 /// `info()`, and this is the only place those declarations are collected.
 /// Passed to [`crate::platform_state::block_settings::load_and_seed`] by each
-/// target's seeding (native's after registration, the Cloudflare deploy
-/// funnel's hook, the browser's boot hook), which is what keeps the planner
-/// itself free of any dependency on the block registry.
+/// target's boot path (the CLI, the Cloudflare deploy-init hook, the browser
+/// config loader), which is what keeps the planner itself free of any
+/// dependency on the block registry.
 ///
 /// Three consequences of the `can_disable` filter, each deliberate:
 ///
@@ -334,13 +332,19 @@ pub fn static_asset_bytes(logical: &str) -> Option<&'static [u8]> {
 ///   `.can_disable(true)` would reintroduce that, which is why the reason is
 ///   recorded here rather than in a name-matching special case.
 /// - **The set follows the build.** Each entry of the block manifest is
-///   `#[cfg]`-gated, so a bundle compiled without `block-tickets` registers
-///   no `tickets` block and seeds no row for it; its routes 404 whether a row
-///   says enabled or not.
-pub fn enabled_defaults_from<B: std::borrow::Borrow<wafer_run::BlockInfo>>(
-    infos: &[B],
-) -> Vec<(String, bool)> {
-    crate::declarations::declared(infos)
+///   `#[cfg]`-gated, so a bundle compiled without `block-tickets` seeds no
+///   `tickets` row. That block is not registered in such a build either, so
+///   its routes 404 whether the row says enabled or not.
+pub fn block_enabled_defaults() -> Vec<(String, bool)> {
+    enabled_defaults_from(&all_block_infos())
+}
+
+/// The rule behind [`block_enabled_defaults`], over an explicit slice so it can
+/// be exercised on constructed `BlockInfo`s rather than only on whatever the
+/// current feature set happens to register.
+fn enabled_defaults_from(infos: &[wafer_run::BlockInfo]) -> Vec<(String, bool)> {
+    infos
+        .iter()
         .filter(|i| i.can_disable)
         .map(|i| (i.name.clone(), i.default_enabled))
         .collect()

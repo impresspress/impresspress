@@ -30,11 +30,8 @@ pub trait AppSeed {
 ///
 /// After `init_block(admin)` has created the variables / block_settings
 /// tables, this runs the consumer's [`AppSeed`] (if any), auto-generates the
-/// secrets the runtime's registered blocks declare (consumer blocks
-/// included), and the JWT secret, loads the variables back and
-/// hash-gate-seeds the block settings towards the defaults those same
-/// registered blocks declare (#222) — the set every target seeds from — then
-/// publishes the loaded state
+/// declared secrets (the JWT secret among them), loads the variables back and
+/// hash-gate-seeds the block settings (#222), then publishes the loaded state
 /// into the services the wafer already holds:
 ///  - `config_source` — the `SharedConfigSource` the runtime resolves every
 ///    block's declared `ConfigVar`s from at its first `lifecycle(Init)`.
@@ -64,24 +61,19 @@ pub(super) struct BrowserBootHooks<'a> {
 }
 
 impl BrowserBootHooks<'_> {
-    /// The app's seeds, then the shared ones: auto-generate the secrets
-    /// `declarations` (the runtime's registered blocks) declare, and the auth
-    /// JWT secret, and load the full set back — the core path every target
-    /// runs, over `BrowserDatabaseService`. There are no process env vars in
-    /// the browser, hence `&[]`.
-    async fn seed_and_load_variables(
-        &self,
-        declarations: &[Arc<wafer_run::BlockInfo>],
-    ) -> Result<HashMap<String, String>, String> {
+    /// The app's seeds, then the shared ones: auto-generate the declared
+    /// secrets (incl. the auth JWT secret) and load the full set back — the
+    /// core path every target runs, over `BrowserDatabaseService`. There are
+    /// no process env vars in the browser, hence `&[]`.
+    async fn seed_and_load_variables(&self) -> Result<HashMap<String, String>, String> {
         if let Some(seed) = self.app_seed {
             seed.seed(&self.db).await?;
         }
-        impresspress_core::platform_state::variables::seed_and_load(&self.db, &[], declarations)
-            .await
+        impresspress_core::platform_state::variables::seed_and_load(&self.db, &[]).await
     }
 
-    /// Load + hash-gate-seed block settings towards the defaults
-    /// `declarations` declare, the exact #222 gate Cloudflare and native run.
+    /// Load + hash-gate-seed block settings, the exact #222 gate Cloudflare
+    /// and native run.
     ///
     /// A read error is always a genuine operational failure (OPFS/sql.js
     /// corruption, quota exhaustion) — never the missing-table cold-start
@@ -89,11 +81,10 @@ impl BrowserBootHooks<'_> {
     /// Propagates rather than fabricating "every block enabled".
     async fn load_block_settings(
         &self,
-        declarations: &[Arc<wafer_run::BlockInfo>],
     ) -> Result<impresspress_core::features::BlockSettings, builder::SeedError> {
         impresspress_core::platform_state::block_settings::load_and_seed(
             &self.db,
-            &impresspress_core::blocks::enabled_defaults_from(declarations),
+            &impresspress_core::blocks::block_enabled_defaults(),
         )
         .await
         .map_err(|e| match builder::SeedError::from(e) {
@@ -116,11 +107,8 @@ impl BootHooks for BrowserBootHooks<'_> {
         // The variables seed answers in text (its own and the app seed's), so
         // it is not classified: the browser boots `Tolerant`, where a failed
         // seed stops the boot either way and nothing retries on the class.
-        // The runtime's registered declarations, as its registration read
-        // them: the one set every target seeds from.
-        let declarations = wafer.block_infos();
         let vars = self
-            .seed_and_load_variables(&declarations)
+            .seed_and_load_variables()
             .await
             .map_err(builder::SeedError::Fault)?;
         web_sys::console::log_1(
@@ -130,7 +118,7 @@ impl BootHooks for BrowserBootHooks<'_> {
             )
             .into(),
         );
-        let features = self.load_block_settings(&declarations).await?;
+        let features = self.load_block_settings().await?;
 
         // The runtime resolves every block's DECLARED `ConfigVar`s through the
         // config source before it calls that block's `lifecycle(Init)` — a

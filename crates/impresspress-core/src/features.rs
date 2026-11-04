@@ -28,7 +28,7 @@ pub trait FeatureConfig: wafer_run::MaybeSend + wafer_run::MaybeSync {
 /// (`BlockInfo::can_disable == false` — `impresspress/admin`,
 /// `impresspress/auth-ui`, `impresspress/system`, `impresspress/userportal`,
 /// …) is enabled whatever a stored row says. Such a block is seeded no row
-/// and offered no toggle (`blocks::enabled_defaults_from`), but a row can
+/// and offered no toggle (`blocks::block_enabled_defaults`), but a row can
 /// predate the declaration: `impresspress/userportal` was disableable until it
 /// became the account surface, so a deployment may hold an "off" row for it
 /// that nothing could ever turn back on. Reading the declaration here, rather
@@ -296,8 +296,8 @@ pub enum SeedOp {
 /// Pure function — no DB access and no knowledge of the block registry. The
 /// caller supplies both sides: the already-loaded `existing` map (keyed by
 /// block_name → `ExistingRow`) and the `(block_name, default_enabled)` pairs
-/// to seed towards, which production derives from the runtime's registered
-/// blocks' own `BlockInfo` via [`crate::blocks::enabled_defaults_from`]. It then applies the returned
+/// to seed towards, which production derives from the blocks' own `BlockInfo`
+/// via [`crate::blocks::block_enabled_defaults`]. It then applies the returned
 /// decisions in whatever shape its persistence layer prefers (one upsert per
 /// decision, batched, etc.).
 ///

@@ -254,8 +254,7 @@ pub async fn load(db: &Arc<dyn DatabaseService>) -> Result<BlockSettings, Databa
 ///
 /// `defaults` is the `(block_name, default_enabled)` set to seed towards,
 /// which every production caller builds with
-/// [`crate::blocks::enabled_defaults_from`] over the runtime's registered
-/// declarations (`Wafer::block_infos()`); a block absent from it keeps
+/// [`crate::blocks::block_enabled_defaults`]; a block absent from it keeps
 /// whatever row it has and is never given one.
 ///
 /// This is the single implementation behind every target's block-settings
