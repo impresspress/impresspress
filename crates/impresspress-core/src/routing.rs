@@ -20,11 +20,12 @@ pub const STATIC_PREFIX: &str = "/b/static/";
 
 /// A single route entry: the coarse access floor for one block's prefix.
 ///
-/// `block` is the impresspress block name (`{org}/{block}`) used for feature-gating
-/// and the inspector's [`routes_config`] view. `dispatch_to` is the Wafer block
-/// name passed to `ctx.call_block`; it equals `block` for every route except the
-/// inspector, which is feature-gated/displayed as `impresspress/inspector` but
-/// dispatches to the `wafer-run/inspector` runtime block.
+/// `block` is the impresspress block name (`{org}/{block}`) used for
+/// feature-gating. `dispatch_to` is the Wafer block name passed to
+/// `ctx.call_block`, and the `block` each route carries in [`routes_config`];
+/// it equals `block` for every route except the inspector, which is
+/// feature-gated as `impresspress/inspector` but dispatches to the
+/// `wafer-run/inspector` runtime block.
 ///
 /// `access` is a floor, never the whole decision: [`route_to_block`] enforces
 /// `access.max(declared_access(..))`, so the block's declared per-endpoint
@@ -328,43 +329,72 @@ pub const ROUTES: &[Route] = &[
     Route::new("/b/signal/", RouteAccess::Public, "impresspress/signal"),
 ];
 
-/// Generate the routing table as JSON config (same format as wafer-run/router).
-/// Used to expose routes to the inspector.
+/// The routing table as JSON config in the `router@v1` shape
+/// (`{ "routes": [{ "path", "block", "methods"? }] }`, as `wafer-run/router`
+/// reads it). It is the `impresspress/router` block's config, which the
+/// inspector shows as that block's running config. Nothing routes from it:
+/// dispatch reads [`ROUTES`] and `extra_routes` directly.
 ///
-/// Each coarse prefix [`Route`] contributes one `{prefix}**` entry. Endpoint
-/// granularity (the exact method+path templates a block exposes) is sourced
-/// from each block's `BlockInfo::endpoints` rather than from hand-maintained
-/// per-endpoint `Route` entries — this is what lets the vector block collapse
-/// to a single prefix route while the inspector still shows its nine
-/// endpoints. Endpoint entries are de-duplicated against the prefix entries.
-pub fn routes_config<B: std::borrow::Borrow<BlockInfo>>(block_infos: &[B]) -> serde_json::Value {
-    let mut routes: Vec<serde_json::Value> = ROUTES
+/// It reads the way [`route_to_block`] matches — [`ROUTES`] in table order,
+/// then the downstream `extra_routes` — first entry wins:
+///
+/// - Each route becomes `{prefix}/**` (trailing `/` dropped), which matches
+///   the bare prefix and everything below it, naming the block it
+///   dispatches to. The router's own matcher is a plain string prefix, so a
+///   prefix without a trailing slash (`/b/llm`) also claims longer names
+///   (`/b/llmx`); `router@v1` patterns cannot say that, and no route relies
+///   on it.
+/// - A route an earlier one fully shadows — an extra route whose prefix a
+///   built-in already claims — never dispatches, and is left out.
+/// - Endpoint granularity (the exact method + path templates a block
+///   serves) comes from each block's `BlockInfo::endpoints` rather than
+///   from hand-maintained per-endpoint `Route` entries — this is what lets
+///   the vector block collapse to a single prefix route while the table
+///   still lists its nine endpoints. Each endpoint is listed just before the
+///   route that serves it, and only when that route is the first to match
+///   its path; an endpoint an earlier route shadows is not served and is
+///   left out.
+pub fn routes_config<B: std::borrow::Borrow<BlockInfo>>(
+    block_infos: &[B],
+    extra_routes: &[ExtraRoute],
+) -> serde_json::Value {
+    let block_infos = wafer_block::declarations(block_infos);
+    // `(prefix, dispatch target)` in the order `route_to_block` tries them.
+    let table: Vec<(&str, &str)> = ROUTES
         .iter()
-        .map(|r| {
-            let path = format!("{}**", r.prefix);
-            serde_json::json!({ "path": path, "block": r.block })
-        })
+        .map(|r| (r.prefix, r.dispatch_to))
+        .chain(
+            extra_routes
+                .iter()
+                .map(|r| (r.prefix.as_str(), r.block_name.as_str())),
+        )
         .collect();
+    let first_route = |path: &str| {
+        table
+            .iter()
+            .position(|(prefix, _)| route_prefix_matches(prefix, path))
+    };
 
-    // Per-endpoint granularity from the blocks themselves. Only emit entries
-    // for blocks that own a built-in prefix route (so we mirror the routing
-    // table, not the whole registry), and skip any whose exact `{prefix}**`
-    // form already covers them.
-    for info in wafer_block::declarations(block_infos) {
-        if !ROUTES.iter().any(|r| r.block == info.name) {
+    let mut routes = Vec::new();
+    for (i, (prefix, block)) in table.iter().enumerate() {
+        if first_route(prefix) != Some(i) {
             continue;
         }
-        for ep in &info.endpoints {
-            let entry = serde_json::json!({
-                "path": ep.path,
-                "method": ep.method.to_string(),
-                "block": info.name,
-                "auth": ep.auth.to_string(),
-            });
-            if !routes.contains(&entry) {
-                routes.push(entry);
+        for info in block_infos.iter().filter(|info| info.name == *block) {
+            for ep in &info.endpoints {
+                if first_route(&ep.path) == Some(i) {
+                    routes.push(serde_json::json!({
+                        "path": ep.path,
+                        "methods": [ep.method.to_string()],
+                        "block": block,
+                    }));
+                }
             }
         }
+        routes.push(serde_json::json!({
+            "path": format!("{}/**", prefix.trim_end_matches('/')),
+            "block": block,
+        }));
     }
 
     serde_json::json!({ "routes": routes })
@@ -831,8 +861,7 @@ pub async fn route_to_block<B: std::borrow::Borrow<BlockInfo>>(
     // Fall back to project-registered extra routes. Built-ins above win on
     // prefix collision — this loop only runs when no built-in matched.
     for route in extra_routes {
-        let matches = path == route.prefix || path.starts_with(&route.prefix);
-        if !matches {
+        if !route_prefix_matches(&route.prefix, &path) {
             continue;
         }
 
@@ -1349,42 +1378,110 @@ mod tests {
     }
 
     #[test]
-    fn routes_config_uses_display_block_name_for_inspector() {
-        // routes_config() must show the inspector as `impresspress/inspector`
-        // (the display/feature name), not its `wafer-run/inspector` dispatch
-        // target — the inspector UI keys its feature map on the former.
-        let cfg = super::routes_config::<BlockInfo>(&[]);
+    fn routes_config_names_the_block_each_route_dispatches_to() {
+        // In the `router@v1` shape a route's `block` is the block it
+        // dispatches to, so the inspector route names the registered
+        // `wafer-run/inspector`, not its `impresspress/inspector` feature
+        // name — which no registered block carries.
+        let cfg = super::routes_config::<BlockInfo>(&[], &[]);
         let routes = cfg["routes"].as_array().expect("routes array");
         let inspector = routes
             .iter()
-            .find(|r| r["path"] == "/b/inspector**")
+            .find(|r| r["path"] == "/b/inspector/**")
             .expect("inspector route in config");
-        assert_eq!(inspector["block"], "impresspress/inspector");
+        assert_eq!(inspector["block"], "wafer-run/inspector");
     }
 
     #[test]
     fn routes_config_sources_endpoint_granularity_from_block_infos() {
         use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo};
         // A block that owns a built-in prefix route ("/b/vector/") contributes
-        // its declared endpoints to the inspector view even though the route
-        // table has a single collapsed prefix entry.
+        // its declared endpoints even though the route table has a single
+        // collapsed prefix entry.
         let info = BlockInfo::new("impresspress/vector", "0.0.1", "http-handler@v1", "v")
             .endpoints(vec![
                 BlockEndpoint::post("/b/vector/api/query").auth(AuthLevel::Authenticated),
                 BlockEndpoint::get("/b/vector/").auth(AuthLevel::Admin),
             ]);
-        let cfg = super::routes_config(std::slice::from_ref(&info));
+        let cfg = super::routes_config(std::slice::from_ref(&info), &[]);
         let routes = cfg["routes"].as_array().expect("routes array");
-        // The collapsed prefix entry is present.
-        assert!(routes.iter().any(|r| r["path"] == "/b/vector/**"));
-        // And the per-endpoint granularity is sourced from info().endpoints.
-        let query = routes
-            .iter()
-            .find(|r| r["path"] == "/b/vector/api/query")
-            .expect("endpoint-sourced query route");
-        assert_eq!(query["method"], "POST");
-        assert_eq!(query["auth"], "authenticated");
+        let position = |path: &str| {
+            routes
+                .iter()
+                .position(|r| r["path"] == path)
+                .unwrap_or_else(|| panic!("{path} in {routes:?}"))
+        };
+        let query = &routes[position("/b/vector/api/query")];
+        assert_eq!(query["methods"], serde_json::json!(["POST"]));
         assert_eq!(query["block"], "impresspress/vector");
+        // First match wins, so an endpoint is listed before the prefix that
+        // would otherwise shadow it.
+        assert!(position("/b/vector/api/query") < position("/b/vector/**"));
+        assert!(position("/b/vector/") < position("/b/vector/**"));
+    }
+
+    #[test]
+    fn routes_config_is_router_v1_config_that_routes_like_the_table() {
+        let cfg = super::routes_config(&crate::blocks::all_block_infos(), &[]);
+        let parsed =
+            wafer_block_router::parse_routes(&cfg).expect("routes_config is router@v1 config");
+        for route in &parsed {
+            // `router@v1` supports a wildcard only as a trailing `/**`.
+            let wildcard = route.path.strip_suffix("/**").unwrap_or(&route.path);
+            assert!(
+                !wildcard.contains('*'),
+                "not a router@v1 pattern: {}",
+                route.path
+            );
+        }
+        // A path under each built-in prefix resolves, through the router@v1
+        // entries in order, to the block the router dispatches it to.
+        for r in ROUTES {
+            let probe = format!("{}/probe", r.prefix.trim_end_matches('/'));
+            let served_by = ROUTES
+                .iter()
+                .find(|x| super::route_prefix_matches(x.prefix, &probe))
+                .expect("the probe is under a prefix");
+            let first = parsed
+                .iter()
+                .find(|e| e.actions.is_empty() && wafer_run::match_path(&e.path, &probe))
+                .unwrap_or_else(|| panic!("no entry matches {probe}"));
+            assert_eq!(first.block, served_by.dispatch_to, "{probe}");
+        }
+    }
+
+    #[test]
+    fn routes_config_lists_extra_routes_after_the_built_ins() {
+        use wafer_run::{BlockEndpoint, BlockInfo};
+        let app = BlockInfo::new("example/app", "0.0.1", "http-handler@v1", "a")
+            .endpoints(vec![BlockEndpoint::get("/app/items/{id}")]);
+        let extra = [
+            ExtraRoute::new("/app/", "example/app", RouteAccess::Public),
+            // A built-in already claims this prefix, so the router never
+            // dispatches it — and the table does not list it.
+            ExtraRoute::new("/b/inspector/", "example/shadowed", RouteAccess::Public),
+        ];
+        let cfg = super::routes_config(std::slice::from_ref(&app), &extra);
+        let parsed =
+            wafer_block_router::parse_routes(&cfg).expect("routes_config is router@v1 config");
+        let position = |path: &str| parsed.iter().position(|e| e.path == path);
+
+        let app_route = position("/app/**").expect("extra route listed");
+        let endpoint = position("/app/items/{id}").expect("its endpoint listed");
+        assert!(endpoint < app_route, "an endpoint precedes its prefix");
+        let last_built_in = position("/b/signal/**").expect("built-in listed");
+        assert!(
+            last_built_in < endpoint,
+            "built-ins win, so they come first"
+        );
+        assert_eq!(parsed[app_route].block, "example/app");
+        assert!(
+            parsed.iter().all(|e| e.block != "example/shadowed"),
+            "a shadowed extra route is not listed"
+        );
+        // The bare prefix reaches the extra route in both tables.
+        assert!(super::route_prefix_matches(&extra[0].prefix, "/app"));
+        assert!(wafer_run::match_path(&parsed[app_route].path, "/app"));
     }
 
     // -----------------------------------------------------------------------
