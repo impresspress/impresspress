@@ -414,7 +414,11 @@ impl ImpresspressBuilder {
         // `Arc`s as they are (generic over `Borrow<BlockInfo>`), so no
         // declaration is copied and no block's `info()` runs again.
         let block_infos: Arc<[Arc<wafer_run::BlockInfo>]> = registered_infos.into();
-        let routes_cfg = crate::routing::routes_config(&block_infos);
+        // Shared with the router and the body-limit block below, which judges
+        // its audit rows' paths against the same declarations the router
+        // routes by; the route table lists them too.
+        let extra_routes = Arc::new(self.extra_routes);
+        let routes_cfg = crate::routing::routes_config(&block_infos, &extra_routes);
 
         // WebMCP refusals are *mostly* structural — a defect in a block's
         // own AgentTool declarations (an unrepresentable schema, a malformed
@@ -515,9 +519,6 @@ impl ImpresspressBuilder {
         #[cfg(feature = "block-dev")]
         crate::blocks::dev::tools::log_selection_refusals(&block_infos);
 
-        // Shared with the body-limit block below, which judges its audit
-        // rows' paths against the same declarations the router routes by.
-        let extra_routes = Arc::new(self.extra_routes);
         let router = ImpresspressRouterBlock::with_extra_routes_arc(
             self.jwt_secret.clone(),
             feature_config,

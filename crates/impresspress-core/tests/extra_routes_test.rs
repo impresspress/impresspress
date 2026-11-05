@@ -221,6 +221,31 @@ async fn public_extra_route_dispatches_without_auth() {
 }
 
 #[tokio::test]
+async fn extra_route_serves_its_bare_prefix() {
+    // `/b/chat` (no trailing slash) belongs to the `/b/chat/` route, as it
+    // does for a built-in — the same matcher `effective_access` and
+    // `routes_config` resolve extra routes with.
+    let ctx = RecordingContext::new();
+    let extras = vec![ExtraRoute::new(
+        "/b/chat/",
+        "gizza-ai/chat",
+        RouteAccess::Public,
+    )];
+
+    let stream = routing::route_to_block::<wafer_run::BlockInfo>(
+        &ctx,
+        make_msg("/b/chat"),
+        InputStream::empty(),
+        &AllEnabled,
+        &[],
+        &extras,
+    )
+    .await;
+    assert_eq!(response_status(stream).await, 200);
+    assert_eq!(ctx.calls(), vec!["gizza-ai/chat".to_string()]);
+}
+
+#[tokio::test]
 async fn authenticated_extra_route_forbids_empty_user_id() {
     let ctx = RecordingContext::new();
     let features = AllEnabled;
