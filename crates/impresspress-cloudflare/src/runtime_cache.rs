@@ -94,10 +94,14 @@
 //! variables read one of its later requests left behind is healed by the
 //! read alone, with no rebuild ([`heals_in_place`]).
 //!
-//! Every gate read, whatever follows it, is recorded in `BACKEND_CHECK`
-//! ([`check_backend`]) and reported as `/health`'s `backend`. A failed gate
-//! publishes nothing, so the runtime it keeps reports the state of the build
-//! that made it; `backend` is what says the backend is down now (see
+//! What the slot owner sees of the backend is recorded in `BACKEND_CHECK`
+//! ([`note_backend`]) and reported as `/health`'s `backend`: every gate read
+//! ([`check_backend`]), the D1 handle failing to open
+//! ([`open_attempt_database`]), a backend failure D1 answered any call of a
+//! build that did not publish healthy with ([`note_build_reads`]), and a
+//! retry that ends at an unreadable config stamp. A failed gate publishes
+//! nothing, so the runtime it keeps reports the state of the build that made
+//! it; `backend` is what says the backend is down now (see
 //! [`impresspress_core::runtime_health`]'s "The backend, named apart from the
 //! runtime").
 
@@ -404,7 +408,7 @@ thread_local! {
     /// that published degraded or failed until a healthy publish. A `Copy`
     /// value in a plain `Cell`, like `BUILD_LAST_FAILURE`.
     static RETRY_WINDOW: Cell<Option<RetryWindow>> = const { Cell::new(None) };
-    /// The outcome of the isolate's last gate read ([`check_backend`]), for
+    /// What the slot owner last saw of the backend ([`note_backend`]), for
     /// `/health`'s `backend`. `Copy`, in a plain `Cell`.
     static BACKEND_CHECK: Cell<Option<BackendCheck>> = const { Cell::new(None) };
 }
@@ -1541,6 +1545,9 @@ trait BuildIo {
         &self,
         db: &Arc<dyn DatabaseService>,
     ) -> Result<impresspress_core::features::BlockSettings, RuntimeBuildError>;
+    /// When D1 last answered a call of this invocation with a backend
+    /// failure ([`D1CallCount::backend_failure_at`](crate::database::D1CallCount::backend_failure_at)).
+    fn backend_failure_at(&self) -> Option<u64>;
     /// The gate: read the variables table into `variables` now
     /// ([`runtime_build::read_variables`](crate::runtime_build::read_variables)).
     async fn read_variables(
@@ -1635,6 +1642,10 @@ where
         db: &Arc<dyn DatabaseService>,
     ) -> Result<impresspress_core::features::BlockSettings, RuntimeBuildError> {
         crate::runtime_build::read_block_settings(db).await
+    }
+
+    fn backend_failure_at(&self) -> Option<u64> {
+        self.inputs.calls.backend_failure_at()
     }
 
     async fn read_variables(
@@ -1909,7 +1920,15 @@ async fn serve_without_runtime(
     let finished = match as_owner(
         &build_guard,
         timer,
-        gated_hydrate(io, &plan, true, environment_identity, now),
+        gated_hydrate(
+            &build_guard,
+            io,
+            timer,
+            &plan,
+            true,
+            environment_identity,
+            now,
+        ),
     )
     .await
     {
@@ -2058,7 +2077,7 @@ async fn build_dynamic_as_owner(
             return Ok((rt, CacheOutcome::Hit));
         }
 
-        let probe = match io.probe_version().await {
+        let probe = match probe_config_version(build_guard, io, timer).await {
             Ok(probe) => probe,
             Err(e) => {
                 // Same reasoning as the build-failure paths below: this
@@ -2109,7 +2128,9 @@ async fn build_dynamic_as_owner(
         // Cold isolate: probe before build so the finished runtime is
         // tagged with a version no newer than the config it loaded.
         (
-            io.probe_version().await?.into_dynamic_version(),
+            probe_config_version(build_guard, io, timer)
+                .await?
+                .into_dynamic_version(),
             false,
             true,
         )
@@ -2127,7 +2148,9 @@ async fn build_dynamic_as_owner(
     // the flag, keeps the runtime, and commits no bypass, only with no build
     // having run.
     let finished = gated_dynamic_build(
+        build_guard,
         io,
+        timer,
         read_through,
         probed_version,
         environment_identity.clone(),
@@ -2233,17 +2256,18 @@ impl Unbuilt {
 /// build, as any cold start's. Otherwise — a runtime to keep serving, or a
 /// permanent failure, which no build survives — a failed gate builds nothing.
 async fn gated_hydrate(
+    guard: &BuildGuard,
     io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
     plan: &impresspress_core::PreparedRuntimePlan,
     cold: bool,
     environment_identity: String,
     started_at: u64,
 ) -> Result<Finished, Unbuilt> {
-    let db = io
-        .open_database(crate::kv_cached_db::CacheMode::default())
+    let db = open_attempt_database(guard, io, timer, crate::kv_cached_db::CacheMode::default())
         .map_err(Unbuilt::Failed)?;
     let variables = crate::runtime_build::fresh_variables_snapshot();
-    if let Err(error) = check_backend(io, &db, &variables, started_at).await {
+    if let Err(error) = check_backend(guard, io, timer, &db, &variables).await {
         if !(cold && error.is_unavailable()) {
             return Err(Unbuilt::Gated(error));
         }
@@ -2253,9 +2277,11 @@ async fn gated_hydrate(
         block_settings: crate::runtime_build::plan_block_settings(plan),
         variables,
     };
-    io.hydrate_prepared(source, plan, environment_identity, started_at)
-        .await
-        .map_err(Unbuilt::Failed)
+    let built = io
+        .hydrate_prepared(source, plan, environment_identity, started_at)
+        .await;
+    note_build_reads(guard, io, &built);
+    built.map_err(Unbuilt::Failed)
 }
 
 /// The dynamic path's attempt: the D1 handle, the gate, `block_settings`, the
@@ -2274,47 +2300,118 @@ async fn gated_hydrate(
 /// backend that just failed the variables read would spend a whole runtime to
 /// reach the same 503.
 async fn gated_dynamic_build(
+    guard: &BuildGuard,
     io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
     read_through: bool,
     version: String,
     environment_identity: String,
     started_at: u64,
 ) -> Result<Finished, Unbuilt> {
-    let db = io
-        .open_database(crate::kv_cached_db::CacheMode {
+    let db = open_attempt_database(
+        guard,
+        io,
+        timer,
+        crate::kv_cached_db::CacheMode {
             read_through,
             bump_on_write: true,
-        })
-        .map_err(Unbuilt::Failed)?;
+        },
+    )
+    .map_err(Unbuilt::Failed)?;
     let variables = crate::runtime_build::fresh_variables_snapshot();
-    check_backend(io, &db, &variables, started_at)
+    check_backend(guard, io, timer, &db, &variables)
         .await
         .map_err(Unbuilt::Gated)?;
-    let block_settings = io.read_block_settings(&db).await.map_err(Unbuilt::Failed)?;
-    let source = BuildSource {
-        db,
-        block_settings,
-        variables,
+    let built = match io.read_block_settings(&db).await {
+        Ok(block_settings) => {
+            let source = BuildSource {
+                db,
+                block_settings,
+                variables,
+            };
+            io.build_dynamic(source, version, environment_identity, started_at)
+                .await
+        }
+        Err(error) => Err(error),
     };
-    io.build_dynamic(source, version, environment_identity, started_at)
+    note_build_reads(guard, io, &built);
+    built.map_err(Unbuilt::Failed)
+}
+
+/// Record one observation of the backend in `BACKEND_CHECK` (`/health`'s
+/// `backend`): whether it `answered`, at `at_ms`. Only the current slot
+/// owner records, as only it arms the window: a superseded owner's late read
+/// says nothing about the runtime now serving, and a failure it recorded
+/// would have no window armed to check it again. [`BackendCheck::after`]
+/// keeps the newest observation when two arrive out of order.
+fn note_backend(guard: &BuildGuard, answered: bool, at_ms: u64) {
+    if guard.is_current() {
+        BACKEND_CHECK.with(|cell| cell.set(Some(BackendCheck::after(cell.get(), answered, at_ms))));
+    }
+}
+
+/// The attempt's D1 handle ([`BuildIo::open_database`]). A handle that does
+/// not open is the backend failing, noted as such: the attempt reads nothing.
+fn open_attempt_database(
+    guard: &BuildGuard,
+    io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
+    cache_mode: crate::kv_cached_db::CacheMode,
+) -> Result<Arc<dyn DatabaseService>, RuntimeBuildError> {
+    io.open_database(cache_mode)
+        .inspect_err(|_| note_backend(guard, false, timer.now_ms()))
+}
+
+/// The owner's probe of the KV config stamp ([`BuildIo::probe_version`]).
+/// One that cannot even reach the KV binding is the backend failing, noted as
+/// such. An unavailable stamp is not noted here: a healthy runtime serves on
+/// through it with a widened probe window, nothing to retry; the one retry
+/// that ends on it notes it itself.
+async fn probe_config_version(
+    guard: &BuildGuard,
+    io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
+) -> Result<VersionProbe, RuntimeBuildError> {
+    io.probe_version()
         .await
-        .map_err(Unbuilt::Failed)
+        .inspect_err(|_| note_backend(guard, false, timer.now_ms()))
 }
 
 /// The gate: read the variables table into `variables` through `db`, and
-/// record whether the backend answered, at `now`, in `BACKEND_CHECK` —
-/// `/health`'s `backend`. Every gate read goes through here, a cold build's
-/// and a heal's included, so the record is the isolate's latest word on the
-/// backend whatever the attempt does next.
+/// note whether the backend answered, when the read finished. Every gate
+/// read goes through here, a cold build's and a heal's included.
 async fn check_backend(
+    guard: &BuildGuard,
     io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
     db: &Arc<dyn DatabaseService>,
     variables: &Arc<VariablesSnapshot>,
-    now: u64,
 ) -> Result<(), RuntimeBuildError> {
     let read = io.read_variables(db, variables).await;
-    BACKEND_CHECK.with(|cell| cell.set(Some(BackendCheck::after(cell.get(), read.is_ok(), now))));
+    note_backend(guard, read.is_ok(), timer.now_ms());
     read
+}
+
+/// After the reads that follow a passed gate (the dynamic path's
+/// `block_settings`, the build and every block's `Init`): an attempt that
+/// did not publish a healthy runtime notes the last backend failure D1
+/// answered any of its invocation's calls with
+/// ([`BuildIo::backend_failure_at`]), timed when D1 answered it. So a block
+/// whose `Init` failed because D1 did reads as the backend failing, and one
+/// whose `Init` failed on its own while every read answered leaves the gate's
+/// `ok`. A healthy publish notes nothing: its runtime serves whole, and a
+/// failure noted then would have no window armed to check it again.
+fn note_build_reads(
+    guard: &BuildGuard,
+    io: &dyn BuildIo,
+    built: &Result<Finished, RuntimeBuildError>,
+) {
+    if matches!(built, Ok(finished) if !finished.degraded) {
+        return;
+    }
+    if let Some(at_ms) = io.backend_failure_at() {
+        note_backend(guard, false, at_ms);
+    }
 }
 
 /// Whether `rt`'s only defect is its variables snapshot remembering a failed
@@ -2348,10 +2445,11 @@ async fn heal_or_gate(
     probe: &VersionProbe,
     now: u64,
 ) -> Result<(Rc<ReadyRuntime>, CacheOutcome), RuntimeBuildError> {
-    let read = match io.open_database(crate::kv_cached_db::CacheMode::default()) {
-        Ok(db) => check_backend(io, &db, &rt.variables_snapshot, now).await,
-        Err(error) => Err(error),
-    };
+    let read =
+        match open_attempt_database(guard, io, timer, crate::kv_cached_db::CacheMode::default()) {
+            Ok(db) => check_backend(guard, io, timer, &db, &rt.variables_snapshot).await,
+            Err(error) => Err(error),
+        };
     match read {
         Ok(()) => {
             let mut health = rt.health.get();
@@ -2655,7 +2753,7 @@ async fn build_prepared_as_owner(
             return Ok(PreparedOwned::Ready(rt, CacheOutcome::Hit));
         }
 
-        let probe = match io.probe_version().await {
+        let probe = match probe_config_version(build_guard, io, timer).await {
             Ok(probe) => probe,
             Err(e) => {
                 // `dirty` was consumed above; losing it here would strand the
@@ -2681,6 +2779,9 @@ async fn build_prepared_as_owner(
             // to the hand-off below, which rebuilds from D1 and keeps `DIRTY`
             // set for it (#275 re-review m6).
             rt.note_probe_failure(now);
+            // The retry ends here, before the gate: what it saw of the
+            // backend is the config stamp it could not read.
+            note_backend(build_guard, false, timer.now_ms());
             if build_guard.is_current() {
                 arm_window(now, WindowCause::RebuildFailed);
             }
@@ -2725,7 +2826,7 @@ async fn build_prepared_as_owner(
     let _ = take_dirty();
     let probe = match known_probe {
         Some(probe) => probe,
-        None => io.probe_version().await?,
+        None => probe_config_version(build_guard, io, timer).await?,
     };
     if !prepared_generation_matches(&plan.config_generation, &probe) {
         tracing::info!(
@@ -2740,7 +2841,17 @@ async fn build_prepared_as_owner(
     // Gated: with a runtime of this plan cached, a failed read builds
     // nothing and keeps it as it was (`kept_is_current`: the probe above
     // found the plan current); a cold isolate builds anyway, degraded.
-    let finished = match gated_hydrate(io, plan, is_cold, environment_identity, now).await {
+    let finished = match gated_hydrate(
+        build_guard,
+        io,
+        timer,
+        plan,
+        is_cold,
+        environment_identity,
+        now,
+    )
+    .await
+    {
         Ok(finished) => finished,
         Err(unbuilt) => {
             let failed = unbuilt.failed_build(true);
@@ -4044,6 +4155,8 @@ pub(crate) mod tests {
         stamp: std::cell::RefCell<String>,
         /// The KV probe fails (`VersionProbe::Unavailable`).
         probe_unavailable: Cell<bool>,
+        /// The KV binding cannot be reached at all: the probe is an error.
+        probe_fails: Cell<bool>,
         dynamic: Cell<Ends>,
         hydrate: Cell<Ends>,
         /// I/O turns each build takes, so concurrent requests interleave.
@@ -4069,6 +4182,18 @@ pub(crate) mod tests {
         /// was handed.
         gated: std::cell::RefCell<Option<Arc<VariablesSnapshot>>>,
         built_with: std::cell::RefCell<Option<Arc<VariablesSnapshot>>>,
+        /// When D1 last answered one of the invocation's calls with a
+        /// backend failure, as the production count reports it: a test sets
+        /// it for a build whose block `Init` met D1 failing.
+        d1_failed_at: Cell<Option<u64>>,
+        /// The D1 handle does not open.
+        open_fails: Cell<bool>,
+        /// The test's clock, and how far the gate read moves it: the read
+        /// finishes later than it starts.
+        clock: std::cell::RefCell<Option<Rc<Cell<u64>>>>,
+        read_takes_ms: Cell<u64>,
+        /// A newer owner reclaims the slot while the gate read runs.
+        supersede_at_gate: Cell<bool>,
     }
 
     impl FakeIo {
@@ -4077,6 +4202,7 @@ pub(crate) mod tests {
                 plan,
                 stamp: std::cell::RefCell::new(PLAN_GENERATION.to_string()),
                 probe_unavailable: Cell::new(false),
+                probe_fails: Cell::new(false),
                 dynamic: Cell::new(Ends::Healthy),
                 hydrate: Cell::new(Ends::Healthy),
                 build_ticks: Cell::new(0),
@@ -4092,6 +4218,11 @@ pub(crate) mod tests {
                 settings_reads: Cell::new(0),
                 gated: std::cell::RefCell::new(None),
                 built_with: std::cell::RefCell::new(None),
+                d1_failed_at: Cell::new(None),
+                open_fails: Cell::new(false),
+                clock: std::cell::RefCell::new(None),
+                read_takes_ms: Cell::new(0),
+                supersede_at_gate: Cell::new(false),
             }
         }
 
@@ -4168,6 +4299,9 @@ pub(crate) mod tests {
 
         async fn probe_version(&self) -> Result<VersionProbe, RuntimeBuildError> {
             self.probes.set(self.probes.get() + 1);
+            if self.probe_fails.get() {
+                return Err(RuntimeBuildError::Fault("KV binding: missing".into()));
+            }
             if self.probe_unavailable.get() {
                 return Ok(VersionProbe::Unavailable);
             }
@@ -4178,6 +4312,12 @@ pub(crate) mod tests {
             &self,
             _cache_mode: crate::kv_cached_db::CacheMode,
         ) -> Result<Arc<dyn DatabaseService>, RuntimeBuildError> {
+            if self.open_fails.get() {
+                return Err(RuntimeBuildError::classified(
+                    true,
+                    "D1 binding: not reachable".into(),
+                ));
+            }
             Ok(Arc::new(crate::test_fakes::VariablesDb::new(
                 self.variables.clone(),
                 self.variables_reads.clone(),
@@ -4202,6 +4342,10 @@ pub(crate) mod tests {
             }
         }
 
+        fn backend_failure_at(&self) -> Option<u64> {
+            self.d1_failed_at.get()
+        }
+
         async fn read_variables(
             &self,
             db: &Arc<dyn DatabaseService>,
@@ -4209,6 +4353,13 @@ pub(crate) mod tests {
         ) -> Result<(), RuntimeBuildError> {
             self.gates.set(self.gates.get() + 1);
             *self.gated.borrow_mut() = Some(variables.clone());
+            if let Some(clock) = &*self.clock.borrow() {
+                clock.set(clock.get() + self.read_takes_ms.get());
+                if self.supersede_at_gate.get() {
+                    *self.superseded_by.borrow_mut() =
+                        BuildGuard::try_acquire(clock.get() + BUILD_HARD_LEASE_MS + 1);
+                }
+            }
             crate::runtime_build::read_variables(db, variables).await
         }
 
@@ -4762,6 +4913,12 @@ pub(crate) mod tests {
         assert_eq!(io.hydrates.get(), 1, "not re-hydrated as current");
         let doubled = window().expect("the window is not cleared");
         assert_eq!(doubled.failures, armed.failures + 1);
+        assert_eq!(
+            backend_check().map(parts),
+            Some((false, armed.retry_at_ms, armed.retry_at_ms)),
+            "the retry ended at the unreadable stamp, before any gate: \
+             that is what it saw of the backend"
+        );
         reset_isolate();
     }
 
@@ -4912,9 +5069,15 @@ pub(crate) mod tests {
         io.variables_answer(Some(answer));
     }
 
-    /// The isolate's last gate read, as `/health`'s `backend` reports it.
+    /// What the isolate's slot owner last saw of the backend, as `/health`'s
+    /// `backend` reports it.
     fn backend_check() -> Option<BackendCheck> {
         BACKEND_CHECK.with(Cell::get)
+    }
+
+    /// `check` as (answered, since, checked).
+    fn parts(check: BackendCheck) -> (bool, u64, u64) {
+        (check.answered(), check.since_ms(), check.checked_ms())
     }
 
     /// A cold prepared isolate that published degraded, the window armed
@@ -5379,7 +5542,7 @@ pub(crate) mod tests {
             let doubled = window().expect("re-armed");
             assert_eq!(doubled.cause, WindowCause::GateFailed, "{prepared}");
             assert_eq!(
-                backend_check().map(|check| check.answered),
+                backend_check().map(|check| check.answered()),
                 Some(false),
                 "{prepared}: the heal's failed read is a failed check"
             );
@@ -5389,12 +5552,8 @@ pub(crate) mod tests {
             let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("healed");
             assert_eq!(outcome, CacheOutcome::ProbedFresh, "{prepared}");
             assert_eq!(
-                backend_check(),
-                Some(BackendCheck {
-                    answered: true,
-                    since_ms: doubled.retry_at_ms,
-                    checked_ms: doubled.retry_at_ms,
-                }),
+                backend_check().map(parts),
+                Some((true, doubled.retry_at_ms, doubled.retry_at_ms)),
                 "{prepared}: the heal's read answered"
             );
             assert!(rt.health.get().is_healthy(), "{prepared}");
@@ -5661,11 +5820,9 @@ pub(crate) mod tests {
         reset_isolate();
     }
 
-    /// The RFC 3339 form `/health` gives `ms`.
+    /// `ms` as `/health` writes a time, through the report's own formatter.
     fn rfc3339(ms: u64) -> serde_json::Value {
-        let at = chrono::DateTime::from_timestamp_millis(i64::try_from(ms).expect("ms"))
-            .expect("in range");
-        serde_json::Value::String(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        serde_json::json!(impresspress_core::runtime_health::rfc3339(ms).expect("in range"))
     }
 
     /// **`/health` names a failed backend check** (FOLLOWUPS "health body
@@ -5777,14 +5934,7 @@ pub(crate) mod tests {
         get_or_build_with(&io, &timer)
             .await
             .expect_err("the cold dynamic attempt answers 503");
-        assert_eq!(
-            backend_check(),
-            Some(BackendCheck {
-                answered: false,
-                since_ms: START,
-                checked_ms: START,
-            })
-        );
+        assert_eq!(backend_check().map(parts), Some((false, START, START)));
         assert_eq!(
             impresspress_core::runtime_health::platform_health().backend,
             backend_check(),
@@ -5815,7 +5965,152 @@ pub(crate) mod tests {
         get_or_build_with(&io, &timer)
             .await
             .expect_err("the permanent failure's 500");
-        assert_eq!(backend_check().map(|check| check.answered), Some(false));
+        assert_eq!(backend_check().map(|check| check.answered()), Some(false));
+        reset_isolate();
+    }
+
+    /// **D1 failing a block's `Init` after the gate answered is the backend
+    /// failing** (#287 review 3): the gate's read answers, then D1 answers a
+    /// block's `Init` statement with a backend failure (the invocation's
+    /// count notes when), and the runtime publishes degraded. `backend` is
+    /// `failing`, since D1 answered that call. The same degraded publish with
+    /// every read answering — the block failing on its own — leaves the
+    /// gate's `ok`; and a healthy publish notes no failure a read retried
+    /// through, so nothing is left without a window to check it again.
+    #[wasm_bindgen_test]
+    async fn a_d1_failure_during_init_is_the_backend_failing() {
+        reset_isolate();
+        crate::init_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+        io.dynamic.set(Ends::Degraded);
+        io.d1_failed_at.set(Some(START + 40));
+
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("published");
+        assert_eq!(
+            backend_check().map(parts),
+            Some((false, START + 40, START + 40))
+        );
+        let (_, _, body) = health_of(&rt).await;
+        assert_eq!(body["status"], "degraded", "{body}");
+        assert_eq!(
+            body["backend"],
+            serde_json::json!({
+                "status": "failing",
+                "since": rfc3339(START + 40),
+                "checked": rfc3339(START + 40),
+            }),
+            "{body}"
+        );
+
+        // The block's own failure: the gate and every read answered.
+        reset_isolate();
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+        io.dynamic.set(Ends::Degraded);
+        get_or_build_with(&io, &timer).await.expect("published");
+        assert_eq!(backend_check().map(parts), Some((true, START, START)));
+
+        // A healthy publish keeps the gate's word, whatever a read met.
+        reset_isolate();
+        let io = FakeIo::new(None);
+        io.d1_failed_at.set(Some(START + 40));
+        get_or_build_with(&io, &timer).await.expect("healthy");
+        assert_eq!(backend_check().map(parts), Some((true, START, START)));
+        assert_eq!(window(), None);
+        reset_isolate();
+    }
+
+    /// **A superseded owner records nothing** (#287 review 1): the slot is
+    /// reclaimed while the owner's gate read runs, and the read then fails.
+    /// The owner arms no window, so a failure it recorded would stick with
+    /// nothing to check it again; `backend` keeps what the current owner
+    /// saw. The current owner's failed read is recorded.
+    #[wasm_bindgen_test]
+    async fn a_superseded_owners_failed_read_is_not_recorded() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        *io.clock.borrow_mut() = Some(timer.now.clone());
+        io.dynamic.set(Ends::Degraded);
+        get_or_build_with(&io, &timer).await.expect("published");
+        let before = backend_check();
+        assert_eq!(before.map(parts), Some((true, START, START)));
+
+        timer.now.set(window().expect("armed").retry_at_ms);
+        backend(&io, VariablesAnswer::Unavailable);
+        io.supersede_at_gate.set(true);
+        let _ = get_or_build_with(&io, &timer).await;
+        assert_eq!(backend_check(), before, "a superseded owner's read");
+        drop(io.superseded_by.borrow_mut().take());
+
+        io.supersede_at_gate.set(false);
+        reset_build_slot();
+        timer.now.set(window().expect("armed").retry_at_ms);
+        get_or_build_with(&io, &timer).await.expect("kept");
+        assert_eq!(
+            backend_check().map(|check| check.answered()),
+            Some(false),
+            "the current owner's read"
+        );
+        reset_isolate();
+    }
+
+    /// **`checked` is when the read finished** (#287 review 6), not when the
+    /// request started: the gate read takes 30 ms of the clock.
+    #[wasm_bindgen_test]
+    async fn a_check_is_timed_when_its_read_finishes() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        *io.clock.borrow_mut() = Some(timer.now.clone());
+        io.read_takes_ms.set(30);
+        get_or_build_with(&io, &timer).await.expect("healthy");
+        assert_eq!(
+            backend_check().map(parts),
+            Some((true, START + 30, START + 30))
+        );
+        reset_isolate();
+    }
+
+    /// **A KV binding the owner cannot reach is the backend failing** (#287
+    /// review 4): the probe is an error, the request answers it, and nothing
+    /// is read past it.
+    #[wasm_bindgen_test]
+    async fn an_unreachable_kv_binding_is_the_backend_failing() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.probe_fails.set(true);
+        let answer = get_or_build_with(&io, &timer).await;
+        assert!(
+            matches!(answer, Err(RuntimeBuildError::Fault(_))),
+            "{answer:?}"
+        );
+        assert_eq!(io.gates.get(), 0, "nothing read past the probe");
+        assert_eq!(backend_check().map(parts), Some((false, START, START)));
+        reset_isolate();
+    }
+
+    /// **A D1 handle that does not open is the backend failing** (#287
+    /// review 5): the retry reads nothing, keeps the runtime, and notes it.
+    #[wasm_bindgen_test]
+    async fn a_d1_handle_that_does_not_open_is_the_backend_failing() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.dynamic.set(Ends::Degraded);
+        get_or_build_with(&io, &timer).await.expect("published");
+        let retry_at = window().expect("armed").retry_at_ms;
+        timer.now.set(retry_at);
+        io.open_fails.set(true);
+        let _ = get_or_build_with(&io, &timer).await;
+        assert_eq!(io.gates.get(), 1, "the retry read nothing");
+        assert_eq!(
+            backend_check().map(parts),
+            Some((false, retry_at, retry_at))
+        );
         reset_isolate();
     }
 }

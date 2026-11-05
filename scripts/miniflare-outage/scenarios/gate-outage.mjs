@@ -93,6 +93,12 @@ export default {
       else if (path === "/health") {
         const body = assertHealth(answer, what, "degraded");
         assert.equal(body.backend?.status, "failing", `${what}: backend (${answer.body.slice(0, 300)})`);
+        const since = Date.parse(body.backend.since);
+        assert.ok(
+          since >= cold.sentAt && since <= cold.doneAt,
+          `${what}: backend.since ${body.backend.since} is the cold build's failed check, inside its request`,
+        );
+        assert.ok(Date.parse(body.backend.checked) >= since, `${what}: backend.checked is not before since`);
       }
       else assertUnavailable(answer, what);
       assert.equal(answer.built, false, `${what}: built nothing (${answer.cacheOutcome})`);

@@ -15,9 +15,11 @@
 //    a block's run still carries since the gate: a database-wide outage
 //    builds nothing per window and moves no run.
 //
-// Throughout, `backend` is `ok`: every check of D1 answered. That is what
-// tells this block's own failure from an outage (`dynamic-gate`), whose
-// listed block and status are the same.
+// Throughout, `backend` is `failing`: the gate answers, but D1 answers the
+// block's `Init` statement with a backend failure (the reset), noted when D1
+// answered it, so each rebuild's run starts at its own `Init` failure. One
+// answer cannot tell this from an outage; the run's `runtimes` growing while
+// the gate keeps answering is what does (RELEASE.md, the `backend` entry).
 
 import assert from "node:assert/strict";
 
@@ -40,13 +42,26 @@ async function nextRebuild(d) {
   }
 }
 
+/**
+ * `backend`'s run began inside `answer`'s request: the gate answered, so the
+ * failure that started it is that request's build's `Init` call.
+ */
+function assertFailedDuring(body, answer, what) {
+  const since = Date.parse(body.backend.since);
+  assert.ok(
+    since >= answer.sentAt && since <= answer.doneAt,
+    `${what}: backend.since ${body.backend.since} is outside the request whose build failed`,
+  );
+  assert.equal(body.backend.since, body.backend.checked, `${what}: one failure, at the Init call`);
+}
+
 /** The one listed block of a `/health` that lists only `BLOCK`. */
 function onlyBlock(answer, what) {
   const body = assertHealth(answer, what, "degraded");
   assert.deepEqual(body.unavailable.map((b) => b.block), [BLOCK], `${what}: only ${BLOCK} is listed`);
   const [block] = body.unavailable;
   assert.equal(block.class, "retrying", `${what}: class`);
-  assert.equal(body.backend?.status, "ok", `${what}: D1 answered the check (${JSON.stringify(body.backend)})`);
+  assert.equal(body.backend?.status, "failing", `${what}: D1 failed the Init call (${JSON.stringify(body.backend)})`);
   return { body, block };
 }
 
@@ -66,6 +81,7 @@ export default {
       `the block's Init statement was the one refused: ${JSON.stringify(cold.d1Calls)}`,
     );
     const first = onlyBlock(cold, "cold /health");
+    assertFailedDuring(first.body, cold, "cold /health");
     assert.equal(first.block.runtimes, 1, "cold: runtimes");
     assert.equal(first.body.retries, 1, "cold: retries");
     assertServed(await d.fetch("/"), "the site serves /", "wafer-site-shaped fixture");
@@ -73,7 +89,9 @@ export default {
 
     // 2.
     for (const runtimes of [2, 3]) {
-      const { body, block } = onlyBlock(await nextRebuild(d), `rebuild ${runtimes} /health`);
+      const rebuilt = await nextRebuild(d);
+      const { body, block } = onlyBlock(rebuilt, `rebuild ${runtimes} /health`);
+      assertFailedDuring(body, rebuilt, `rebuild ${runtimes} /health`);
       assert.equal(block.since, first.block.since, `rebuild ${runtimes}: the run began where it did`);
       assert.equal(block.runtimes, runtimes, `rebuild ${runtimes}: the run spans every runtime`);
       assert.equal(body.since, first.body.since, `rebuild ${runtimes}: the episode began where it did`);

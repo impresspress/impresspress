@@ -12,10 +12,11 @@
 //    fail it before the gate and mark the current-config runtime `stale`).
 //    The retry builds nothing (`build=gate`), its request reports `gated`,
 //    and `/health` stays `degraded` (not `stale`), `retries` 2, listing the
-//    same block: the body of a block failing its own `Init`, but for
-//    `backend`, which turns from `ok` to `failing` with the check. That is
-//    the field a deploy gate tells an outage by (FOLLOWUPS "health body not
-//    naming a failed backend check").
+//    same block, and `backend` `failing`. The cold build's `Init` failure
+//    (D1's reset) started the failing run, and the failed gate extends it:
+//    `since` stays, `checked` moves to the gate. Before `backend`, this body
+//    read as a block failing its own `Init` while D1 answered (FOLLOWUPS
+//    "health body not naming a failed backend check").
 
 import assert from "node:assert/strict";
 
@@ -41,7 +42,12 @@ export default {
     assert.ok(cold.built, `the cold dynamic build published (${cold.cacheOutcome})`);
     assert.deepEqual(await buildsSince(d, mark), ["dynamic"], "the cold isolate's one build");
     assert.equal(degraded.retries, 1, "the degraded publish armed the window");
-    assert.equal(degraded.backend?.status, "ok", `the cold build's check answered: ${cold.body}`);
+    assert.equal(degraded.backend?.status, "failing", `D1 failed the cold build's Init call: ${cold.body}`);
+    const failedAt = Date.parse(degraded.backend.since);
+    assert.ok(
+      failedAt >= cold.sentAt && failedAt <= cold.doneAt,
+      `backend.since ${degraded.backend.since} is the cold build's Init failure, inside its request`,
+    );
 
     // 2.
     await d.setMode("quota");
@@ -64,7 +70,12 @@ export default {
       "the kept runtime lists what it listed",
     );
     assert.equal(body.backend?.status, "failing", `the retry's check failed: ${retry.body}`);
-    assert.equal(body.backend.since, body.backend.checked, "the first failed check starts the run");
+    assert.equal(body.backend.since, degraded.backend.since, "the failed check extends the run");
+    const checked = Date.parse(body.backend.checked);
+    assert.ok(
+      checked >= retry.sentAt && checked <= retry.doneAt,
+      `backend.checked ${body.backend.checked} is the retry's own check`,
+    );
     assert.deepEqual(await buildsSince(d, mark), ["gate"], "the retry assembled no runtime");
     assert.ok(
       retry.d1Calls[0].statements.every((sql) => !sql.includes("block_settings")),

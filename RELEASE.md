@@ -32,9 +32,8 @@ not tell the two apart, and wafer.run's (`health_gate_verdict`) rolled a good
 version back during an outage. Before the check, the failed rebuild marked the
 runtime `stale`, which the gate read as an outage.
 
-**What changes.** A non-`ok` body on Cloudflare carries `backend`: the outcome
-of the isolate's last check of D1, the one read of the variables table that
-starts every build and every retry.
+**What changes.** On Cloudflare, a non-`ok` body carries `backend`, what
+the isolate last saw of D1:
 
 ```json
 {"status":"degraded","since":"2026-11-05T10:00:00.000Z","retry_in":4,"retries":3,
@@ -42,37 +41,69 @@ starts every build and every retry.
  "unavailable":[{"block":"wafer-run/auth","class":"retrying","retry_in":4,"since":"2026-11-05T10:00:00.000Z","runtimes":1}]}
 ```
 
-- `backend.status` is `ok` when the last check answered and `failing` when it
-  did not, transiently or for good. `since` is when the run of checks with
-  that outcome began (for `failing`, the first failed check), and `checked`
-  when the last one ran. The next check runs when the window ends:
-  `retry_in`.
-- A failing check makes the status at least `degraded`. In practice it
-  already was: every path to a failed check keeps a runtime that is degraded,
-  stale or failed, or answers without a runtime. No new status value and no
-  new HTTP status: every non-`ok` status was already a 503 with
-  `Retry-After`. `failed` and `stale` still outrank `degraded`.
-- An `ok` body is still exactly `{"status":"ok"}`: it implies the last check
-  answered.
-- Native and the browser report no `backend`. They do not check the backend
-  apart from a build, and `/health` sends no query of its own.
-- `backend` is per isolate, like `retries`. A `/health` request that arrives
-  after the window has ended runs the check itself before it is answered, so
-  it reports that check.
+- `backend.status` turns `failing` as soon as the backend fails one of
+  these:
+  - the check: the one read of the variables table that starts every build
+    and every retry;
+  - any D1 call made by a build that did not publish a healthy runtime,
+    such as a block's `Init` statement or the build's settings and grants
+    reads, when D1 answers it with a backend failure. A backend failure is
+    an outage, an overload, a reset or a daily limit, as the D1 service
+    classifies it. A statement that D1 ran and that failed (a missing
+    column, a taken key) is not one. Neither is a call that the
+    invocation's budget refused;
+  - a retry that cannot read the config stamp in KV and so ends before the
+    check;
+  - the D1 binding failing to open.
 
-**Reading it (a deploy gate).** For a 503 body:
+  It turns back to `ok` when a check answers.
+- `since` is when the current run with that outcome began: for `failing`,
+  the first failure. `checked` is when the last one was seen: when the read
+  finished, or when D1 answered the failed call. `checked` is never before
+  `since`, and an observation older than `checked` changes nothing. The
+  next check runs when the window ends (`retry_in`).
+- Only the request that owns the isolate's build slot updates `backend`. A
+  build that publishes a healthy runtime records no failure, even if one of
+  its reads was retried along the way. So whenever `backend` is `failing`, a
+  retry window is armed to check D1 again.
+- A failing backend makes the status at least `degraded`. In practice the
+  status already is, because every path to a failure keeps a runtime that is
+  degraded, stale or failed, or answers without a runtime. There is no new
+  status value and no new HTTP status: every non-`ok` status was already a
+  503 with `Retry-After`. `failed` and `stale` still outrank `degraded`.
+- An `ok` body is still exactly `{"status":"ok"}`. It implies the last
+  observation of the backend answered.
+- Native and the browser report no `backend`. They do not rebuild to retry,
+  and `/health` sends no query of its own.
+- `backend` is per isolate, like `retries`. A `/health` request that
+  arrives after the window has ended runs the check itself before it is
+  answered, so it reports that check.
 
-1. `status` `failed` means a fault: something failed in a way retrying will
-   not fix, whatever `backend` says.
+**Reading it (a deploy gate).** For a 503 JSON body with `backend`:
+
+1. `status` `failed` means a fault: rollback, whatever `backend` says.
 2. Otherwise, `backend.status` `failing` means an outage: keep the version.
-3. Otherwise (`backend.status` `ok`), `degraded` with blocks listed means the
-   version's own fault: the blocks fail while D1 answers. Judge it on an
-   answer given after the window has ended: a runtime that D1 failed
-   part-way through building reports `ok` until its first retry checks again.
-   `stale`, and `degraded` with no block listed, mean the same as before
-   this release: D1 failed after a check that passed.
+3. Otherwise `backend.status` is `ok`, and every read of D1 answered since
+   the last one that failed.
+   - `degraded` with blocks listed is the version's own fault (rollback).
+     Those blocks fail while D1 answers every call their `Init` makes.
+   - `stale` means the same as before this release: a dynamic rebuild
+     failed on something other than D1, which is rare (outage).
+   - `degraded` with no block listed also means the same as before: a
+     config read failed after the runtime was published, and no retry has
+     looked yet (outage).
 4. With no `backend` (native, or an older version), use the rules from
    before this release.
+
+Judge the answer you get after the retry window has ended. The site's gate
+already asks once more after `Retry-After`, so its second answer reports a
+check made by that request.
+
+One case moves from rollback to outage. A block whose own `Init` query
+makes D1 reset (plan I2g) is a backend failure D1 reports, so it reads as
+`failing`, the same as an outage. One answer cannot tell these apart. Over
+minutes they differ: the block's `runtimes` keeps growing while the check
+keeps answering, and after 8 runtimes the Worker logs it at `error`.
 
 **Who has to act.** Nothing breaks: the field is new and the statuses are
 unchanged. A consumer that compares a non-`ok` body exactly gains the key.

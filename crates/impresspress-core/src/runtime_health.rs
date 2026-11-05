@@ -42,19 +42,33 @@
 //! version — a deploy gate deciding whether to roll back — cannot tell them
 //! apart from the status and the blocks.
 //!
-//! So a platform that checks its backend before it retries (Cloudflare's
-//! gate, one read of the variables table) reports that check's outcome
-//! beside the status, as `backend` ([`BackendReport`]): `"ok"` when the last
-//! check answered, `"failing"` when it failed, with when the run of checks
-//! with that outcome began (`since`) and when the last one ran (`checked`).
-//! A failing check makes the status at least `degraded`: whatever the
+//! So a platform that rebuilds to retry (Cloudflare) reports what it last
+//! saw of its backend beside the status, as `backend` ([`BackendReport`],
+//! from [`BackendCheck`]). It is `"failing"` from the moment the backend
+//! fails one of these, and `"ok"` once the gate answers again:
+//!
+//! - the gate: the one read of the variables table that starts every build
+//!   and every retry, `ok` when it answers and `failing` when it does not;
+//! - any read of the backend during a build that did not publish a healthy
+//!   runtime: a block's `Init` statement, the build's own settings and grants
+//!   reads. A call D1 answers with a backend failure (an outage, an
+//!   overload, a reset, a daily limit — its `DatabaseError::Unavailable`, as
+//!   the D1 service classifies it) is `failing`, timed when D1 answered it.
+//!   A block's own logic or config failing, or a call refused by the
+//!   invocation's budget, is not the backend's;
+//! - a retry that ends before the gate because the config-version stamp in
+//!   KV could not be read (a stale runtime with no local write to act on);
+//! - the D1 binding failing to open.
+//!
+//! A failing backend makes the status at least `degraded`: whatever the
 //! runtime holds, its routes that read the backend do not serve. A
-//! non-`ok` status with the backend `"ok"` is the version's own state; with
-//! it `"failing"`, it is an outage, unless the status is `failed`, which
-//! says the failure is one retrying will not fix. A platform that does not
-//! check its backend apart from a build (native, the browser) reports no
+//! non-`ok` status with the backend `"ok"` means every read of the backend
+//! answered since the last one that did not, so a block still failing its
+//! `Init` fails on its own; with it `"failing"`, the backend failed. `failed`
+//! still outranks both: the failure is one retrying will not fix. A platform
+//! that does not rebuild to retry (native, the browser) reports no
 //! `backend`, and the `ok` body stays `{"status":"ok"}`: an `ok` status
-//! implies the last check, if any, answered.
+//! implies the backend's last observation, if any, answered.
 //!
 //! The body names each block's state by its class
 //! ([`BlockInitState::as_str`]), never the failure's text, which can quote
@@ -78,13 +92,23 @@
 //!   [`PERSISTENT_RUNTIMES`] (a block failing the same way in every runtime
 //!   built, which a gate that passes and a rebuild that degrades again
 //!   produce: a block causing its own failure).
-//! - `backend` is this isolate's last check, like the window. It is as fresh
-//!   as the window: the first request after the window ends checks again
-//!   before it is answered, so a `/health` request then reports its own
-//!   check. Inside a window it reports the last check before it. A check
-//!   refused by the invocation's own D1 call budget
-//!   (`IMPRESSPRESS_D1_CALLS_PER_INVOCATION`) is `failing` as an outage's is:
-//!   the platform classifies both as transient and cannot tell them apart.
+//! - `backend` is this isolate's, like the window, and only the slot owner
+//!   (the request retrying the runtime) writes it. It is as fresh as the
+//!   window: the first request after the window ends checks again before it
+//!   is answered, so a `/health` request then reports its own check. Inside
+//!   a window it reports what was seen before it. Requests that serve the
+//!   cached runtime do not move it, and neither does a build that publishes
+//!   a healthy runtime, whatever reads it retried on the way: a failing
+//!   backend always has a window armed to check it again.
+//! - A gate read refused by the invocation's own D1 call budget
+//!   (`IMPRESSPRESS_D1_CALLS_PER_INVOCATION`) is `failing`, as an outage's
+//!   is: the gate's read cannot tell them apart. A refused call during the
+//!   build is not.
+//! - A block whose own `Init` statement makes D1 fail (a query that makes D1
+//!   reset, plan I2g) makes the backend `failing` as an outage does: D1
+//!   answered its call with a backend failure. Its run's `runtimes` and the
+//!   `error!` line at [`PERSISTENT_RUNTIMES`] are what tell it apart, over
+//!   minutes, not one answer.
 //! - A runtime's runs move only when a runtime is published. During a
 //!   database-wide outage Cloudflare's retry window checks the backend with
 //!   one read before it rebuilds anything, and a failed check publishes
@@ -253,43 +277,68 @@ pub struct RetryEpisode {
     pub failed: bool,
 }
 
-/// A platform's record of its checks of the backend: the outcome of the last
-/// one, and since when the checks have had that outcome. Cloudflare's gate
-/// (one read of the variables table before a retry builds anything, and
-/// every runtime build's first read) is such a check.
+/// A platform's record of what it has seen of its backend: whether the last
+/// observation answered, and since when the observations have had that
+/// outcome (see the module doc for which reads count). Built only through
+/// [`after`](Self::after), so `since_ms <= checked_ms` always holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendCheck {
-    /// Whether the last check answered. A check fails whether its failure is
-    /// transient or permanent: the status says which ([`HealthStatus::Failed`]
-    /// for a permanent one, which arms a failed episode).
-    pub answered: bool,
-    /// When the first check of the current run of checks with this outcome
-    /// ran: when the backend began failing, or began answering again.
-    pub since_ms: u64,
-    /// When the last check ran.
-    pub checked_ms: u64,
+    answered: bool,
+    since_ms: u64,
+    checked_ms: u64,
 }
 
 impl BackendCheck {
-    /// The record after a check at `now_ms` that `answered` or did not,
-    /// given the record before it, if any: the same outcome extends its run,
-    /// the other starts one.
+    /// The record after an observation at `at_ms` that `answered` or did
+    /// not, given the record before it, if any: the same outcome extends its
+    /// run, the other starts one. An observation older than the record's last
+    /// one changes nothing: a read that finishes late (an owner reporting a
+    /// call D1 failed before its gate's answer) never moves `checked` back or
+    /// replaces a newer outcome. Observations at the same instant are taken
+    /// in the order they are reported.
     #[must_use]
-    pub fn after(previous: Option<Self>, answered: bool, now_ms: u64) -> Self {
-        let since_ms = previous
-            .filter(|previous| previous.answered == answered)
-            .map_or(now_ms, |previous| previous.since_ms);
-        Self {
-            answered,
-            since_ms,
-            checked_ms: now_ms,
+    pub fn after(previous: Option<Self>, answered: bool, at_ms: u64) -> Self {
+        match previous {
+            Some(previous) if at_ms < previous.checked_ms => previous,
+            Some(previous) if previous.answered == answered => Self {
+                answered,
+                since_ms: previous.since_ms,
+                checked_ms: at_ms,
+            },
+            _ => Self {
+                answered,
+                since_ms: at_ms,
+                checked_ms: at_ms,
+            },
         }
     }
 
-    /// Whether the last check failed.
+    /// Whether the last observation answered. A failure counts whether it is
+    /// transient or permanent: the status says which ([`HealthStatus::Failed`]
+    /// for a permanent one, which arms a failed episode).
+    #[must_use]
+    pub const fn answered(&self) -> bool {
+        self.answered
+    }
+
+    /// Whether the last observation failed.
     #[must_use]
     pub const fn is_failing(&self) -> bool {
         !self.answered
+    }
+
+    /// When the current run of observations with this outcome began: when
+    /// the backend began failing, or began answering again.
+    #[must_use]
+    pub const fn since_ms(&self) -> u64 {
+        self.since_ms
+    }
+
+    /// When the last observation was made: when the read finished, or when D1
+    /// answered the failed call.
+    #[must_use]
+    pub const fn checked_ms(&self) -> u64 {
+        self.checked_ms
     }
 }
 
@@ -306,8 +355,8 @@ pub struct PlatformHealth {
     pub stale_since_ms: Option<u64>,
     /// The serving runtime's [`RetryStreaks`].
     pub retry_streaks: RetryStreaks,
-    /// The platform's last check of the backend, if it checks one apart from
-    /// a build and has checked it.
+    /// What the platform has seen of its backend, if it rebuilds to retry
+    /// and has looked.
     pub backend: Option<BackendCheck>,
 }
 
@@ -352,30 +401,32 @@ pub enum HealthStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendStatus {
-    /// The last check answered.
+    /// The last observation answered.
     Ok,
-    /// The last check failed.
+    /// The last observation failed.
     Failing,
 }
 
-/// The platform's last check of the backend ([`BackendCheck`]), as `/health`
-/// reports it: `backend`, see the module doc.
+/// What the platform has seen of its backend ([`BackendCheck`]), as
+/// `/health` reports it: `backend`, see the module doc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackendReport {
     pub status: BackendStatus,
-    /// When the run of checks with this outcome began, RFC 3339: for
-    /// `failing`, the first failed check of the run.
+    /// When the run of observations with this outcome began, RFC 3339: for
+    /// `failing`, the first failure of the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
-    /// When the last check ran, RFC 3339: for `failing`, when the backend
-    /// last failed one. The next check runs when the retry window ends
-    /// (`retry_in`).
+    /// When the last observation was made, RFC 3339: for `failing`, when the
+    /// backend last failed. Never before `since`. The next check runs when
+    /// the retry window ends (`retry_in`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checked: Option<String>,
 }
 
 impl BackendReport {
-    fn of(check: BackendCheck) -> Self {
+    /// `check` as the body reports it.
+    #[must_use]
+    pub fn of(check: BackendCheck) -> Self {
         Self {
             status: if check.answered {
                 BackendStatus::Ok
@@ -412,8 +463,8 @@ pub struct UnavailableBlock {
 
 /// The `/health` report. Serializes to its body: `{"status":"ok"}` when
 /// healthy, otherwise the status with `since` (when known), `retry_in`,
-/// `retries` (on a rebuilding platform), `backend` (on a platform that checks
-/// its backend) and `unavailable`.
+/// `retries` (on a rebuilding platform), `backend` (on a platform that
+/// rebuilds to retry) and `unavailable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HealthReport {
     pub status: HealthStatus,
@@ -430,8 +481,8 @@ pub struct HealthReport {
     /// has been armed, the first included.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retries: Option<u32>,
-    /// The platform's last check of the backend; `None` when `ok`, or on a
-    /// platform that checks none apart from a build.
+    /// What the platform has seen of its backend; `None` when `ok`, or on a
+    /// platform that does not rebuild to retry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<BackendReport>,
     /// The blocks that do not serve, by name; `None` when `ok`.
@@ -511,7 +562,7 @@ impl HealthReport {
                     .episode
                     .map(|episode| episode.since_ms)
                     .or(platform.degraded_since_ms)
-                    .or(backend_failing.map(|check| check.since_ms)),
+                    .or(backend_failing.map(|check| check.since_ms())),
             )
         } else {
             return Self {
@@ -553,8 +604,10 @@ fn whole_secs(ms: u64) -> u32 {
     u32::try_from(ms.div_ceil(1_000)).unwrap_or(u32::MAX).max(1)
 }
 
-/// `ms` since the epoch as RFC 3339 UTC, to the millisecond.
-fn rfc3339(ms: u64) -> Option<String> {
+/// `ms` since the epoch as RFC 3339 UTC, to the millisecond: the form of
+/// every time in the body.
+#[must_use]
+pub fn rfc3339(ms: u64) -> Option<String> {
     let ms = i64::try_from(ms).ok()?;
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
@@ -909,6 +962,35 @@ mod tests {
         assert!(second.is_failing() && !back.is_failing());
     }
 
+    /// An observation older than the record's last changes nothing: it
+    /// cannot move `checked` back, put it before `since`, or replace a newer
+    /// outcome. One at the same instant is taken in order.
+    #[test]
+    fn an_older_observation_changes_nothing() {
+        let ok = BackendCheck::after(None, true, NOW);
+        assert_eq!(
+            BackendCheck::after(Some(ok), false, NOW - 1),
+            ok,
+            "older failure"
+        );
+        let failing = BackendCheck::after(Some(ok), false, NOW + 1_000);
+        assert_eq!(
+            BackendCheck::after(Some(failing), false, NOW + 500),
+            failing,
+            "an older failure does not move checked back"
+        );
+        assert_eq!(
+            BackendCheck::after(Some(failing), true, NOW),
+            failing,
+            "an older answer does not replace a newer failure"
+        );
+        let same_instant = BackendCheck::after(Some(failing), true, NOW + 1_000);
+        assert!(same_instant.answered());
+        for check in [ok, failing, same_instant] {
+            assert!(check.since_ms() <= check.checked_ms(), "{check:?}");
+        }
+    }
+
     /// The reported outage (FOLLOWUPS "health body not naming a failed
     /// backend check"): a runtime published degraded — its variables read
     /// answered, then a block's `Init` failed on the backend — that a failed
@@ -924,11 +1006,11 @@ mod tests {
                 failed: false,
             }),
             degraded_since_ms: Some(NOW - 10_000),
-            backend: Some(BackendCheck {
+            backend: Some(BackendCheck::after(
+                Some(BackendCheck::after(None, answered, NOW - 7_000)),
                 answered,
-                since_ms: NOW - 7_000,
-                checked_ms: NOW - 800,
-            }),
+                NOW - 800,
+            )),
             ..PlatformHealth::default()
         };
         let slots = states(&[("a", BlockInitState::Ready), ("b", retrying(QUOTA, 0))]);

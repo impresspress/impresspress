@@ -341,6 +341,9 @@ struct InvocationTally {
     rows_read: Cell<u64>,
     rows_written: Cell<u64>,
     built: Cell<Option<BuildKind>>,
+    /// When D1 last answered a call of this invocation with a backend
+    /// failure ([`D1CallCount::backend_failure_at`]).
+    backend_failed_at: Cell<Option<u64>>,
     report: Cell<Option<CostReport>>,
 }
 
@@ -423,6 +426,28 @@ impl D1CallCount {
     /// is the one the `d1_cost` line names ([`BuildKind`]).
     pub fn note_build(&self, kind: BuildKind) {
         self.tally.built.set(Some(kind));
+    }
+
+    /// When D1 last answered a call sent in this invocation, through any
+    /// handle, with a backend failure: [`DatabaseError::Unavailable`], one of
+    /// D1's transient texts (a lost connection, an overload, a reset, a daily
+    /// limit). Not a refused call (the invocation's budget, or the
+    /// platform's per-invocation limit: [`DatabaseError::CallBudgetExhausted`]),
+    /// and not a statement D1 ran and failed (`Internal`: a missing column, a
+    /// taken key), which are the caller's, not the backend's.
+    ///
+    /// `runtime_cache` reads it after a runtime build to tell a block whose
+    /// `Init` failed because D1 did from one whose `Init` failed on its own
+    /// (`/health`'s `backend`).
+    pub fn backend_failure_at(&self) -> Option<u64> {
+        self.tally.backend_failed_at.get()
+    }
+
+    /// Note that D1 just answered a call with a backend failure.
+    fn note_backend_failure(&self) {
+        self.tally
+            .backend_failed_at
+            .set(Some(impresspress_core::util::now_millis()));
     }
 
     /// The calls currently reserved, for a test that checks when the
@@ -548,11 +573,22 @@ impl D1DatabaseService {
         self.db.prepare(sql).bind(&js_params).map_err(db_err)
     }
 
+    /// A call D1 rejected, as a [`DatabaseError`] ([`db_err`]), noted on the
+    /// invocation's count when it is a backend failure
+    /// ([`D1CallCount::backend_failure_at`]). Every call-sending primitive
+    /// maps its rejection here.
+    fn rejected(&self, error: DatabaseError) -> DatabaseError {
+        if matches!(error, DatabaseError::Unavailable(_)) {
+            self.calls.note_backend_failure();
+        }
+        error
+    }
+
     /// Run a lone statement through `all()` and add its meta to the
     /// invocation's cost. `all()` rather than `first()`: `first()` answers the
     /// first row alone and drops the meta, and it is `all()`'s first row.
     async fn all_metered(&self, stmt: &D1PreparedStatement) -> Result<D1Result, DatabaseError> {
-        let result = stmt.all().await.map_err(db_err)?;
+        let result = stmt.all().await.map_err(|e| self.rejected(db_err(e)))?;
         self.calls.meter(&result);
         Ok(result)
     }
@@ -708,7 +744,7 @@ impl DbExec for D1DatabaseService {
     ) -> Result<i64, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
         self.spend_call(1)?;
-        let result = stmt.run().await.map_err(db_err)?;
+        let result = stmt.run().await.map_err(|e| self.rejected(db_err(e)))?;
         self.calls.meter(&result);
         changes(&result)
     }
@@ -779,7 +815,8 @@ impl DbExec for D1DatabaseService {
         let stmt = self.prepare_bind(query, args)?;
         self.spend_call(1)?;
         Ok(fetch_rows(&stmt)
-            .await?
+            .await
+            .map_err(|e| self.rejected(e))?
             .into_iter()
             .map(|row| record_from_columns(row, JsonColumns::NONE))
             .collect())
@@ -843,7 +880,11 @@ impl DbExec for D1DatabaseService {
             statements.push(self.prepare_bind(sql, params)?);
         }
         self.spend_call(statements.len())?;
-        let results = self.db.batch(statements).await.map_err(db_err)?;
+        let results = self
+            .db
+            .batch(statements)
+            .await
+            .map_err(|e| self.rejected(db_err(e)))?;
         self.meter_batch(&results);
 
         // D1 returns exactly one result per submitted statement, in order. A
@@ -943,7 +984,11 @@ impl D1DatabaseService {
             statements.push(self.prepare_bind(sql, params)?);
         }
         self.spend_call(statements.len())?;
-        let results = self.db.batch(statements).await.map_err(db_err)?;
+        let results = self
+            .db
+            .batch(statements)
+            .await
+            .map_err(|e| self.rejected(db_err(e)))?;
         self.meter_batch(&results);
         if results.len() != ops.len() {
             return Err(DatabaseError::Internal(format!(

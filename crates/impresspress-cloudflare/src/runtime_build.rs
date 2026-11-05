@@ -1102,11 +1102,24 @@ mod tests {
     /// fault is the 500, and either way the snapshot replays the failure to
     /// every config reader, so a cold isolate that builds anyway (Decision 1)
     /// sends the table no second statement.
+    ///
+    /// The invocation's count notes when D1 answered with a backend failure
+    /// (`/health`'s `backend`, #287 review 3): the outage, not a statement
+    /// D1 ran and failed, and not the platform refusing the call.
     #[wasm_bindgen_test]
     async fn the_gate_read_is_classified_and_remembered() {
-        for (text, unavailable) in [
-            ("D1_ERROR: Network connection lost.", true),
-            ("D1_ERROR: no such column: block: SQLITE_ERROR", false),
+        for (text, unavailable, backend_failure) in [
+            ("D1_ERROR: Network connection lost.", true, true),
+            (
+                "D1_ERROR: no such column: block: SQLITE_ERROR",
+                false,
+                false,
+            ),
+            (
+                "Error: Too many API requests by single Worker invocation.",
+                true,
+                false,
+            ),
         ] {
             let env = env_whose_d1_answers(text);
             let environment = CfEnvironment::capture(&env);
@@ -1125,6 +1138,11 @@ mod tests {
             assert_eq!(error.is_unavailable(), unavailable, "{text}: {error}");
             assert!(error.to_string().contains("read variables"), "{error}");
             assert!(variables.remembers_a_failure(), "{text}");
+            assert_eq!(
+                calls.backend_failure_at().is_some(),
+                backend_failure,
+                "{text}: a backend failure noted"
+            );
         }
     }
 
