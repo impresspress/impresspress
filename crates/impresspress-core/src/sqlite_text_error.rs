@@ -15,17 +15,24 @@
 //! `UNIQUE constraint failed: <table>.<column>` — for a `UNIQUE` index, and
 //! for a primary key too, whether it is a rowid alias or not.
 //!
-//! A failure that a later attempt may not hit is [`DatabaseError::Unavailable`],
-//! as the native backends report a busy database or a lost connection: the
-//! runtime retries a block `Init` that failed that way instead of caching the
-//! failure until the isolate is replaced, and the database handler answers it
-//! `ErrorCode::Unavailable`, logged as a warning. [`TRANSIENT`] lists the
-//! texts: D1's lost connection, overload, queue-full, storage timeout, reset
-//! and unreachable-replica messages, the Free plan's daily row read and row
-//! write limits (they lift at 00:00 UTC), and SQLite's busy database (D1, and
-//! sql.js in the browser). The match ignores ASCII case: D1's texts are not
-//! cased consistently (`internal error; reference = …` beside `Internal error
-//! in D1 DB storage…`).
+//! A failure that a later attempt may not hit is transient, as the native
+//! backends report it: the runtime retries a block `Init` that failed that way
+//! instead of caching the failure until the isolate is replaced, and the
+//! database handler answers it `ErrorCode::Unavailable`, logged as a warning.
+//! Two kinds, as on the native backends:
+//!
+//! - [`OUTAGE`]: the database cannot answer — D1's lost connection,
+//!   overload, queue-full, storage timeout, reset and unreachable-replica
+//!   messages, and the Free plan's daily row read and row write limits (they
+//!   lift at 00:00 UTC). [`DatabaseError::Unavailable`], whose detail code
+//!   (`database.unavailable`) says the database is down.
+//! - [`CONTENTION`]: the database is up but busy — SQLite's busy or locked
+//!   database (D1, and sql.js in the browser).
+//!   [`DatabaseError::Contended`], classed `database.contended`.
+//!
+//! The match ignores ASCII case: D1's texts are not cased consistently
+//! (`internal error; reference = …` beside `Internal error in D1 DB
+//! storage…`).
 //!
 //! Every other failure (a `NOT NULL` or `CHECK` violation, a missing table, a
 //! syntax error) stays [`DatabaseError::Internal`], as it does on the native
@@ -38,8 +45,8 @@ use wafer_core::interfaces::database::service::DatabaseError;
 /// The text SQLite puts in every primary- or unique-key violation.
 const UNIQUE_VIOLATION: &str = "UNIQUE constraint failed";
 
-/// Texts of failures that a later attempt may not hit, matched as substrings,
-/// ignoring ASCII case. The D1 texts are the ones Cloudflare's D1 error list
+/// Texts of the database unable to answer, matched as substrings, ignoring
+/// ASCII case. The D1 texts are the ones Cloudflare's D1 error list
 /// gives (<https://developers.cloudflare.com/d1/observability/debug-d1/>).
 /// `D1 DB is overloaded` covers both overload texts (`Requests queued for too
 /// long.` and `Too many requests queued.`).
@@ -56,7 +63,7 @@ const UNIQUE_VIOLATION: &str = "UNIQUE constraint failed";
 /// Cloudflare's retry list but is left out: it describes a client that
 /// dropped its connection while uploading a query to D1 (an import over the
 /// HTTP API), not a failure a Worker's D1 binding reports.
-const TRANSIENT: &[&str] = &[
+const OUTAGE: &[&str] = &[
     "Network connection lost",
     "D1 DB is overloaded",
     "Too many requests queued",
@@ -71,37 +78,41 @@ const TRANSIENT: &[&str] = &[
     "Cannot resolve D1 DB due to transient issue on remote node",
     "D1 DB's isolate exceeded its memory limit and was reset",
     "D1 DB exceeded its CPU time limit and was reset",
-    "database is locked",
-    "SQLITE_BUSY",
 ];
+
+/// Texts of the database up but busy with other work, matched as
+/// [`OUTAGE`]'s are.
+const CONTENTION: &[&str] = &["database is locked", "SQLITE_BUSY"];
 
 /// `message` — the text of a failed statement — as a [`DatabaseError`]:
 /// [`DatabaseError::AlreadyExists`] for a primary- or unique-key violation,
-/// [`DatabaseError::Unavailable`] for a transient failure ([`TRANSIENT`]),
+/// [`DatabaseError::Unavailable`] for the database unable to answer
+/// ([`OUTAGE`]), [`DatabaseError::Contended`] for it busy ([`CONTENTION`]),
 /// [`DatabaseError::Internal`] for anything else.
 pub fn statement_error(message: String) -> DatabaseError {
     if message.contains(UNIQUE_VIOLATION) {
         DatabaseError::AlreadyExists(message)
-    } else if is_transient(&message) {
+    } else if first_text(OUTAGE, &message).is_some() {
         DatabaseError::Unavailable(message)
+    } else if first_text(CONTENTION, &message).is_some() {
+        DatabaseError::Contended(message)
     } else {
         DatabaseError::Internal(message)
     }
 }
 
-/// Whether `message` contains one of the [`TRANSIENT`] texts, in any ASCII
-/// case.
-fn is_transient(message: &str) -> bool {
-    transient_text(message).is_some()
+/// The first [`OUTAGE`] or [`CONTENTION`] text `message` contains, in any
+/// ASCII case: which transient failure it is, without the parts that differ
+/// between two occurrences of it (a reference id, a wrapper's prefix). `None`
+/// for a message that is not a transient failure's.
+pub fn transient_text(message: &str) -> Option<&'static str> {
+    first_text(OUTAGE, message).or_else(|| first_text(CONTENTION, message))
 }
 
-/// The first [`TRANSIENT`] text `message` contains, in any ASCII case: which
-/// transient failure it is, without the parts that differ between two
-/// occurrences of it (a reference id, a wrapper's prefix). `None` for a
-/// message that is not a transient failure's.
-pub fn transient_text(message: &str) -> Option<&'static str> {
+/// The first of `texts` that `message` contains, in any ASCII case.
+fn first_text(texts: &[&'static str], message: &str) -> Option<&'static str> {
     let message = message.to_ascii_lowercase();
-    TRANSIENT
+    texts
         .iter()
         .copied()
         .find(|text| message.contains(&text.to_ascii_lowercase()))
@@ -132,10 +143,10 @@ mod tests {
         }
     }
 
-    /// D1's and SQLite's transient failures — a lost connection, an
-    /// overloaded or queue-full database, a storage timeout, an internal-error
-    /// reset, a busy database — are `Unavailable`, so the runtime retries a
-    /// block `Init` that hit one. The texts are the ones D1 and sql.js return.
+    /// D1's outages — a lost connection, an overloaded or queue-full
+    /// database, a storage timeout, an internal-error reset — are
+    /// `Unavailable`, so the runtime retries a block `Init` that hit one. The
+    /// texts are the ones D1 returns.
     #[test]
     fn a_transient_failure_is_unavailable() {
         for text in [
@@ -144,14 +155,40 @@ mod tests {
             "D1_ERROR: Too many requests queued.",
             "D1_ERROR: storage operation exceeded timeout which caused object to be reset.",
             "D1_ERROR: internal error; reference = abc123",
-            "D1_ERROR: database is locked: SQLITE_BUSY",
-            "sql exec: JsValue(Error: database is locked)",
         ] {
             assert!(
                 matches!(statement_error(text.into()), DatabaseError::Unavailable(_)),
                 "{text}"
             );
         }
+    }
+
+    /// A busy or locked database, from D1 or sql.js, is the database up but
+    /// busy: `Contended`, retried like an outage but classed
+    /// `database.contended`, not the outage's code, in any case.
+    #[test]
+    fn a_busy_database_is_contended() {
+        for text in [
+            "D1_ERROR: database is locked: SQLITE_BUSY",
+            "sql exec: JsValue(Error: database is locked)",
+            "sql exec: JsValue(Error: Database is locked)",
+        ] {
+            let error = statement_error(text.into());
+            assert!(
+                matches!(error, DatabaseError::Contended(_)),
+                "{text}: {error:?}"
+            );
+            assert_eq!(
+                error.detail_code(),
+                Some(wafer_block::wire::database::DATABASE_CONTENDED),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            transient_text("D1_ERROR: database is locked: SQLITE_BUSY"),
+            Some("database is locked"),
+            "still a transient failure's identity"
+        );
     }
 
     /// `text` is `Unavailable`.
@@ -246,7 +283,6 @@ mod tests {
         for text in [
             "D1_ERROR: Internal error; reference = abc123",
             "D1_ERROR: NETWORK CONNECTION LOST.",
-            "sql exec: JsValue(Error: Database is locked)",
         ] {
             assert_unavailable(text);
         }

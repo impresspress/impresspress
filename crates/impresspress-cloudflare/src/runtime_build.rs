@@ -187,8 +187,9 @@ pub(crate) async fn read_block_settings(
     impresspress_core::platform_state::block_settings::load(db)
         .await
         .map_err(|e| {
-            crate::runtime_cache::RuntimeBuildError::classified(
-                wafer_run::init_failure_is_transient(e.code(), e.detail_code()),
+            crate::runtime_cache::RuntimeBuildError::from_database(
+                e.code(),
+                e.detail_code(),
                 format!("read block_settings: {e}"),
             )
         })
@@ -235,17 +236,28 @@ pub(crate) fn fresh_variables_snapshot() -> Arc<VariablesSnapshot> {
 /// - `Ok` when the table was read, or does not exist yet: a fresh database
 ///   before admin's migrations is not a failing one, and the build's own
 ///   reads handle it as they always have.
-/// - `Unavailable` for a transient failure, `Fault` for a permanent one, by
+/// - A failed read the database answered is classified by its code and
+///   detail code ([`RuntimeBuildError::from_database`](crate::runtime_cache::RuntimeBuildError::from_database)):
+///   D1's outage is `Unavailable` and says so (`/health`'s `backend`); a
+///   statement D1 ran and failed (a missing table or column) is a `Fault`,
+///   not the backend failing; a refused call is `Unavailable`.
+/// - A page too full to trust is a `Fault`, by
 ///   [`UnfilteredReadError::is_transient`](impresspress_core::platform_state::variables::UnfilteredReadError::is_transient).
 pub(crate) async fn read_variables(
     db: &Arc<dyn DatabaseService>,
     variables: &VariablesSnapshot,
 ) -> Result<(), crate::runtime_cache::RuntimeBuildError> {
+    use impresspress_core::platform_state::variables::UnfilteredReadError;
     variables.check_backend(db).await.map_err(|error| {
-        crate::runtime_cache::RuntimeBuildError::classified(
-            error.is_transient(),
-            format!("read variables: {error}"),
-        )
+        let cause = format!("read variables: {error}");
+        match &error {
+            UnfilteredReadError::Read(e) => crate::runtime_cache::RuntimeBuildError::from_database(
+                e.code(),
+                e.detail_code(),
+                cause,
+            ),
+            _ => crate::runtime_cache::RuntimeBuildError::classified(error.is_transient(), cause),
+        }
     })
 }
 
@@ -1103,12 +1115,12 @@ mod tests {
     /// every config reader, so a cold isolate that builds anyway (Decision 1)
     /// sends the table no second statement.
     ///
-    /// The invocation's count notes when D1 answered with a backend failure
-    /// (`/health`'s `backend`, #287 review 3): the outage, not a statement
-    /// D1 ran and failed, and not the platform refusing the call.
+    /// Only D1's outage is the database failing (`/health`'s `backend`, #287
+    /// review): not a statement D1 ran and failed, and not the platform
+    /// refusing the call.
     #[wasm_bindgen_test]
     async fn the_gate_read_is_classified_and_remembered() {
-        for (text, unavailable, backend_failure) in [
+        for (text, unavailable, database_outage) in [
             ("D1_ERROR: Network connection lost.", true, true),
             (
                 "D1_ERROR: no such column: block: SQLITE_ERROR",
@@ -1139,9 +1151,9 @@ mod tests {
             assert!(error.to_string().contains("read variables"), "{error}");
             assert!(variables.remembers_a_failure(), "{text}");
             assert_eq!(
-                calls.backend_failure_at().is_some(),
-                backend_failure,
-                "{text}: a backend failure noted"
+                error.is_database_outage(),
+                database_outage,
+                "{text}: D1's outage, by the same test as every other read"
             );
         }
     }

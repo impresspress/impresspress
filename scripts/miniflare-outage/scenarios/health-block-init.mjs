@@ -16,10 +16,11 @@
 //    builds nothing per window and moves no run.
 //
 // Throughout, `backend` is `failing`: the gate answers, but D1 answers the
-// block's `Init` statement with a backend failure (the reset), noted when D1
-// answered it, so each rebuild's run starts at its own `Init` failure. One
-// answer cannot tell this from an outage; the run's `runtimes` growing while
-// the gate keeps answering is what does (RELEASE.md, the `backend` entry).
+// block's `Init` statement with its outage (the reset), which the block
+// propagates, so every attempt settles `failing` and the run that began with
+// the cold build goes on. One answer cannot tell this from an outage; the
+// block's `runtimes` growing while the gate keeps answering is what does
+// (RELEASE.md, the `backend` entry).
 
 import assert from "node:assert/strict";
 
@@ -42,17 +43,13 @@ async function nextRebuild(d) {
   }
 }
 
-/**
- * `backend`'s run began inside `answer`'s request: the gate answered, so the
- * failure that started it is that request's build's `Init` call.
- */
-function assertFailedDuring(body, answer, what) {
-  const since = Date.parse(body.backend.since);
+/** `backend.checked` is an instant of `answer`'s request: its build settled it. */
+function assertSettledBy(body, answer, what) {
+  const checked = Date.parse(body.backend.checked);
   assert.ok(
-    since >= answer.sentAt && since <= answer.doneAt,
-    `${what}: backend.since ${body.backend.since} is outside the request whose build failed`,
+    checked >= answer.sentAt && checked <= answer.doneAt,
+    `${what}: backend.checked ${body.backend.checked} is outside the request whose build settled it`,
   );
-  assert.equal(body.backend.since, body.backend.checked, `${what}: one failure, at the Init call`);
 }
 
 /** The one listed block of a `/health` that lists only `BLOCK`. */
@@ -81,7 +78,8 @@ export default {
       `the block's Init statement was the one refused: ${JSON.stringify(cold.d1Calls)}`,
     );
     const first = onlyBlock(cold, "cold /health");
-    assertFailedDuring(first.body, cold, "cold /health");
+    assertSettledBy(first.body, cold, "cold /health");
+    assert.equal(first.body.backend.since, first.body.backend.checked, "the cold build starts the run");
     assert.equal(first.block.runtimes, 1, "cold: runtimes");
     assert.equal(first.body.retries, 1, "cold: retries");
     assertServed(await d.fetch("/"), "the site serves /", "wafer-site-shaped fixture");
@@ -91,7 +89,8 @@ export default {
     for (const runtimes of [2, 3]) {
       const rebuilt = await nextRebuild(d);
       const { body, block } = onlyBlock(rebuilt, `rebuild ${runtimes} /health`);
-      assertFailedDuring(body, rebuilt, `rebuild ${runtimes} /health`);
+      assertSettledBy(body, rebuilt, `rebuild ${runtimes} /health`);
+      assert.equal(body.backend.since, first.body.backend.since, `rebuild ${runtimes}: the failing run goes on`);
       assert.equal(block.since, first.block.since, `rebuild ${runtimes}: the run began where it did`);
       assert.equal(block.runtimes, runtimes, `rebuild ${runtimes}: the run spans every runtime`);
       assert.equal(body.since, first.body.since, `rebuild ${runtimes}: the episode began where it did`);

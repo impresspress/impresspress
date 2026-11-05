@@ -19,7 +19,7 @@ changes them. Before 1.0, an upgrade may require wiping local data.
 Older entries say "upgrade with `--run-migrations`"; that flag is gone, and
 what it did happens on every native boot.
 
-### Cloudflare: `/health` says whether the last check of D1 failed (`backend`)
+### Cloudflare: `/health` says whether D1 failed the last attempt (`backend`); wafer-run #483
 
 **What was wrong.** Since a retry checks D1 before it rebuilds (the entry
 below), a check that fails builds nothing, and the runtime the isolate has
@@ -32,83 +32,122 @@ not tell the two apart, and wafer.run's (`health_gate_verdict`) rolled a good
 version back during an outage. Before the check, the failed rebuild marked the
 runtime `stale`, which the gate read as an outage.
 
-**What changes.** On Cloudflare, a non-`ok` body carries `backend`, what
-the isolate last saw of D1:
+**What changes.** On Cloudflare, a non-`ok` body carries `backend`: what the
+isolate's last settled attempt (a build, a retry, or a heal) found of D1.
 
 ```json
 {"status":"degraded","since":"2026-11-05T10:00:00.000Z","retry_in":4,"retries":3,
- "backend":{"status":"failing","since":"2026-11-05T10:00:01.200Z","checked":"2026-11-05T10:00:04.500Z"},
+ "backend":{"status":"failing","since":"2026-11-05T10:00:00.300Z","checked":"2026-11-05T10:00:04.500Z"},
  "unavailable":[{"block":"wafer-run/auth","class":"retrying","retry_in":4,"since":"2026-11-05T10:00:00.000Z","runtimes":1}]}
 ```
 
-- `backend.status` turns `failing` as soon as the backend fails one of
-  these:
-  - the check: the one read of the variables table that starts every build
-    and every retry;
-  - any D1 call made by a build that did not publish a healthy runtime,
-    such as a block's `Init` statement or the build's settings and grants
-    reads, when D1 answers it with a backend failure. A backend failure is
-    an outage, an overload, a reset or a daily limit, as the D1 service
-    classifies it. A statement that D1 ran and that failed (a missing
-    column, a taken key) is not one. Neither is a call that the
-    invocation's budget refused;
-  - a retry that cannot read the config stamp in KV and so ends before the
-    check;
-  - the D1 binding failing to open.
+- `backend.status` is `failing` when D1 itself could not answer the
+  attempt: an outage, an overload, a reset, or a daily limit. That covers:
+  - the check, the one read of the variables table every attempt starts
+    with;
+  - a read after the check (the settings, the grants);
+  - a block whose `Init` calls met D1 failing, or whose config read did.
 
-  It turns back to `ok` when a check answers.
+  The type decides, not the error text. wafer-run #483 records what each
+  block `Init` attempt's own database calls saw, where the database handler
+  answers them (D1's typed error), and classes the attempt by it:
+  `database.unavailable`. That holds whatever error the block then
+  returned: a wrapped one, or a hang that the init budget cut off with a
+  call still waiting on D1. The config source classes its read from the
+  read's own error.
+- It is `ok` when the check answered and none of those failed that way. A
+  block still failing its `Init` then failed on its own.
+- These do not change `backend`:
+  - a statement that D1 ran and that failed, such as a missing table or
+    column (the status says `failed`);
+  - a busy or locked database, which is contention, not an outage. It is
+    now `DatabaseError::Contended`, as on every backend (wafer-run #483),
+    classed `database.contended`: still a 503, and still retried, but a
+    block that fails on contention is the version's own state;
+  - a call that the invocation's budget refused;
+  - a config stamp in KV that cannot be read;
+  - a missing binding.
+
+  `backend` is about D1 only.
+- One attempt records once, when it settles. A `/health` read while a
+  rebuild runs shows the last settled attempt, never a check that answered
+  before the `Init` calls it gates.
 - `since` is when the current run with that outcome began: for `failing`,
-  the first failure. `checked` is when the last one was seen: when the read
-  finished, or when D1 answered the failed call. `checked` is never before
-  `since`, and an observation older than `checked` changes nothing. The
-  next check runs when the window ends (`retry_in`).
-- Only the request that owns the isolate's build slot updates `backend`. A
-  build that publishes a healthy runtime records no failure, even if one of
-  its reads was retried along the way. So whenever `backend` is `failing`, a
-  retry window is armed to check D1 again.
-- A failing backend makes the status at least `degraded`. In practice the
-  status already is, because every path to a failure keeps a runtime that is
-  degraded, stale or failed, or answers without a runtime. There is no new
+  the first failed attempt. `checked` is when the last attempt settled. It
+  is never before `since`, and an attempt older than `checked` changes
+  nothing. The next attempt runs when the window ends (`retry_in`).
+- Only the request that owns the isolate's build slot updates `backend`, so
+  whenever it is `failing`, a retry window is armed to check D1 again.
+- A failing backend makes the status at least `degraded`. There is no new
   status value and no new HTTP status: every non-`ok` status was already a
   503 with `Retry-After`. `failed` and `stale` still outrank `degraded`.
-- An `ok` body is still exactly `{"status":"ok"}`. It implies the last
-  observation of the backend answered.
-- Native and the browser report no `backend`. They do not rebuild to retry,
-  and `/health` sends no query of its own.
+- An `ok` body is still exactly `{"status":"ok"}`.
+- Native and the browser report no `backend`.
+
+**Limits.**
+
+- Config reads are not attributed to the attempt: the config source reads
+  D1 directly, not through the database handler. A block's config load
+  before its `Init` is classed by the read's own error. A block that reads
+  config inside its `Init` and wraps the error reads as failing on its own.
+  On Cloudflare that read is the variables snapshot, which fails only after
+  the check has, and the check failing already makes `backend` `failing`.
+- The attempt record says what an attempt's D1 calls saw, not what made it
+  fail. A D1 failure the block handled earlier in the attempt (a call it
+  retried, a read it fell back from) still makes a later, unrelated failure
+  of that attempt read `failing`.
+- Only a transient failure is classed by the record. A block that turns a D1
+  outage into a permanent error stays `failed`, and the deploy gate's rule 1
+  reads that as a fault, as before this release.
+- A block's `Init` that waits on another request's attempt at a block it
+  depends on, already in flight, does not get that attempt's D1
+  observations.
+- A block whose own `Init` query makes D1 reset (plan I2g) gets D1's outage
+  back, so it reads as `failing`, the same as an outage. One answer cannot
+  tell these apart. Over minutes they differ: the block's `runtimes` keeps
+  growing while the check keeps answering, and after 8 runtimes the Worker
+  logs it at `error`.
 - `backend` is per isolate, like `retries`. A `/health` request that
-  arrives after the window has ended runs the check itself before it is
-  answered, so it reports that check.
+  arrives after the window has ended runs the attempt itself, so it reports
+  that attempt.
 
 **Reading it (a deploy gate).** For a 503 JSON body with `backend`:
 
 1. `status` `failed` means a fault: rollback, whatever `backend` says.
 2. Otherwise, `backend.status` `failing` means an outage: keep the version.
-3. Otherwise `backend.status` is `ok`, and every read of D1 answered since
-   the last one that failed.
+3. Otherwise `backend.status` is `ok`:
    - `degraded` with blocks listed is the version's own fault (rollback).
-     Those blocks fail while D1 answers every call their `Init` makes.
-   - `stale` means the same as before this release: a dynamic rebuild
-     failed on something other than D1, which is rare (outage).
-   - `degraded` with no block listed also means the same as before: a
-     config read failed after the runtime was published, and no retry has
-     looked yet (outage).
+     D1 answered the check and every read, and no listed block's `Init`
+     calls met D1 failing. A block failing on contention
+     (`database.contended`) counts here: D1 is up.
+   - `stale` is an outage, as before this release: a rebuild failed on
+     something other than D1, or a new isolate serves the deploy's plan.
+   - `degraded` with no block listed is an outage, as before: a config read
+     failed after the runtime was published, and no attempt has looked yet.
 4. With no `backend` (native, or an older version), use the rules from
    before this release.
 
 Judge the answer you get after the retry window has ended. The site's gate
-already asks once more after `Retry-After`, so its second answer reports a
-check made by that request.
-
-One case moves from rollback to outage. A block whose own `Init` query
-makes D1 reset (plan I2g) is a backend failure D1 reports, so it reads as
-`failing`, the same as an outage. One answer cannot tell these apart. Over
-minutes they differ: the block's `runtimes` keeps growing while the check
-keeps answering, and after 8 runtimes the Worker logs it at `error`.
+already asks once more after `Retry-After`.
 
 **Who has to act.** Nothing breaks: the field is new and the statuses are
 unchanged. A consumer that compares a non-`ok` body exactly gains the key.
 wafer.run's `health_gate_verdict` should read `.runtime.backend.status` as
-the rules above say.
+the rules above say. The wafer-run pin moves to #483's merge, which changes
+`InitError::Transient`, `BlockInitState::Retrying` (now `{ failure:
+TransientFailure, retry_in }`), `ConfigError::Transient` and the validation
+report's `UnavailableBlock` (both gain `detail_code`), and adds
+`DatabaseError::Contended` (see wafer-run's CHANGELOG). D1's errors now
+carry the detail code `database.unavailable` or `database.contended`, and a
+503 from a D1 failure shows it to clients as its body's `code`. An
+embedder's code that matches `DatabaseError` exhaustively adds `Contended`.
+
+The 503 a dispatch to a not-yet-initialized block answers (its body
+`{"error":"Unavailable","message":"block `…` is temporarily unavailable
+(ref: …)"}`) now also carries the class of that block's last failure as
+`"code": "database.unavailable"` when that block's last `Init` met D1 down:
+the one class true of this request too. It is the class only, never the
+cause. A client that compares that body exactly gains the key.
 
 ### A cold build reads each block's declaration once and copies none; wafer-run #478, #479, #482
 

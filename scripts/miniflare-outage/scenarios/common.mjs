@@ -80,11 +80,19 @@ export function assertUnavailable(answer, what) {
 }
 
 /**
+ * The detail codes a refusal may carry in its body's `code`: the refused
+ * block's last `Init` failure, when the database was down for it (wafer-run
+ * #483) — the one class true of another caller's request — never its text.
+ */
+const REFUSAL_CODES = ["database.unavailable"];
+
+/**
  * The refusal of a dispatch to `block`, which wafer-run answers for a block
  * whose `Init` has not succeeded in this runtime: an outage answer whose body
  * is exactly `{"error":"Unavailable","message":"block `<block>` is
- * temporarily unavailable (ref: <16 hex>)"}`. Returns the reference; the
- * cause is in the log under it (`assertCauseLogged`).
+ * temporarily unavailable (ref: <16 hex>)"}`, plus the failure's class as
+ * `code` when it has one (`REFUSAL_CODES`). Returns the reference; the cause
+ * is in the log under it (`assertCauseLogged`).
  */
 export function assertRefused(answer, what, block) {
   assertUnavailable(answer, what);
@@ -93,10 +101,15 @@ export function assertRefused(answer, what, block) {
     body.message ?? "",
   );
   assert.ok(reference, `${what}: the message is the fixed refusal text: ${answer.body}`);
+  const { code, ...rest } = body;
   assert.deepEqual(
-    body,
+    rest,
     { error: "Unavailable", message: body.message },
-    `${what}: the body is the error and the message only`,
+    `${what}: the body is the error, the message and the failure's class only`,
+  );
+  assert.ok(
+    code === undefined || REFUSAL_CODES.includes(code),
+    `${what}: the code is a failure's class: ${answer.body}`,
   );
   assert.equal(reference[1], block, `${what}: the refusal names the block`);
   return reference[2];

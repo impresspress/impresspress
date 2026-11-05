@@ -336,6 +336,20 @@ pub enum BootError {
 }
 
 impl BootError {
+    /// Whether the database itself could not answer the boot: a block's
+    /// `Init` that propagated the database's outage, or the grants read
+    /// (`runtime_health::is_database_outage`).
+    pub fn is_database_outage(&self) -> bool {
+        match self {
+            Self::BlockInit {
+                error: InitError::Transient(failure),
+                ..
+            } => crate::runtime_health::is_database_outage(failure.detail_code.as_deref()),
+            Self::Grants(e) => crate::runtime_health::is_database_outage(e.detail_code()),
+            Self::BlockInit { .. } | Self::Seed(_) | Self::Runtime(_) => false,
+        }
+    }
+
     /// Whether a fresh attempt may succeed: a transient `Init` failure, an
     /// unreachable grants read or seed store — by the same rule every `Init`
     /// failure is classified with ([`wafer_run::init_failure_is_transient`]).
@@ -1025,7 +1039,10 @@ mod tests {
     /// failure permanent — the class it was answered with.
     #[test]
     fn the_transient_flag_is_written_only_when_set() {
-        let transient = BlockInitOutcome::failed("a/b", &InitError::Transient("down".into()));
+        let transient = BlockInitOutcome::failed(
+            "a/b",
+            &InitError::Transient(wafer_run::TransientFailure::new("down")),
+        );
         assert_eq!(
             serde_json::to_value(&transient).unwrap(),
             serde_json::json!({

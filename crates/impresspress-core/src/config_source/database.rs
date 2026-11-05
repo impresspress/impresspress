@@ -127,14 +127,25 @@ impl DatabaseConfigSource {
 ///   rows: a config write) or the read changes (a raised limit, pagination).
 ///
 /// The typed error stays behind either variant (`source`), so a reader of the
-/// [`ConfigError`] can still downcast to the [`UnfilteredReadError`].
+/// [`ConfigError`] can still downcast to the [`UnfilteredReadError`]. A
+/// transient one also carries the database error's detail code, so a read
+/// that met the database's outage reaches the block's `Retrying` state as
+/// `database.unavailable`.
 fn config_error(block: &str, error: UnfilteredReadError) -> ConfigError {
     // The three cases above are `UnfilteredReadError::is_transient`'s.
     let transient = error.is_transient();
+    let detail_code = error
+        .database_error()
+        .and_then(|error| error.detail_code())
+        .map(str::to_owned);
     let block = block.to_string();
     let source = Box::new(error);
     if transient {
-        ConfigError::Transient { block, source }
+        ConfigError::Transient {
+            block,
+            source,
+            detail_code,
+        }
     } else {
         ConfigError::SourceFault { block, source }
     }

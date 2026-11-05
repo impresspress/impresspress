@@ -506,6 +506,7 @@ fn edge_response(
             if let Some(runtime_cache::RuntimeBuildError::Unavailable {
                 cause,
                 retry_after_secs,
+                ..
             }) = e.downcast_ref::<runtime_cache::RuntimeBuildError>() =>
         {
             unavailable_response(cause, *retry_after_secs)
@@ -1560,6 +1561,7 @@ mod deferred_drain_tests {
             Box::new(runtime_cache::RuntimeBuildError::Unavailable {
                 cause: "D1_ERROR: Network connection lost.".to_string(),
                 retry_after_secs: 9,
+                database_outage: true,
             });
         let response = edge_response(Err(outage)).expect("a response");
         assert_eq!(response.status_code(), 503);

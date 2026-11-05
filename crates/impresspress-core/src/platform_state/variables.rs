@@ -1720,6 +1720,7 @@ fn clone_database_error(
         E::AlreadyExists(message) => E::AlreadyExists(message.clone()),
         E::InvalidArgument(message) => E::InvalidArgument(message.clone()),
         E::Unavailable(message) => E::Unavailable(message.clone()),
+        E::Contended(message) => E::Contended(message.clone()),
         E::CallBudgetExhausted(message) => E::CallBudgetExhausted(message.clone()),
         E::Internal(message) => E::Internal(message.clone()),
         E::Other(source) => E::Other(source.to_string().into()),
