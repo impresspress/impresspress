@@ -102,6 +102,13 @@ isolate's last settled attempt (a build, a retry, or a heal) found of D1.
 - A block's `Init` that waits on another request's attempt at a block it
   depends on, already in flight, does not get that attempt's D1
   observations.
+- A D1 call still in flight when a block's init budget runs out reads as
+  `failing`, a healthy but slow call included: at the deadline a hang and an
+  over-budget call cannot be told apart.
+- A block that cancels its own hung D1 call before the init budget fires
+  leaves no class, and reads as failing on its own.
+- A D1 call started inside a nested block's `Init` still counts for the
+  outer block's attempt after the nested one settles.
 - A block whose own `Init` query makes D1 reset (plan I2g) gets D1's outage
   back, so it reads as `failing`, the same as an outage. One answer cannot
   tell these apart. Over minutes they differ: the block's `runtimes` keeps
