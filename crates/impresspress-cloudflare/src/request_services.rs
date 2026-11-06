@@ -1193,6 +1193,7 @@ impl ConfigSource for ScopedConfigSource {
             return Err(ConfigError::Transient {
                 block: block.to_string(),
                 source: Box::new(std::io::Error::other(CONFIG_SOURCE_OUT_OF_SCOPE)),
+                detail_code: None,
             });
         };
         source.load_for_block(block, declared_keys).await
@@ -1435,7 +1436,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                ConfigError::Transient { block, source }
+                ConfigError::Transient { block, source, .. }
                     if block == "wafer-run/auth"
                         && source.to_string() == CONFIG_SOURCE_OUT_OF_SCOPE
             ),

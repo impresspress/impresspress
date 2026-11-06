@@ -390,6 +390,9 @@ pub(crate) enum VariablesAnswer {
     Unavailable,
     /// The read fails permanently (a malformed query).
     Fault,
+    /// The read is refused because D1 is busy ([`DatabaseError::Contended`]):
+    /// D1 is up.
+    Contended,
     /// The table does not exist yet: the list fails and the schema says so.
     Absent,
 }
@@ -483,6 +486,9 @@ wafer_core::forward_database_service! {
                 )),
                 VariablesAnswer::Fault => Err(DatabaseError::Internal(
                     "D1_ERROR: no such column: block: SQLITE_ERROR".into(),
+                )),
+                VariablesAnswer::Contended => Err(DatabaseError::Contended(
+                    "D1_ERROR: database is locked: SQLITE_BUSY".into(),
                 )),
                 VariablesAnswer::Absent => Err(DatabaseError::Internal(
                     "D1_ERROR: no such table: impresspress__admin__variables".into(),

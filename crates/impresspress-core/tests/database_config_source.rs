@@ -696,11 +696,16 @@ async fn a_table_not_created_yet_is_transient_and_not_remembered() {
     let ConfigError::Transient {
         block,
         source: cause,
+        detail_code,
     } = &err
     else {
         panic!("a failed read is Transient: {err:?}");
     };
     assert_eq!(block, "wafer-run/auth");
+    assert_eq!(
+        *detail_code, None,
+        "a missing table is not the database down"
+    );
     assert!(
         cause.to_string().contains("no such table"),
         "the database's own text reaches the error: {cause}"
@@ -805,8 +810,11 @@ async fn a_failed_read_is_remembered_until_its_retry_then_read_again() {
     shaped.fail_table(variables::TABLE, Fault::Unavailable);
     let err = load().await.expect_err("the outage fails the load");
     assert!(
-        matches!(&err, ConfigError::Transient { source, .. } if source.to_string().contains("injected outage")),
-        "{err:?}"
+        matches!(&err, ConfigError::Transient { source, detail_code, .. }
+            if source.to_string().contains("injected outage")
+                && detail_code.as_deref()
+                    == Some(wafer_block::wire::database::DATABASE_UNAVAILABLE)),
+        "the outage's detail code reaches the block's failure: {err:?}"
     );
     assert_eq!(counting.lists(), 1);
 
@@ -819,7 +827,11 @@ async fn a_failed_read_is_remembered_until_its_retry_then_read_again() {
             .await
             .expect_err("a remembered failure is replayed, never the default");
         assert!(
-            matches!(&err, ConfigError::Transient { block: b, source } if b == block && source.to_string().contains("injected outage")),
+            matches!(&err, ConfigError::Transient { block: b, source, detail_code }
+                if b == block
+                    && source.to_string().contains("injected outage")
+                    && detail_code.as_deref()
+                        == Some(wafer_block::wire::database::DATABASE_UNAVAILABLE)),
             "{err:?}"
         );
     }
@@ -1406,7 +1418,7 @@ async fn a_source_fault_is_the_blocks_permanent_init_failure_and_an_outage_is_no
         .await
         .expect_err("the outage fails the Init");
     assert!(
-        matches!(&outage, wafer_run::InitError::Transient(m) if m.contains("injected outage")),
+        matches!(&outage, wafer_run::InitError::Transient(failure) if failure.message.contains("injected outage")),
         "{outage:?}"
     );
     assert_eq!(block.inits.load(Ordering::SeqCst), 0);

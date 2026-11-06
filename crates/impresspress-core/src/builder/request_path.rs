@@ -461,10 +461,7 @@ impl BootHooks for PreparedPlanBootHooks {
 /// A hook's failed `step`, classified by the shared rule
 /// ([`SeedError::from`]) and named.
 fn hook_error(step: &str, e: DatabaseError) -> SeedError {
-    match SeedError::from(e) {
-        SeedError::Unavailable(cause) => SeedError::Unavailable(format!("{step}: {cause}")),
-        SeedError::Fault(cause) => SeedError::Fault(format!("{step}: {cause}")),
-    }
+    SeedError::from(e).in_step(step)
 }
 
 /// Publish a freshly loaded `BlockSettings` everywhere the rest of the boot

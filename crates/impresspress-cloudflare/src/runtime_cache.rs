@@ -93,6 +93,15 @@
 //! A runtime whose blocks all initialized and whose only defect is a failed
 //! variables read one of its later requests left behind is healed by the
 //! read alone, with no rebuild ([`heals_in_place`]).
+//!
+//! What each attempt found of D1 — the gate, the reads after it, and every
+//! block's `Init` — is recorded in `BACKEND_CHECK` once, when the attempt
+//! settles ([`gated_attempt`], [`heal_or_gate`], [`settle_backend`]), and
+//! reported as `/health`'s `backend`. A failed gate publishes nothing, so the
+//! runtime it keeps reports the state of the build that made it; `backend` is
+//! what says D1 is down now (see [`impresspress_core::runtime_health`]'s "The
+//! backend, named apart from the runtime"). A KV config stamp that cannot be
+//! read, or a binding that is missing, is not D1, and records nothing.
 
 use std::{
     cell::{Cell, OnceCell},
@@ -104,10 +113,11 @@ use impresspress_core::{
     cache_key::CONFIG_VERSION_KEY,
     config_source::VariablesSnapshot,
     metrics::CacheOutcome,
-    runtime_health::{PlatformHealth, RetryEpisode, RetryStreaks},
+    runtime_health::{BackendCheck, PlatformHealth, RetryEpisode, RetryStreaks},
     IsolateCell,
 };
-use wafer_core::interfaces::database::service::DatabaseService;
+use wafer_block::init_attempt::DatabaseAnswer;
+use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
 
 use crate::runtime_build::BuildSource;
 
@@ -397,6 +407,10 @@ thread_local! {
     /// that published degraded or failed until a healthy publish. A `Copy`
     /// value in a plain `Cell`, like `BUILD_LAST_FAILURE`.
     static RETRY_WINDOW: Cell<Option<RetryWindow>> = const { Cell::new(None) };
+    /// What the slot owner's last settled attempt found of D1
+    /// ([`settle_backend`]), for
+    /// `/health`'s `backend`. `Copy`, in a plain `Cell`.
+    static BACKEND_CHECK: Cell<Option<BackendCheck>> = const { Cell::new(None) };
 }
 
 /// RAII ownership of the isolate's runtime-build slot. Dropping the future on
@@ -461,6 +475,13 @@ pub(crate) enum RuntimeBuildError {
     Unavailable {
         cause: String,
         retry_after_secs: u32,
+        /// The database's class of the failure, when a database answered it
+        /// (its outage, contention, or a refused call: `DatabaseAnswer`),
+        /// derived from the error by [`Self::from_database`] /
+        /// [`Self::from_boot`], never set by hand. `None` for the build slot,
+        /// the window, and failures that are not the database's. What
+        /// `/health`'s `backend` is settled by ([`attempt_found`]).
+        class: Option<DatabaseAnswer>,
     },
     /// Anything else: the opaque 500, with this logged.
     Fault(String),
@@ -469,6 +490,23 @@ pub(crate) enum RuntimeBuildError {
 impl RuntimeBuildError {
     pub(crate) fn is_unavailable(&self) -> bool {
         matches!(self, Self::Unavailable { .. })
+    }
+
+    /// The database's class of the failure, when a database answered it.
+    pub(crate) fn database_class(&self) -> Option<DatabaseAnswer> {
+        match self {
+            Self::Unavailable { class, .. } => *class,
+            Self::Fault(_) => None,
+        }
+    }
+
+    /// Whether the database itself could not answer: the one test
+    /// ([`is_database_outage`](impresspress_core::runtime_health::is_database_outage))
+    /// over [`Self::database_class`].
+    pub(crate) fn is_database_outage(&self) -> bool {
+        impresspress_core::runtime_health::is_database_outage(
+            self.database_class().map(DatabaseAnswer::detail_code),
+        )
     }
 
     /// This error with a `Retry-After` no earlier than the isolate's retry
@@ -480,22 +518,49 @@ impl RuntimeBuildError {
             Self::Unavailable {
                 cause,
                 retry_after_secs,
+                class,
             } => Self::Unavailable {
                 cause,
                 retry_after_secs: retry_after_secs
                     .max(armed_window(now).map_or(0, |window| window.remaining_secs(now))),
+                class,
             },
             fault => fault,
         }
     }
 
     /// An outage-class failure (one second to retry; the window, where one is
-    /// armed, replaces it), or a fault.
+    /// armed, replaces it), or a fault — one that is not the database's.
     pub(crate) fn classified(transient: bool, cause: String) -> Self {
+        Self::of_class(transient, None, cause)
+    }
+
+    /// A failure the database answered with `error`: transient by the shared
+    /// rule ([`wafer_run::init_failure_is_transient`]), with the error's own
+    /// class ([`DatabaseError::attempt_answer`]).
+    pub(crate) fn from_database(error: &DatabaseError, cause: String) -> Self {
+        Self::of_class(
+            wafer_run::init_failure_is_transient(error.code(), error.detail_code()),
+            error.attempt_answer(),
+            cause,
+        )
+    }
+
+    /// A boot that failed with `error`, with its class
+    /// ([`BootError::database_class`](impresspress_core::builder::BootError::database_class)):
+    /// a block's `Init`, the grants read, or the seed hook's re-read.
+    pub(crate) fn from_boot(error: &impresspress_core::builder::BootError, cause: String) -> Self {
+        Self::of_class(error.is_transient(), error.database_class(), cause)
+    }
+
+    /// The one place a class is attached: [`Self::classified`],
+    /// [`Self::from_database`] and [`Self::from_boot`] derive it.
+    fn of_class(transient: bool, class: Option<DatabaseAnswer>, cause: String) -> Self {
         if transient {
             Self::Unavailable {
                 cause,
                 retry_after_secs: 1,
+                class,
             }
         } else {
             Self::Fault(cause)
@@ -519,6 +584,7 @@ impl From<RuntimeBuildBusy> for RuntimeBuildError {
         Self::Unavailable {
             cause: busy.to_string(),
             retry_after_secs: busy.retry_after_secs(),
+            class: None,
         }
     }
 }
@@ -588,6 +654,7 @@ impl RetryWindow {
             _ => RuntimeBuildError::Unavailable {
                 cause: format!("no runtime while the retry window lasts ({:?})", self.cause),
                 retry_after_secs: self.remaining_secs(now),
+                class: None,
             },
         }
     }
@@ -1376,10 +1443,7 @@ async fn finish_runtime(
     let report = crate::runtime_build::boot_request_runtime(&mut built, build)
         .await
         .map_err(|error| {
-            RuntimeBuildError::classified(
-                error.is_transient(),
-                format!("{lifecycle}-runtime boot: {error}"),
-            )
+            RuntimeBuildError::from_boot(&error, format!("{lifecycle}-runtime boot: {error}"))
         })?;
 
     let build_ordinal = next_build_ordinal();
@@ -1899,7 +1963,15 @@ async fn serve_without_runtime(
     let finished = match as_owner(
         &build_guard,
         timer,
-        gated_hydrate(io, &plan, true, environment_identity, now),
+        gated_hydrate(
+            &build_guard,
+            io,
+            timer,
+            &plan,
+            true,
+            environment_identity,
+            now,
+        ),
     )
     .await
     {
@@ -2117,7 +2189,9 @@ async fn build_dynamic_as_owner(
     // the flag, keeps the runtime, and commits no bypass, only with no build
     // having run.
     let finished = gated_dynamic_build(
+        build_guard,
         io,
+        timer,
         read_through,
         probed_version,
         environment_identity.clone(),
@@ -2215,7 +2289,8 @@ impl Unbuilt {
     }
 }
 
-/// The prepared path's attempt: the D1 handle, the gate, the hydrate.
+/// The prepared path's attempt: the D1 handle, the gate, the hydrate
+/// ([`gated_attempt`]).
 ///
 /// `cold`: nothing is cached for this request's identity. A transient failure
 /// of the gate then hydrates anyway, over the failed snapshot: the degraded
@@ -2223,33 +2298,35 @@ impl Unbuilt {
 /// build, as any cold start's. Otherwise — a runtime to keep serving, or a
 /// permanent failure, which no build survives — a failed gate builds nothing.
 async fn gated_hydrate(
+    guard: &BuildGuard,
     io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
     plan: &impresspress_core::PreparedRuntimePlan,
     cold: bool,
     environment_identity: String,
     started_at: u64,
 ) -> Result<Finished, Unbuilt> {
-    let db = io
-        .open_database(crate::kv_cached_db::CacheMode::default())
-        .map_err(Unbuilt::Failed)?;
-    let variables = crate::runtime_build::fresh_variables_snapshot();
-    if let Err(error) = io.read_variables(&db, &variables).await {
-        if !(cold && error.is_unavailable()) {
-            return Err(Unbuilt::Gated(error));
-        }
-    }
-    let source = BuildSource {
-        db,
-        block_settings: crate::runtime_build::plan_block_settings(plan),
-        variables,
-    };
-    io.hydrate_prepared(source, plan, environment_identity, started_at)
-        .await
-        .map_err(Unbuilt::Failed)
+    gated_attempt(
+        guard,
+        io,
+        timer,
+        crate::kv_cached_db::CacheMode::default(),
+        cold,
+        |db, variables| async move {
+            let source = BuildSource {
+                db,
+                block_settings: crate::runtime_build::plan_block_settings(plan),
+                variables,
+            };
+            io.hydrate_prepared(source, plan, environment_identity, started_at)
+                .await
+        },
+    )
+    .await
 }
 
 /// The dynamic path's attempt: the D1 handle, the gate, `block_settings`, the
-/// build.
+/// build ([`gated_attempt`]).
 ///
 /// The gate is the attempt's first D1 read. A warm retry reads
 /// `block_settings` through to D1 (`read_through`, past the KV row cache);
@@ -2264,31 +2341,161 @@ async fn gated_hydrate(
 /// backend that just failed the variables read would spend a whole runtime to
 /// reach the same 503.
 async fn gated_dynamic_build(
+    guard: &BuildGuard,
     io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
     read_through: bool,
     version: String,
     environment_identity: String,
     started_at: u64,
 ) -> Result<Finished, Unbuilt> {
-    let db = io
-        .open_database(crate::kv_cached_db::CacheMode {
+    gated_attempt(
+        guard,
+        io,
+        timer,
+        crate::kv_cached_db::CacheMode {
             read_through,
             bump_on_write: true,
-        })
-        .map_err(Unbuilt::Failed)?;
+        },
+        false,
+        |db, variables| async move {
+            let block_settings = io.read_block_settings(&db).await?;
+            let source = BuildSource {
+                db,
+                block_settings,
+                variables,
+            };
+            io.build_dynamic(source, version, environment_identity, started_at)
+                .await
+        },
+    )
+    .await
+}
+
+/// One attempt: open D1, read the gate into a fresh snapshot, then `build`
+/// over both — unless the gate failed, when nothing is built, or only a
+/// transient failure with `build_over_a_failed_gate` (a cold prepared
+/// isolate) builds anyway. The one place either path's attempt settles:
+/// what it found of the database is recorded once, when it ends
+/// ([`settle_backend`]), so a `/health` read while it runs shows the last
+/// settled attempt, never a gate that answered before the build it gates.
+async fn gated_attempt<B, Fut>(
+    guard: &BuildGuard,
+    io: &dyn BuildIo,
+    timer: &dyn WaitTimer,
+    cache_mode: crate::kv_cached_db::CacheMode,
+    build_over_a_failed_gate: bool,
+    build: B,
+) -> Result<Finished, Unbuilt>
+where
+    B: FnOnce(Arc<dyn DatabaseService>, Arc<VariablesSnapshot>) -> Fut,
+    Fut: std::future::Future<Output = Result<Finished, RuntimeBuildError>>,
+{
+    let db = io.open_database(cache_mode).map_err(Unbuilt::Failed)?;
     let variables = crate::runtime_build::fresh_variables_snapshot();
-    io.read_variables(&db, &variables)
-        .await
-        .map_err(Unbuilt::Gated)?;
-    let block_settings = io.read_block_settings(&db).await.map_err(Unbuilt::Failed)?;
-    let source = BuildSource {
-        db,
-        block_settings,
-        variables,
+    let gate = io.read_variables(&db, &variables).await;
+    let gate_saw = gate_found(&gate);
+    let mut attempt = match gate {
+        Err(error) if !(build_over_a_failed_gate && error.is_unavailable()) => {
+            Err(Unbuilt::Gated(error))
+        }
+        _ => build(db, variables).await.map_err(Unbuilt::Failed),
     };
-    io.build_dynamic(source, version, environment_identity, started_at)
-        .await
-        .map_err(Unbuilt::Failed)
+    let found = attempt_found(gate_saw, &attempt);
+    settle_backend(guard, timer, found);
+    // A runtime published while D1 is failing is degraded, whatever its
+    // blocks say (a cold isolate's build over a failed gate can come out
+    // whole): its routes that read D1 do not serve, and its publish must arm
+    // a window for a later request to check D1 again — a healthy publish
+    // would clear it.
+    if found == D1Seen::Failing {
+        if let Ok(finished) = &mut attempt {
+            finished.degraded = true;
+        }
+    }
+    attempt
+}
+
+/// What a settled attempt, or one read of its gate, found of D1, for
+/// `/health`'s `backend` ([`settle_backend`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum D1Seen {
+    /// D1 could not answer.
+    Failing,
+    /// D1 answered — with rows, or with an error that is not its outage.
+    Answering,
+    /// D1 was not reached: nothing to say.
+    Nothing,
+}
+
+/// What the gate's read found of D1, by its error's class
+/// ([`RuntimeBuildError::database_class`]):
+///
+/// - answered, or failed on a statement D1 ran (a missing table, a page too
+///   full: no class) or on contention (D1 is up): [`D1Seen::Answering`];
+/// - D1's outage ([`RuntimeBuildError::is_database_outage`]):
+///   [`D1Seen::Failing`];
+/// - refused before it was sent (the invocation's call budget, or the
+///   platform's per-invocation limit): [`D1Seen::Nothing`].
+fn gate_found(gate: &Result<(), RuntimeBuildError>) -> D1Seen {
+    match gate {
+        Ok(()) => D1Seen::Answering,
+        Err(error) if error.is_database_outage() => D1Seen::Failing,
+        Err(error) => match error.database_class() {
+            Some(DatabaseAnswer::CallBudgetExhausted) => D1Seen::Nothing,
+            Some(DatabaseAnswer::Contended | DatabaseAnswer::Unavailable) | None => {
+                D1Seen::Answering
+            }
+        },
+    }
+}
+
+/// What a settled attempt found of D1, from what its gate found
+/// (`gate_saw`, [`gate_found`]) and what came after it: failing when the gate
+/// did, when a read after it did ([`RuntimeBuildError::is_database_outage`]
+/// on the failed build), or when a block of the runtime it built is retrying
+/// because D1 could not answer its `Init`
+/// ([`retrying_on_the_database`](impresspress_core::runtime_health::retrying_on_the_database))
+/// — a cold isolate's build over a gate that failed without an outage
+/// included; otherwise what the gate found, so a block still retrying failed
+/// on its own.
+fn attempt_found(gate_saw: D1Seen, attempt: &Result<Finished, Unbuilt>) -> D1Seen {
+    let after_the_gate_failed = match attempt {
+        Ok(finished) => finished
+            .rt
+            .wafer
+            .init_states()
+            .values()
+            .any(impresspress_core::runtime_health::retrying_on_the_database),
+        Err(Unbuilt::Failed(error)) => error.is_database_outage(),
+        Err(Unbuilt::Gated(_)) => false,
+    };
+    if after_the_gate_failed {
+        D1Seen::Failing
+    } else {
+        gate_saw
+    }
+}
+
+/// Record what one settled attempt found of D1, at the time it settled, in
+/// `BACKEND_CHECK` — `/health`'s `backend` — or nothing when it found
+/// nothing ([`D1Seen::Nothing`]). Only the current slot owner records, as
+/// only it arms the window: a superseded owner's attempt says nothing about
+/// the runtime now serving, and a failure it recorded would have no window
+/// armed to look again. [`BackendCheck::after`] keeps the newest record when
+/// two settle out of order.
+fn settle_backend(guard: &BuildGuard, timer: &dyn WaitTimer, found: D1Seen) {
+    let answered = match found {
+        D1Seen::Failing => false,
+        D1Seen::Answering => true,
+        D1Seen::Nothing => return,
+    };
+    if guard.is_current() {
+        let at_ms = timer.now_ms();
+        BACKEND_CHECK.with(|cell| {
+            cell.set(Some(BackendCheck::after(cell.get(), answered, at_ms)));
+        });
+    }
 }
 
 /// Whether `rt`'s only defect is its variables snapshot remembering a failed
@@ -2322,10 +2529,16 @@ async fn heal_or_gate(
     probe: &VersionProbe,
     now: u64,
 ) -> Result<(Rc<ReadyRuntime>, CacheOutcome), RuntimeBuildError> {
-    let read = match io.open_database(crate::kv_cached_db::CacheMode::default()) {
-        Ok(db) => io.read_variables(&db, &rt.variables_snapshot).await,
-        Err(error) => Err(error),
+    // The heal's attempt is the gate alone: it settles here. A D1 handle
+    // that does not open (a missing binding) reached nothing.
+    let (found, read) = match io.open_database(crate::kv_cached_db::CacheMode::default()) {
+        Ok(db) => {
+            let read = io.read_variables(&db, &rt.variables_snapshot).await;
+            (gate_found(&read), read)
+        }
+        Err(error) => (D1Seen::Nothing, Err(error)),
     };
+    settle_backend(guard, timer, found);
     match read {
         Ok(()) => {
             let mut health = rt.health.get();
@@ -2428,9 +2641,10 @@ fn rebuild_failed(
             AfterFailure::Serve(rt)
         }
         (true, None) => AfterFailure::Answer(match error {
-            RuntimeBuildError::Unavailable { cause, .. } => RuntimeBuildError::Unavailable {
+            RuntimeBuildError::Unavailable { cause, class, .. } => RuntimeBuildError::Unavailable {
                 cause,
                 retry_after_secs: window.map_or(1, |w| w.remaining_secs(now)),
+                class,
             },
             fault => fault,
         }),
@@ -2714,7 +2928,17 @@ async fn build_prepared_as_owner(
     // Gated: with a runtime of this plan cached, a failed read builds
     // nothing and keeps it as it was (`kept_is_current`: the probe above
     // found the plan current); a cold isolate builds anyway, degraded.
-    let finished = match gated_hydrate(io, plan, is_cold, environment_identity, now).await {
+    let finished = match gated_hydrate(
+        build_guard,
+        io,
+        timer,
+        plan,
+        is_cold,
+        environment_identity,
+        now,
+    )
+    .await
+    {
         Ok(finished) => finished,
         Err(unbuilt) => {
             let failed = unbuilt.failed_build(true);
@@ -2745,7 +2969,8 @@ async fn build_prepared_as_owner(
 
 /// What `/health` reports beyond the runtime's slots (D1 outage plan I6),
 /// read from this isolate: the cached runtime's [`RuntimeHealth`] and
-/// [`RetryStreaks`], and the retry window. The Cloudflare entry registers it
+/// [`RetryStreaks`], the retry window, and the last gate read
+/// (`BACKEND_CHECK`). The Cloudflare entry registers it
 /// as the isolate's [`impresspress_core::runtime_health`] source. Reads
 /// isolate state only.
 ///
@@ -2758,9 +2983,11 @@ pub(crate) fn platform_health() -> PlatformHealth {
         retries: window.failures,
         failed: window.cause == WindowCause::Fault,
     });
+    let backend = BACKEND_CHECK.with(Cell::get);
     let Some(rt) = cached() else {
         return PlatformHealth {
             episode,
+            backend,
             ..PlatformHealth::default()
         };
     };
@@ -2770,6 +2997,7 @@ pub(crate) fn platform_health() -> PlatformHealth {
         degraded_since_ms: health.degraded_since_ms,
         stale_since_ms: health.stale_since_ms,
         retry_streaks: rt.retry_streaks.get().cloned().unwrap_or_default(),
+        backend,
     }
 }
 
@@ -2819,6 +3047,7 @@ pub(crate) mod tests {
         RUNTIME.with(IsolateCell::clear);
         BUILD_LAST_FAILURE.with(|value| value.set(None));
         RETRY_WINDOW.with(|value| value.set(None));
+        BACKEND_CHECK.with(|value| value.set(None));
         PREPARED_BYPASS.with(IsolateCell::clear);
     }
 
@@ -3998,7 +4227,14 @@ pub(crate) mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Ends {
         Healthy,
+        /// Published without `test/resets`, whose `Init` failed on its own.
         Degraded,
+        /// Published without `test/resets`, whose `Init` failed because the
+        /// database could not answer it (and propagated that error).
+        DegradedByDatabase,
+        /// The boot fails after every block's `Init` answered: the request
+        /// hooks' re-read of `block_settings` meets D1's outage.
+        ReReadOutage,
         Unavailable,
         Fault,
     }
@@ -4038,6 +4274,15 @@ pub(crate) mod tests {
         /// was handed.
         gated: std::cell::RefCell<Option<Arc<VariablesSnapshot>>>,
         built_with: std::cell::RefCell<Option<Arc<VariablesSnapshot>>>,
+        /// `/health` of the cached runtime, read when a build starts: after
+        /// the gate answered, before any block's `Init` ran.
+        health_mid_build: std::cell::RefCell<Vec<serde_json::Value>>,
+        /// The test's clock, and how far the gate read moves it: the read
+        /// finishes later than it starts.
+        clock: std::cell::RefCell<Option<Rc<Cell<u64>>>>,
+        read_takes_ms: Cell<u64>,
+        /// A newer owner reclaims the slot while the gate read runs.
+        supersede_at_gate: Cell<bool>,
     }
 
     impl FakeIo {
@@ -4061,6 +4306,10 @@ pub(crate) mod tests {
                 settings_reads: Cell::new(0),
                 gated: std::cell::RefCell::new(None),
                 built_with: std::cell::RefCell::new(None),
+                health_mid_build: std::cell::RefCell::new(Vec::new()),
+                clock: std::cell::RefCell::new(None),
+                read_takes_ms: Cell::new(0),
+                supersede_at_gate: Cell::new(false),
             }
         }
 
@@ -4086,7 +4335,29 @@ pub(crate) mod tests {
             variables: Arc<VariablesSnapshot>,
         ) -> Result<Finished, RuntimeBuildError> {
             *self.built_with.borrow_mut() = Some(variables.clone());
+            if let Some(rt) = cached() {
+                let report = impresspress_core::runtime_health::HealthReport::of(
+                    &rt.wafer.init_states(),
+                    &platform_health(),
+                    impresspress_core::util::now_millis(),
+                );
+                self.health_mid_build
+                    .borrow_mut()
+                    .push(serde_json::to_value(report).expect("serializes"));
+            }
             match ends {
+                Ends::ReReadOutage => {
+                    let error = impresspress_core::builder::BootError::Seed(
+                        impresspress_core::builder::SeedError::from(DatabaseError::Unavailable(
+                            "D1_ERROR: Network connection lost.".into(),
+                        ))
+                        .in_step("read block_settings after admin init"),
+                    );
+                    Err(RuntimeBuildError::from_boot(
+                        &error,
+                        format!("dynamic-runtime boot: {error}"),
+                    ))
+                }
                 Ends::Unavailable => Err(RuntimeBuildError::classified(
                     true,
                     "D1_ERROR: Network connection lost.".to_string(),
@@ -4095,10 +4366,15 @@ pub(crate) mod tests {
                     false,
                     "D1_ERROR: no such column".to_string(),
                 )),
-                Ends::Healthy | Ends::Degraded => {
+                Ends::Healthy | Ends::Degraded | Ends::DegradedByDatabase => {
                     let mut rt = if self.real_slots.get() {
                         runtime_of(
-                            health_wafer(ends == Ends::Degraded).await,
+                            health_wafer(match ends {
+                                Ends::Degraded => ResetsInit::Own,
+                                Ends::DegradedByDatabase => ResetsInit::Database,
+                                _ => ResetsInit::Ready,
+                            })
+                            .await,
                             IDENTITY,
                             &version,
                             config_version,
@@ -4116,7 +4392,7 @@ pub(crate) mod tests {
                         rt,
                         build_ordinal: 1,
                         duration_ms: 0,
-                        degraded: ends == Ends::Degraded,
+                        degraded: ends != Ends::Healthy,
                     })
                 }
             }
@@ -4161,9 +4437,12 @@ pub(crate) mod tests {
             // The same database: an outage fails this read as it fails the
             // variables read (a warm retry reads it through to D1).
             match self.variables.get() {
-                Some(crate::test_fakes::VariablesAnswer::Unavailable) => Err(
-                    RuntimeBuildError::classified(true, "read block_settings: D1 down".into()),
-                ),
+                Some(crate::test_fakes::VariablesAnswer::Unavailable) => {
+                    Err(RuntimeBuildError::from_database(
+                        &DatabaseError::Unavailable("D1_ERROR: Network connection lost.".into()),
+                        "read block_settings: D1 down".into(),
+                    ))
+                }
                 Some(crate::test_fakes::VariablesAnswer::Fault) => Err(
                     RuntimeBuildError::classified(false, "read block_settings: fault".into()),
                 ),
@@ -4178,6 +4457,13 @@ pub(crate) mod tests {
         ) -> Result<(), RuntimeBuildError> {
             self.gates.set(self.gates.get() + 1);
             *self.gated.borrow_mut() = Some(variables.clone());
+            if let Some(clock) = &*self.clock.borrow() {
+                clock.set(clock.get() + self.read_takes_ms.get());
+                if self.supersede_at_gate.get() {
+                    *self.superseded_by.borrow_mut() =
+                        BuildGuard::try_acquire(clock.get() + BUILD_HARD_LEASE_MS + 1);
+                }
+            }
             crate::runtime_build::read_variables(db, variables).await
         }
 
@@ -4881,6 +5167,17 @@ pub(crate) mod tests {
         io.variables_answer(Some(answer));
     }
 
+    /// What the isolate's slot owner last saw of the backend, as `/health`'s
+    /// `backend` reports it.
+    fn backend_check() -> Option<BackendCheck> {
+        BACKEND_CHECK.with(Cell::get)
+    }
+
+    /// `check` as (answered, since, checked).
+    fn parts(check: BackendCheck) -> (bool, u64, u64) {
+        (!check.is_failing(), check.since_ms(), check.checked_ms())
+    }
+
     /// A cold prepared isolate that published degraded, the window armed
     /// `Degraded`, and the clock at the window's end.
     async fn degraded_prepared_isolate(io: &FakeIo, timer: &FakeTimer) -> RetryWindow {
@@ -5342,11 +5639,21 @@ pub(crate) mod tests {
             assert_eq!(outcome, CacheOutcome::Gated, "{prepared}");
             let doubled = window().expect("re-armed");
             assert_eq!(doubled.cause, WindowCause::GateFailed, "{prepared}");
+            assert_eq!(
+                backend_check().map(|check| !check.is_failing()),
+                Some(false),
+                "{prepared}: the heal's failed read is a failed check"
+            );
 
             timer.now.set(doubled.retry_at_ms);
             backend(&io, VariablesAnswer::Rows);
             let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("healed");
             assert_eq!(outcome, CacheOutcome::ProbedFresh, "{prepared}");
+            assert_eq!(
+                backend_check().map(parts),
+                Some((true, doubled.retry_at_ms, doubled.retry_at_ms)),
+                "{prepared}: the heal's read answered"
+            );
             assert!(rt.health.get().is_healthy(), "{prepared}");
             assert!(!rt.variables_snapshot.remembers_a_failure(), "{prepared}");
             assert_eq!(window(), None, "{prepared}: the heal clears the window");
@@ -5453,7 +5760,18 @@ pub(crate) mod tests {
     const RESET: &str = "D1_ERROR: D1 DB exceeded its CPU time limit and was reset.";
 
     /// Answers nothing; its `Init` fails as D1 does after a reset, or not.
-    struct Resets(bool);
+    struct Resets(ResetsInit);
+
+    /// How `test/resets`'s `Init` ends.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ResetsInit {
+        Ready,
+        /// Fails on its own: an `Unavailable` of its own, no detail code.
+        Own,
+        /// Fails because the database could not answer: the database
+        /// handler's error, propagated, with its `database.unavailable`.
+        Database,
+    }
 
     #[wafer_block::wafer_async_trait]
     impl wafer_run::Block for Resets {
@@ -5473,19 +5791,27 @@ pub(crate) mod tests {
             _ctx: &dyn wafer_run::context::Context,
             event: wafer_run::LifecycleEvent,
         ) -> Result<(), wafer_run::WaferError> {
-            if self.0 && matches!(event.event_type, wafer_run::LifecycleType::Init) {
-                return Err(wafer_run::WaferError::new(
+            if !matches!(event.event_type, wafer_run::LifecycleType::Init) {
+                return Ok(());
+            }
+            match self.0 {
+                ResetsInit::Ready => Ok(()),
+                ResetsInit::Own => Err(wafer_run::WaferError::new(
                     wafer_run::ErrorCode::Unavailable,
                     RESET,
-                ));
+                )),
+                ResetsInit::Database => Err(wafer_run::WaferError::new(
+                    wafer_run::ErrorCode::Unavailable,
+                    "database temporarily unavailable",
+                )
+                .with_detail_code(wafer_block::wire::database::DATABASE_UNAVAILABLE)),
             }
-            Ok(())
         }
     }
 
     /// A sealed runtime of the system block and `test/resets`, both `Init`ed,
-    /// as a boot leaves them: `test/resets` retrying when `resets`.
-    async fn health_wafer(resets: bool) -> wafer_run::Wafer {
+    /// as a boot leaves them: `test/resets` retrying unless `Ready`.
+    async fn health_wafer(resets: ResetsInit) -> wafer_run::Wafer {
         let mut wafer =
             wafer_run::Wafer::new(std::sync::Arc::new(wafer_run::StaticConfigSource::default()))
                 .expect("Wafer::new");
@@ -5504,7 +5830,11 @@ pub(crate) mod tests {
             .await
             .expect("the system block initializes");
         let resets_init = wafer.init_block("test/resets").await;
-        assert_eq!(resets_init.is_err(), resets, "{resets_init:?}");
+        assert_eq!(
+            resets_init.is_err(),
+            resets != ResetsInit::Ready,
+            "{resets_init:?}"
+        );
         wafer
     }
 
@@ -5608,6 +5938,393 @@ pub(crate) mod tests {
         let (status, retry_after, body) = health_of(&rt).await;
         assert_eq!((status, retry_after), (200, None), "{body}");
         assert_eq!(body, serde_json::json!({"status": "ok"}));
+        reset_isolate();
+    }
+
+    /// `ms` as `/health` writes a time: RFC 3339 UTC, to the millisecond.
+    fn rfc3339(ms: u64) -> serde_json::Value {
+        let at = chrono::DateTime::from_timestamp_millis(i64::try_from(ms).expect("ms"))
+            .expect("in range");
+        serde_json::json!(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    }
+
+    /// **`/health` names a failed backend check** (FOLLOWUPS "health body
+    /// not naming a failed backend check"). The variables read answers and a
+    /// block's `Init` then fails on the backend: the runtime is published
+    /// degraded, listing that block, with the backend `ok`. D1 goes down, so
+    /// every retry's gate fails and nothing replaces that runtime: its slots,
+    /// status and episode stay those of a block failing its own `Init`, and
+    /// only `backend` — `failing`, since the first failed check, `checked` at
+    /// the last — says it is an outage. Back, the next check answers and
+    /// starts an `ok` run; a healthy publish is `{"status":"ok"}` again.
+    #[wasm_bindgen_test]
+    async fn health_names_a_failing_backend_check_through_an_outage() {
+        reset_isolate();
+        crate::init_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+        io.dynamic.set(Ends::Degraded);
+
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("published");
+        let (_, _, body) = health_of(&rt).await;
+        assert_eq!(body["status"], "degraded", "{body}");
+        assert_eq!(body["unavailable"][0]["block"], "test/resets", "{body}");
+        assert_eq!(
+            body["backend"],
+            serde_json::json!({
+                "status": "ok",
+                "since": rfc3339(START),
+                "checked": rfc3339(START),
+            }),
+            "the cold build's gate answered: {body}"
+        );
+
+        backend(&io, VariablesAnswer::Unavailable);
+        let first_failure = window().expect("armed").retry_at_ms;
+        timer.now.set(first_failure);
+        let mut checked = first_failure;
+        for _ in 0..3 {
+            let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("kept");
+            assert_eq!(outcome, CacheOutcome::Gated);
+            let (status, retry_after, body) = health_of(&rt).await;
+            assert_eq!(status, 503);
+            assert!(retry_after.is_some(), "{body}");
+            assert_eq!(
+                body["status"], "degraded",
+                "the runtime is unchanged: {body}"
+            );
+            assert_eq!(body["unavailable"][0]["block"], "test/resets", "{body}");
+            assert_eq!(
+                body["backend"],
+                serde_json::json!({
+                    "status": "failing",
+                    "since": rfc3339(first_failure),
+                    "checked": rfc3339(checked),
+                }),
+                "{body}"
+            );
+            checked = window().expect("armed").retry_at_ms;
+            timer.now.set(checked);
+        }
+        assert_eq!(io.builds.get(), 1, "nothing built through the outage");
+
+        // Back: the gate answers, the rebuild degrades on the block again —
+        // the block's own failure, with the backend `ok` since this check.
+        backend(&io, VariablesAnswer::Rows);
+        let (rt, outcome) = get_or_build_with(&io, &timer).await.expect("rebuilt");
+        assert!(
+            matches!(outcome, CacheOutcome::Rebuilt { .. }),
+            "{outcome:?}"
+        );
+        let (_, _, body) = health_of(&rt).await;
+        assert_eq!(body["status"], "degraded", "{body}");
+        assert_eq!(
+            body["backend"],
+            serde_json::json!({
+                "status": "ok",
+                "since": rfc3339(checked),
+                "checked": rfc3339(checked),
+            }),
+            "{body}"
+        );
+
+        timer.now.set(window().expect("armed").retry_at_ms);
+        io.dynamic.set(Ends::Healthy);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("healthy");
+        let (status, _, body) = health_of(&rt).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body, serde_json::json!({"status": "ok"}));
+        reset_isolate();
+    }
+
+    /// Every attempt settles `backend`, a cold isolate's included: a cold
+    /// dynamic attempt whose gate D1 fails answers 503 and leaves `backend`
+    /// failing; the next request's U-B1 hydrate checks again
+    /// (`gated_hydrate`), fails, builds anyway, and serves the plan stale with
+    /// the failing run extended. A gate that fails on a statement D1 ran (a
+    /// missing column: the version's fault, the 500) records `ok`: D1
+    /// answered.
+    #[wasm_bindgen_test]
+    async fn a_cold_isolate_reports_its_failed_backend_checks() {
+        reset_isolate();
+        crate::init_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(Some(packaged_plan()));
+        io.real_slots.set(true);
+        *io.stamp.borrow_mut() = MOVED_GENERATION.to_string();
+        backend(&io, VariablesAnswer::Unavailable);
+        io.hydrate.set(Ends::Degraded);
+
+        get_or_build_with(&io, &timer)
+            .await
+            .expect_err("the cold dynamic attempt answers 503");
+        assert_eq!(backend_check().map(parts), Some((false, START, START)));
+        assert_eq!(
+            impresspress_core::runtime_health::platform_health().backend,
+            backend_check(),
+            "the registered source reports it"
+        );
+
+        timer.now.set(START + 200);
+        let (rt, _) = get_or_build_with(&io, &timer)
+            .await
+            .expect("request 2 is served the stale plan");
+        assert_eq!(io.gates.get(), 2, "the hydrate checked again");
+        let (status, _, body) = health_of(&rt).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["status"], "stale", "{body}");
+        assert_eq!(
+            body["backend"],
+            serde_json::json!({
+                "status": "failing",
+                "since": rfc3339(START),
+                "checked": rfc3339(START + 200),
+            }),
+            "{body}"
+        );
+
+        reset_isolate();
+        let io = FakeIo::new(Some(packaged_plan()));
+        backend(&io, VariablesAnswer::Fault);
+        get_or_build_with(&io, &timer)
+            .await
+            .expect_err("the permanent failure's 500");
+        assert_eq!(
+            backend_check().map(|check| check.is_failing()),
+            Some(false),
+            "D1 answered, with the version's own fault"
+        );
+        reset_isolate();
+    }
+
+    /// **A superseded owner records nothing**: the slot is reclaimed while
+    /// the owner's gate read runs, and the read then fails. The owner arms no
+    /// window, so a failure it recorded would stick with nothing to check it
+    /// again; `backend` keeps what the current owner saw. The current owner's
+    /// failed attempt is recorded.
+    #[wasm_bindgen_test]
+    async fn a_superseded_owners_failed_read_is_not_recorded() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        *io.clock.borrow_mut() = Some(timer.now.clone());
+        io.dynamic.set(Ends::Degraded);
+        get_or_build_with(&io, &timer).await.expect("published");
+        let before = backend_check();
+        assert_eq!(before.map(parts), Some((true, START, START)));
+
+        timer.now.set(window().expect("armed").retry_at_ms);
+        backend(&io, VariablesAnswer::Unavailable);
+        io.supersede_at_gate.set(true);
+        let _ = get_or_build_with(&io, &timer).await;
+        assert_eq!(backend_check(), before, "a superseded owner's read");
+        drop(io.superseded_by.borrow_mut().take());
+
+        io.supersede_at_gate.set(false);
+        reset_build_slot();
+        timer.now.set(window().expect("armed").retry_at_ms);
+        get_or_build_with(&io, &timer).await.expect("kept");
+        assert_eq!(
+            backend_check().map(|check| !check.is_failing()),
+            Some(false),
+            "the current owner's read"
+        );
+        reset_isolate();
+    }
+
+    /// **`checked` is when the attempt settled**, not when the request
+    /// started: the gate read takes 30 ms of the clock.
+    #[wasm_bindgen_test]
+    async fn a_check_is_timed_when_its_attempt_settles() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        *io.clock.borrow_mut() = Some(timer.now.clone());
+        io.read_takes_ms.set(30);
+        get_or_build_with(&io, &timer).await.expect("healthy");
+        assert_eq!(
+            backend_check().map(parts),
+            Some((true, START + 30, START + 30))
+        );
+        reset_isolate();
+    }
+
+    /// **D1 failing a block's `Init` is the backend failing; a block failing
+    /// on its own is not** (#287 review 2). The gate answers both times. A
+    /// block whose `Init` propagated the database's outage (its error's
+    /// `database.unavailable`, kept in its `Retrying` state) settles the
+    /// attempt `failing`; a block whose `Init` failed with an `Unavailable`
+    /// of its own settles it `ok`, whatever else the database did in the
+    /// meantime: a read that failed and was retried leaves its block
+    /// `Ready`, and only the failure that kept a block from serving counts.
+    #[wasm_bindgen_test]
+    async fn a_block_failing_on_the_database_is_the_backend_failing() {
+        reset_isolate();
+        crate::init_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+        io.dynamic.set(Ends::DegradedByDatabase);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("published");
+        assert_eq!(backend_check().map(parts), Some((false, START, START)));
+        let (_, _, body) = health_of(&rt).await;
+        assert_eq!(body["status"], "degraded", "{body}");
+        assert_eq!(body["backend"]["status"], "failing", "{body}");
+
+        reset_isolate();
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+        io.dynamic.set(Ends::Degraded);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("published");
+        assert_eq!(backend_check().map(parts), Some((true, START, START)));
+        let (_, _, body) = health_of(&rt).await;
+        assert_eq!(body["backend"]["status"], "ok", "its own failure: {body}");
+        reset_isolate();
+    }
+
+    /// **A rebuild in flight does not report its gate** (#287 review round
+    /// 2, item 1): after an outage, D1 answers the gate, and while the
+    /// rebuild's blocks are still to `Init`, `/health` on the runtime being
+    /// replaced still says what the last settled attempt found — `failing` —
+    /// never the rollback signature of a degraded runtime with `ok`. The
+    /// rebuild's own `Init` then fails on D1, and it settles `failing`; the
+    /// next, healthy, settles `ok`.
+    #[wasm_bindgen_test]
+    async fn a_rebuild_in_flight_reports_the_last_settled_attempt() {
+        reset_isolate();
+        crate::init_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+        io.dynamic.set(Ends::DegradedByDatabase);
+        get_or_build_with(&io, &timer).await.expect("published");
+        assert_eq!(backend_check().map(|check| check.is_failing()), Some(true));
+
+        let retry_at = window().expect("armed").retry_at_ms;
+        timer.now.set(retry_at);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("rebuilt");
+        let mid = io.health_mid_build.borrow().clone();
+        assert_eq!(mid.len(), 1, "one rebuild over a cached runtime: {mid:?}");
+        assert_eq!(mid[0]["status"], "degraded", "{mid:?}");
+        assert_eq!(
+            mid[0]["backend"]["status"], "failing",
+            "mid-rebuild: {mid:?}"
+        );
+        assert_eq!(mid[0]["backend"]["since"], rfc3339(START), "{mid:?}");
+        let (_, _, body) = health_of(&rt).await;
+        assert_eq!(body["backend"]["status"], "failing", "settled: {body}");
+        assert_eq!(body["backend"]["checked"], rfc3339(retry_at), "{body}");
+
+        timer.now.set(window().expect("armed").retry_at_ms);
+        io.dynamic.set(Ends::Healthy);
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("healthy");
+        let mid = io.health_mid_build.borrow().clone();
+        assert_eq!(
+            mid[1]["backend"]["status"], "failing",
+            "mid-rebuild: {mid:?}"
+        );
+        let (status, _, body) = health_of(&rt).await;
+        assert_eq!((status, body), (200, serde_json::json!({"status": "ok"})));
+        assert_eq!(backend_check().map(|check| check.is_failing()), Some(false));
+        reset_isolate();
+    }
+
+    /// **D1 failing the boot's own re-read is the backend failing** (#287
+    /// review A): the gate and `block_settings` answer, every block's `Init`
+    /// answers, then the request hooks' re-read of `block_settings` meets
+    /// D1's outage. The seed hook's error keeps the database's class, so the
+    /// failed build reads `failing`.
+    #[wasm_bindgen_test]
+    async fn d1_failing_the_boots_re_read_is_the_backend_failing() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.dynamic.set(Ends::ReReadOutage);
+        get_or_build_with(&io, &timer)
+            .await
+            .expect_err("the cold build fails on the re-read");
+        assert_eq!(io.settings_reads.get(), 1, "block_settings answered");
+        assert_eq!(backend_check().map(parts), Some((false, START, START)));
+        reset_isolate();
+    }
+
+    /// **A cold isolate's build over a gate that failed without an outage
+    /// still reads its blocks** (#287 review B): the gate meets contention
+    /// (D1 is up), the cold prepared isolate builds anyway, and a block of
+    /// the runtime it built retries because D1 could not answer its `Init`:
+    /// `failing`.
+    #[wasm_bindgen_test]
+    async fn a_cold_build_over_a_contended_gate_reads_its_blocks() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(Some(packaged_plan()));
+        io.real_slots.set(true);
+        backend(&io, VariablesAnswer::Contended);
+        io.hydrate.set(Ends::DegradedByDatabase);
+        get_or_build_with(&io, &timer)
+            .await
+            .expect("published degraded");
+        assert_eq!(io.hydrates.get(), 1, "built over the failed gate");
+        assert_eq!(backend_check().map(|check| check.is_failing()), Some(true));
+        reset_isolate();
+    }
+
+    /// **A gate that fails without an outage still says D1 answered**
+    /// (#287 review C): after an attempt that read `failing`, a gate that
+    /// meets contention records `ok` — D1 is up — and the failing run ends.
+    #[wasm_bindgen_test]
+    async fn a_contended_gate_after_a_failing_attempt_reads_ok() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(None);
+        io.real_slots.set(true);
+        io.dynamic.set(Ends::DegradedByDatabase);
+        get_or_build_with(&io, &timer).await.expect("published");
+        assert_eq!(backend_check().map(|check| check.is_failing()), Some(true));
+
+        let retry_at = window().expect("armed").retry_at_ms;
+        timer.now.set(retry_at);
+        backend(&io, VariablesAnswer::Contended);
+        let (_, outcome) = get_or_build_with(&io, &timer).await.expect("kept");
+        assert_eq!(outcome, CacheOutcome::Gated);
+        assert_eq!(backend_check().map(parts), Some((true, retry_at, retry_at)));
+        reset_isolate();
+    }
+
+    /// **A failing backend keeps a window armed** (#287 review D): a cold
+    /// prepared isolate's gate meets the outage and its build comes out
+    /// whole. It is published degraded, with the window armed, so a later
+    /// request checks D1 again: back, the backend is `ok` and the window
+    /// cleared.
+    #[wasm_bindgen_test]
+    async fn a_failing_backend_keeps_a_window_armed_until_d1_answers() {
+        reset_isolate();
+        let timer = FakeTimer::starting_at(START);
+        let io = FakeIo::new(Some(packaged_plan()));
+        backend(&io, VariablesAnswer::Unavailable);
+        io.hydrate.set(Ends::Healthy);
+        // The attempt alone, before the request's own look at the snapshot
+        // (`observe_snapshot`): the publish itself keeps the window armed.
+        let Ok(Pass::Done((rt, _))) = get_or_build_attempt(&io, &timer, Attempt::First).await
+        else {
+            panic!("the cold isolate publishes");
+        };
+        assert_eq!(backend_check().map(|check| check.is_failing()), Some(true));
+        assert!(
+            rt.health.get().degraded_since_ms.is_some(),
+            "published degraded"
+        );
+        let armed = window().expect("a window armed while D1 is failing");
+
+        timer.now.set(armed.retry_at_ms);
+        backend(&io, VariablesAnswer::Rows);
+        let gates = io.gates.get();
+        let (rt, _) = get_or_build_with(&io, &timer).await.expect("checked again");
+        assert_eq!(io.gates.get(), gates + 1, "the later request read the gate");
+        assert_eq!(backend_check().map(|check| check.is_failing()), Some(false));
+        assert!(rt.health.get().is_healthy(), "{:?}", rt.health.get());
+        assert_eq!(window(), None, "cleared once D1 answers");
         reset_isolate();
     }
 }

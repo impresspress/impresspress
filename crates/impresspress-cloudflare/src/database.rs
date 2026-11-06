@@ -98,7 +98,8 @@
 //! unique-key violation is [`DatabaseError::AlreadyExists`], as the native
 //! backends report it from the driver's code; one of D1's transient texts (a
 //! lost connection, an overload, a reset, a daily limit — that module lists
-//! them) is [`DatabaseError::Unavailable`]; anything else is `Internal`.
+//! them) is [`DatabaseError::Unavailable`]; a busy or locked database is
+//! [`DatabaseError::Contended`]; anything else is `Internal`.
 //! The taken key is part of the `DatabaseService` contract, not a courtesy:
 //! `impresspress_core::blocks::crud` answers `AlreadyExists` as a 409 and
 //! never re-reads a key to find out what a refused write meant. The tests

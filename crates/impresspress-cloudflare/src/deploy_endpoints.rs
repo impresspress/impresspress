@@ -588,7 +588,8 @@ mod tests {
     /// as soon as one failure cannot.
     #[wasm_bindgen_test]
     fn the_funnel_answers_a_transient_report_503_and_a_fault_500() {
-        let budget = || InitError::Transient("call budget exhausted".into());
+        let budget =
+            || InitError::Transient(wafer_run::TransientFailure::new("call budget exhausted"));
         let ok = report(
             StepOutcome::succeeded(),
             StepOutcome::succeeded(),

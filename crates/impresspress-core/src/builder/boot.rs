@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use wafer_block::init_attempt::DatabaseAnswer;
 use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
 use wafer_run::{InitError, InitWait, RuntimeError, Wafer};
 
@@ -284,21 +285,48 @@ pub struct DegradedBlock {
 pub enum SeedError {
     /// The store the hook reads or writes could not be reached; a retry may
     /// succeed.
-    Unavailable(String),
+    Unavailable {
+        message: String,
+        /// The database's class of the failure, when a database answered
+        /// it ([`DatabaseError::attempt_answer`]): `/health`'s `backend`
+        /// reads a D1 outage here as the backend failing.
+        class: Option<DatabaseAnswer>,
+    },
     /// Anything a retry cannot fix.
     Fault(String),
 }
 
 impl SeedError {
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Unavailable(_))
+        matches!(self, Self::Unavailable { .. })
+    }
+
+    /// The database's class of the failure, when a database answered it.
+    #[must_use]
+    pub fn database_class(&self) -> Option<DatabaseAnswer> {
+        match self {
+            Self::Unavailable { class, .. } => *class,
+            Self::Fault(_) => None,
+        }
+    }
+
+    /// This failure, named as the hook's `step`; its class is kept.
+    #[must_use]
+    pub fn in_step(self, step: &str) -> Self {
+        match self {
+            Self::Unavailable { message, class } => Self::Unavailable {
+                message: format!("{step}: {message}"),
+                class,
+            },
+            Self::Fault(message) => Self::Fault(format!("{step}: {message}")),
+        }
     }
 }
 
 impl std::fmt::Display for SeedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unavailable(message) | Self::Fault(message) => f.write_str(message),
+            Self::Unavailable { message, .. } | Self::Fault(message) => f.write_str(message),
         }
     }
 }
@@ -310,7 +338,10 @@ impl From<DatabaseError> for SeedError {
     /// failure is ([`wafer_run::init_failure_is_transient`]).
     fn from(e: DatabaseError) -> Self {
         if wafer_run::init_failure_is_transient(e.code(), e.detail_code()) {
-            Self::Unavailable(e.to_string())
+            Self::Unavailable {
+                message: e.to_string(),
+                class: e.attempt_answer(),
+            }
         } else {
             Self::Fault(e.to_string())
         }
@@ -336,6 +367,33 @@ pub enum BootError {
 }
 
 impl BootError {
+    /// The database's class of the failure, when a database answered it: a
+    /// block's `Init` attempt's (wafer-run's attempt record), the grants
+    /// read's, or the seed hook's (its `block_settings` re-read).
+    #[must_use]
+    pub fn database_class(&self) -> Option<DatabaseAnswer> {
+        match self {
+            Self::BlockInit {
+                error: InitError::Transient(failure),
+                ..
+            } => failure
+                .detail_code
+                .as_deref()
+                .and_then(DatabaseAnswer::from_detail_code),
+            Self::Grants(e) => e.attempt_answer(),
+            Self::Seed(e) => e.database_class(),
+            Self::BlockInit { .. } | Self::Runtime(_) => None,
+        }
+    }
+
+    /// Whether the database itself could not answer the boot
+    /// ([`Self::database_class`], by `runtime_health::is_database_outage`).
+    pub fn is_database_outage(&self) -> bool {
+        crate::runtime_health::is_database_outage(
+            self.database_class().map(DatabaseAnswer::detail_code),
+        )
+    }
+
     /// Whether a fresh attempt may succeed: a transient `Init` failure, an
     /// unreachable grants read or seed store — by the same rule every `Init`
     /// failure is classified with ([`wafer_run::init_failure_is_transient`]).
@@ -645,6 +703,39 @@ pub(super) fn register_vector_block(
 
 #[cfg(test)]
 mod tests {
+    /// A seed hook's database failure keeps the database's class through
+    /// naming its step, so a D1 outage on the request hooks' re-read is the
+    /// database down for `/health`'s `backend`; contention and a refused call
+    /// are not.
+    #[test]
+    fn a_seed_failure_keeps_the_databases_class() {
+        let outage = SeedError::from(DatabaseError::Unavailable("D1 down".into()))
+            .in_step("read block_settings after admin init");
+        assert!(outage.is_transient());
+        assert_eq!(outage.database_class(), Some(DatabaseAnswer::Unavailable));
+        assert!(outage
+            .to_string()
+            .starts_with("read block_settings after admin init: "));
+        assert!(BootError::Seed(outage).is_database_outage());
+
+        for (error, class) in [
+            (
+                DatabaseError::Contended("locked".into()),
+                Some(DatabaseAnswer::Contended),
+            ),
+            (
+                DatabaseError::CallBudgetExhausted("spent".into()),
+                Some(DatabaseAnswer::CallBudgetExhausted),
+            ),
+        ] {
+            let seed = SeedError::from(error).in_step("step");
+            assert_eq!(seed.database_class(), class);
+            assert!(!BootError::Seed(seed).is_database_outage());
+        }
+        let fault = SeedError::from(DatabaseError::Internal("no such table".into()));
+        assert_eq!(fault.database_class(), None);
+    }
+
     use std::sync::{Arc, Mutex};
 
     use wafer_block::{
@@ -1025,7 +1116,10 @@ mod tests {
     /// failure permanent — the class it was answered with.
     #[test]
     fn the_transient_flag_is_written_only_when_set() {
-        let transient = BlockInitOutcome::failed("a/b", &InitError::Transient("down".into()));
+        let transient = BlockInitOutcome::failed(
+            "a/b",
+            &InitError::Transient(wafer_run::TransientFailure::new("down")),
+        );
         assert_eq!(
             serde_json::to_value(&transient).unwrap(),
             serde_json::json!({
