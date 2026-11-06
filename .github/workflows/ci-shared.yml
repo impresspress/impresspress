@@ -47,13 +47,14 @@ name: CI shared
 # job in this file is missing from its `needs:`, so a new job cannot run
 # outside the required check.
 #
-# Every `Swatinem/rust-cache` step in the CI workflows saves on `main` only
-# (`save-if`). A pull request restores the entry `main` saved, which any branch
-# can read, and writes nothing. The repository's Actions cache holds 10 GB and
-# one full set of `main`'s entries is about that, so every entry a pull request
-# wrote used to evict one of `main`'s. `e2e-dev-sandbox` and `e2e-dev-compile`
-# share one entry (`shared-key`) for the same reason: the second only ever
-# starts after the first has saved.
+# Every `Swatinem/rust-cache` step saves on `main` only (`save-if`, held by
+# `scripts/check-rust-cache-save-if.sh`). A pull request restores the entry
+# `main` saved, which any branch can read, and writes no Rust entry of its own.
+# The repository's Actions cache holds 10 GB, and an entry written from a pull
+# request or a tag can only be read from that ref while it can evict `main`'s.
+# That only works while the key is one `main` has saved, and the key hashes
+# every toolchain installed when the step runs: install anything floating, such
+# as `nightly`, AFTER the step.
 #
 # Editing this file changes BOTH gates at once. Two consequences:
 #   * A comment that describes "this workflow" has to be true on a pull request
@@ -126,6 +127,9 @@ jobs:
       - name: Lint — nothing names the removed strict-schema switch
         run: bash scripts/grep-guard-strict-schema.sh
 
+      - name: Lint — every rust-cache step saves on main only
+        run: bash scripts/check-rust-cache-save-if.sh
+
       # The D1 budget counts calls since wafer-run f9edcf43 (WR-4). The
       # compiler catches the removed items; this catches a comment, a detail
       # code string, a var or a TOML key that still names the per-statement
@@ -156,14 +160,16 @@ jobs:
           examples/dev-sandbox/test-build-guards.sh
           examples/dev-sandbox/compiler/scripts/test-build-kind.sh
 
-      - name: Install nightly rustfmt
-        run: rustup toolchain install nightly --component rustfmt
-
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: check
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # After the cache step, which hashes every installed toolchain into its
+      # key: `nightly` moves daily, and the key would move with it.
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --component rustfmt
 
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
@@ -1261,7 +1267,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e-dev
-          shared-key: e2e-dev
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
@@ -1618,7 +1623,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e-dev
-          shared-key: e2e-dev
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # build.rs prereq: the impresspress crate `include_bytes!`s pkg/. What the
