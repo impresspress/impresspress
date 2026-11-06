@@ -59,10 +59,9 @@
 # built without compiling one twice: `sw-update.spec.ts` deploys one bundle
 # over another, and the second is assembled from a restamped copy of
 # `pkg-dev/` (`crates/impresspress-web/tests/e2e/fixtures/next-runtime-pkg.mjs`).
-# It is also how CI builds another bundle from the SAME runtime, in the job
-# that compiled it or, through the `dev-sandbox-pkgs` artifact, in
-# `e2e-dev-compile`: compiling again would only repeat `wasm-opt` on the same
-# input. Everything after step 1 is the same recipe either way.
+# It is also how CI builds every bundle: `build-wasm.yml` compiles the runtimes
+# once, in parallel, and the e2e jobs hand them here as downloaded artifacts.
+# Everything after step 1 is the same recipe either way.
 #
 # `--site-pkg-dir DIR` does the same for step 1b: DIR is a wasm-pack output of
 # `impresspress-web` built with `--features browser-site-runtime` — `pkg-site/`

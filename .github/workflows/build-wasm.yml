@@ -19,6 +19,12 @@ name: Build wasm
 
 on:
   workflow_call:
+    inputs:
+      # The CI gates turn this on. `release.yml` does not: a release binary
+      # embeds `pkg/` alone.
+      sandbox-runtimes:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -83,4 +89,50 @@ jobs:
         with:
           name: impresspress-web-pkg
           path: crates/impresspress-web/pkg/
+          retention-days: 1
+
+  # The two runtimes the dev-sandbox e2e jobs assemble their bundles from, the
+  # same command `examples/dev-sandbox/build.sh` runs. Here rather than in those
+  # jobs because `wasm-opt` is most of what a build costs, about five minutes
+  # each: as jobs that start with the run, in parallel with `build-wasm`, they
+  # add nothing to the path to the e2es, and both e2e jobs can start at once.
+  build-sandbox-runtime:
+    name: Build sandbox runtime (${{ matrix.pkg }})
+    if: inputs.sandbox-runtimes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkg: pkg-dev
+            features: browser-devtools
+          - pkg: pkg-site
+            features: browser-site-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm-${{ matrix.pkg }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          # Pinned for the same reason as `build-wasm` — see the note there.
+          version: 'v0.15.0'
+
+      - name: Build WASM
+        run: scripts/wasm-pack-locked.sh crates/impresspress-web build --target web --release --out-dir ${{ matrix.pkg }} -- --features ${{ matrix.features }}
+
+      - name: Upload the runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: impresspress-web-${{ matrix.pkg }}
+          path: crates/impresspress-web/${{ matrix.pkg }}/
+          if-no-files-found: error
           retention-days: 1
