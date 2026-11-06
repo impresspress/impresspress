@@ -1561,7 +1561,7 @@ mod deferred_drain_tests {
             Box::new(runtime_cache::RuntimeBuildError::Unavailable {
                 cause: "D1_ERROR: Network connection lost.".to_string(),
                 retry_after_secs: 9,
-                database_outage: true,
+                class: Some(wafer_block::init_attempt::DatabaseAnswer::Unavailable),
             });
         let response = edge_response(Err(outage)).expect("a response");
         assert_eq!(response.status_code(), 503);

@@ -57,11 +57,17 @@
 //!   what each `Init` attempt's calls saw, whatever error the block then
 //!   returned, a wrapped one or a hang cut off by the init budget included);
 //! - **`ok`** when the gate answered and none of those failed that way, so a
-//!   block still failing its `Init` failed on its own;
-//! - **nothing new** when the gate failed in another way: a statement the
-//!   database ran and failed (a missing table, a page too large) is a fault
-//!   of the version and arms a failed episode, and a call the invocation's
-//!   budget refused never reached the database.
+//!   block still failing its `Init` failed on its own. A gate that failed
+//!   on a statement the database ran (a missing table, a page too large: a
+//!   fault of the version, which arms a failed episode) or on contention
+//!   still answered, so it is `ok` too, and ends a failing run;
+//! - **nothing new** when the gate's call was refused before it was sent
+//!   (the invocation's call budget, the platform's per-invocation limit):
+//!   the database was not reached.
+//!
+//! A runtime published while the backend is `failing` is published degraded,
+//! whatever its blocks say, so a retry window is armed to check the database
+//! again.
 //!
 //! Only the database counts: a config stamp in KV that cannot be read, or a
 //! binding that is missing, is not `backend`.

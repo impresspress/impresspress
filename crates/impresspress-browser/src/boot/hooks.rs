@@ -87,14 +87,7 @@ impl BrowserBootHooks<'_> {
             &impresspress_core::blocks::block_enabled_defaults(),
         )
         .await
-        .map_err(|e| match builder::SeedError::from(e) {
-            builder::SeedError::Unavailable(cause) => {
-                builder::SeedError::Unavailable(format!("load block settings: {cause}"))
-            }
-            builder::SeedError::Fault(cause) => {
-                builder::SeedError::Fault(format!("load block settings: {cause}"))
-            }
-        })
+        .map_err(|e| builder::SeedError::from(e).in_step("load block settings"))
     }
 }
 

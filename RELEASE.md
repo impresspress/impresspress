@@ -56,15 +56,18 @@ isolate's last settled attempt (a build, a retry, or a heal) found of D1.
   call still waiting on D1. The config source classes its read from the
   read's own error.
 - It is `ok` when the check answered and none of those failed that way. A
-  block still failing its `Init` then failed on its own.
-- These do not change `backend`:
+  block still failing its `Init` then failed on its own. A check that
+  failed but reached D1 is `ok` too, and ends a `failing` run: D1 answered.
+  That covers:
   - a statement that D1 ran and that failed, such as a missing table or
     column (the status says `failed`);
   - a busy or locked database, which is contention, not an outage. It is
     now `DatabaseError::Contended`, as on every backend (wafer-run #483),
     classed `database.contended`: still a 503, and still retried, but a
-    block that fails on contention is the version's own state;
-  - a call that the invocation's budget refused;
+    block that fails on contention is the version's own state.
+- These do not change `backend`:
+  - a check refused before it was sent (the invocation's call budget, or
+    the platform's per-invocation limit): D1 was not reached;
   - a config stamp in KV that cannot be read;
   - a missing binding.
 
@@ -76,8 +79,10 @@ isolate's last settled attempt (a build, a retry, or a heal) found of D1.
   the first failed attempt. `checked` is when the last attempt settled. It
   is never before `since`, and an attempt older than `checked` changes
   nothing. The next attempt runs when the window ends (`retry_in`).
-- Only the request that owns the isolate's build slot updates `backend`, so
-  whenever it is `failing`, a retry window is armed to check D1 again.
+- Only the request that owns the isolate's build slot updates `backend`. A
+  runtime published while it is `failing` is published degraded, whatever
+  its blocks say, so whenever it is `failing`, a retry window is armed to
+  check D1 again.
 - A failing backend makes the status at least `degraded`. There is no new
   status value and no new HTTP status: every non-`ok` status was already a
   503 with `Retry-After`. `failed` and `stale` still outrank `degraded`.

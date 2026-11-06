@@ -188,8 +188,7 @@ pub(crate) async fn read_block_settings(
         .await
         .map_err(|e| {
             crate::runtime_cache::RuntimeBuildError::from_database(
-                e.code(),
-                e.detail_code(),
+                &e,
                 format!("read block_settings: {e}"),
             )
         })
@@ -251,11 +250,9 @@ pub(crate) async fn read_variables(
     variables.check_backend(db).await.map_err(|error| {
         let cause = format!("read variables: {error}");
         match &error {
-            UnfilteredReadError::Read(e) => crate::runtime_cache::RuntimeBuildError::from_database(
-                e.code(),
-                e.detail_code(),
-                cause,
-            ),
+            UnfilteredReadError::Read(e) => {
+                crate::runtime_cache::RuntimeBuildError::from_database(e, cause)
+            }
             _ => crate::runtime_cache::RuntimeBuildError::classified(error.is_transient(), cause),
         }
     })
