@@ -356,44 +356,6 @@ jobs:
           cargo test --locked -p impresspress-core --no-default-features --features test-support,block-files,block-messages,block-vector,block-llm,block-legalpages,block-tickets,block-userportal,block-products,block-signal --test d1_read_cost 2>&1 | tee "$RUNNER_TEMP/d1-read-cost.log"
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/d1-read-cost.log"
 
-  # A job of its own because this one command recompiles `impresspress-core`
-  # under other features and reruns its whole unit suite, about a quarter of an
-  # hour, and as a step of `test` that time was added to `test`'s. It shares
-  # nothing with `test`: `impresspress-core` does not depend on the
-  # `impresspress` crate, so unlike `test` it needs no `impresspress-web-pkg`
-  # and runs whatever `build-wasm` concluded.
-  test-block-dev:
-    name: Tests (block-dev)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: rustup toolchain install
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: test-block-dev
-
-      # `tests/wafer_guest_golden.rs` builds both block templates with plain
-      # `cargo build --target wasm32-wasip1 --offline` and runs the resulting
-      # modules under wasmi. Without the target installed it would skip;
-      # `rust-toolchain.toml` lists the target, and IMPRESSPRESS_GUEST_GOLDEN
-      # below turns that skip into a failure should it ever go missing.
-      #
-      # `--workspace` in `test` does run the `#![cfg(feature = "block-dev")]`
-      # integration tests — `crates/impresspress`'s dev-dependency turns the
-      # feature on for this crate — but without `wasm`. This step runs them
-      # with it, and `wasm` is load-bearing rather than incidental:
-      # `tests/lockfile_e2e.rs` needs wafer-run built with wasmi,
-      # `tests/wafer_guest_golden.rs` runs the compiled templates through it,
-      # and `-p impresspress-core --features block-dev` alone leaves it red.
-      - name: Run the block-dev suite
-        env:
-          IMPRESSPRESS_GUEST_GOLDEN: "1"
-        run: cargo test --locked -p impresspress-core --features block-dev,wasm
-
       # `dev.js` is a TAIL composed into an IIFE with nothing on `window`
       # (see the file's own header comment), so its internal logic has no
       # exported function the Rust suite above can call directly —
@@ -439,6 +401,44 @@ jobs:
       # chat the server refuses shows the refusal's message, not "No response".
       - name: Run LLM chat unit tests (node --test)
         run: node --test crates/impresspress-core/src/blocks/llm/assets/test/*.test.mjs
+
+  # A job of its own because this one command recompiles `impresspress-core`
+  # under other features and reruns its whole unit suite, about a quarter of an
+  # hour, and as a step of `test` that time was added to `test`'s. It shares
+  # nothing with `test`: `impresspress-core` does not depend on the
+  # `impresspress` crate, so unlike `test` it needs no `impresspress-web-pkg`
+  # and runs whatever `build-wasm` concluded.
+  test-block-dev:
+    name: Tests (block-dev)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: test-block-dev
+
+      # `tests/wafer_guest_golden.rs` builds both block templates with plain
+      # `cargo build --target wasm32-wasip1 --offline` and runs the resulting
+      # modules under wasmi. Without the target installed it would skip;
+      # `rust-toolchain.toml` lists the target, and IMPRESSPRESS_GUEST_GOLDEN
+      # below turns that skip into a failure should it ever go missing.
+      #
+      # `--workspace` in `test` does run the `#![cfg(feature = "block-dev")]`
+      # integration tests — `crates/impresspress`'s dev-dependency turns the
+      # feature on for this crate — but without `wasm`. This step runs them
+      # with it, and `wasm` is load-bearing rather than incidental:
+      # `tests/lockfile_e2e.rs` needs wafer-run built with wasmi,
+      # `tests/wafer_guest_golden.rs` runs the compiled templates through it,
+      # and `-p impresspress-core --features block-dev` alone leaves it red.
+      - name: Run the block-dev suite
+        env:
+          IMPRESSPRESS_GUEST_GOLDEN: "1"
+        run: cargo test --locked -p impresspress-core --features block-dev,wasm
 
   # Every `#[cfg(feature = "postgres")]` assertion in the repo — the seven
   # migration tests that check each block's `*.postgres.sql` twin is the one
