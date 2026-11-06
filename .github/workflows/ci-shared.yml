@@ -190,7 +190,7 @@ jobs:
 
       # `-D warnings`, because without it this step only *printed* findings and
       # passed. The two crate-scoped clippy steps (`Clippy (block-dev)` below
-      # and `Clippy (browser-devtools, wasm32)` in the `e2e-dev-sandbox` job)
+      # and `Clippy (browser-devtools, wasm32)` in the `clippy-sandbox` job)
       # were the only enforcing ones, and no `RUSTFLAGS` supplies the flag
       # anywhere in `.github/workflows/`, so every warning in every other crate
       # printed and passed.
@@ -219,7 +219,7 @@ jobs:
       # workspace manifest keeps it out of `default-members`), and
       # `impresspress-web` is a browser cdylib over `web-sys`. Each is linted
       # for wasm32 by its own step instead — `impresspress-cloudflare` in the
-      # `cloudflare` job, `impresspress-web` in `e2e-dev-sandbox`.
+      # `cloudflare` job, `impresspress-web` in `clippy-sandbox`.
       - name: Run clippy
         run: cargo clippy --locked --workspace --exclude impresspress-web --exclude impresspress-cloudflare --all-targets -- -D warnings
 
@@ -636,7 +636,7 @@ jobs:
       # Deliberately NOT `--no-deps`: impresspress-core is a workspace member,
       # so leaving it in scope lints core under `cfg(target_arch = "wasm32")`
       # for the feature set a Worker actually builds. (The `browser-devtools`
-      # clippy step in `e2e-dev-sandbox` covers core's wasm32 code under the
+      # clippy step in `clippy-sandbox` covers core's wasm32 code under the
       # browser's feature set; between them nothing in core's wasm32 half is
       # compiled without lints.)
       #
@@ -1236,16 +1236,107 @@ jobs:
           path: crates/impresspress-web/playwright-report/
           retention-days: 7
 
-  # The only job that compiles, boots and exercises the browser development
-  # sandbox. `impresspress-web/src/site_runtime.rs` — wasmi `inspect`, the
+  # The lint of the sandbox's wasm32 code. A job of its own so that it reports
+  # whatever `sandbox-runtime` concludes, and adds nothing to the e2e jobs.
+  clippy-sandbox:
+    name: Clippy (sandbox, wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: clippy-sandbox
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The only `--features browser-devtools` lint in CI.
+      #
+      # It used to carry `--no-deps` because the un-scoped command was red on
+      # six pre-existing impresspress-core warnings. Five were
+      # `arc_with_non_send_sync` on `Arc`s wafer-run's own API dictates, now
+      # stated once as a `cfg_attr(target_arch = "wasm32", ...)` allow in each
+      # affected crate's `lib.rs`; the sixth was a real wasm32-only defect in
+      # `blocks/dev/zip.rs` (a `usize` archive-size ceiling that equals
+      # `usize::MAX` on a 32-bit target, so it never refused anything there).
+      # With both addressed there is nothing left to scope out, and dropping
+      # the flag is what makes this the gate on impresspress-core's
+      # `browser-devtools` code under wasm32 — which nothing else lints.
+      - name: Clippy (browser-devtools, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
+
+      # The other two configurations `impresspress-web` has. Each compiles its
+      # own block of `runtime_factory.rs`'s const assertions — that its
+      # features agree with the sandbox mode `impresspress-core` compiled
+      # (`SandboxMode::COMPILED`) and, for a site build, that the factory
+      # routes no `/b/dev` path — so these
+      # steps are what check that wiring, and they are where a site build's
+      # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
+      # are linted at all. `build-wasm` and `sandbox-runtime` compile all three
+      # with wasm-pack, so each block of assertions runs there too, but lint
+      # none of them.
+      - name: Clippy (browser-site-runtime, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-site-runtime -- -D warnings
+
+      - name: Clippy (no sandbox, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown -- -D warnings
+
+  # The two runtimes the dev-sandbox e2e jobs assemble their bundles from, built
+  # side by side here rather than one after the other inside those jobs:
+  # `wasm-opt` is most of what a build costs, about five minutes each, and
+  # neither e2e job needs anything else from the other. Only those two jobs
+  # depend on this one, so a failure here skips them and nothing else. It skips
+  # itself when they will not run.
+  sandbox-runtime:
+    name: Build sandbox runtime (${{ matrix.pkg }})
+    if: inputs.build-wasm-result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [pkg-dev, pkg-site]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: sandbox-${{ matrix.pkg }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          # Pinned for the same reason as `build-wasm` — see the note there.
+          version: 'v0.15.0'
+
+      - name: Build the runtime
+        run: scripts/build-sandbox-runtime.sh ${{ matrix.pkg }}
+
+      - name: Upload the runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: impresspress-web-${{ matrix.pkg }}
+          path: crates/impresspress-web/${{ matrix.pkg }}/
+          if-no-files-found: error
+          retention-days: 1
+
+  # The job that boots and exercises the browser development sandbox. `impresspress-web/src/site_runtime.rs` — wasmi `inspect`, the
   # runtime rebuild, `replace_wafer`, boot convergence, seed-on-boot — and
   # `impresspress-web/src/dev_runtime.rs` — the `probe`, the announcement to
   # the page, the export's shell source — exist only inside a service worker,
   # so no host test can run a line of either; this job is where they run, in
   # the `browser-devtools` build (an export still boots that build with the
   # workspace switched off). It is also the only place `impresspress-web`'s
-  # sandbox features are compiled at all: the three wasm32 clippy steps below
-  # lint no features, `browser-site-runtime` and `browser-devtools`. On the
+  # sandbox features are exercised at all: `sandbox-runtime` compiles them and
+  # `clippy-sandbox` lints them. On the
   # core side, `block-dev` itself is covered by the `Clippy (block-dev)` step
   # and the `test-block-dev` job above, which lint and run
   # `impresspress-core`'s half on the host, and its runtime half alone by
@@ -1257,6 +1348,7 @@ jobs:
     # When it did not there is no artifact, and `ci-ok` is red on the
     # `build-wasm` result itself.
     if: inputs.build-wasm-result == 'success'
+    needs: sandbox-runtime
     runs-on: ubuntu-latest
     # The e2e itself is a few minutes. The ceiling is for the case where
     # neither the release asset nor the cache is there and this job composes
@@ -1275,12 +1367,6 @@ jobs:
           prefix-key: e2e-dev
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
-        with:
-          # Pinned for the same reason as `build-wasm` — see the note there.
-          version: 'v0.15.0'
-
       # build.rs prereq: the impresspress crate `include_bytes!`s pkg/. What the
       # tests actually serve is built from `pkg-dev/` (the feature-on wasm),
       # substituted through IMPRESSPRESS_WEB_WASM / IMPRESSPRESS_WEB_JS by the
@@ -1291,36 +1377,18 @@ jobs:
           name: impresspress-web-pkg
           path: crates/impresspress-web/pkg
 
-      # The only `--features browser-devtools` gate in CI.
-      #
-      # It used to carry `--no-deps` because the un-scoped command was red on
-      # six pre-existing impresspress-core warnings. Five were
-      # `arc_with_non_send_sync` on `Arc`s wafer-run's own API dictates, now
-      # stated once as a `cfg_attr(target_arch = "wasm32", ...)` allow in each
-      # affected crate's `lib.rs`; the sixth was a real wasm32-only defect in
-      # `blocks/dev/zip.rs` (a `usize` archive-size ceiling that equals
-      # `usize::MAX` on a 32-bit target, so it never refused anything there).
-      # With both addressed there is nothing left to scope out, and dropping
-      # the flag is what makes this the gate on impresspress-core's
-      # `browser-devtools` code under wasm32 — which nothing else compiles.
-      - name: Clippy (browser-devtools, wasm32)
-        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
+      # `pkg-dev/` and `pkg-site/`, from `sandbox-runtime`.
+      - name: Download the workspace runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg-dev
+          path: crates/impresspress-web/pkg-dev
 
-      # The other two configurations `impresspress-web` has. Each compiles its
-      # own block of `runtime_factory.rs`'s const assertions — that its
-      # features agree with the sandbox mode `impresspress-core` compiled
-      # (`SandboxMode::COMPILED`) and, for a site build, that the factory
-      # routes no `/b/dev` path — so these
-      # steps are what check that wiring, and they are where a site build's
-      # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
-      # are linted at all. Nothing else compiles a site build; `build-wasm`
-      # compiles the no-sandbox `pkg/` with wasm-pack (so that block of
-      # assertions runs there too) but does not lint it.
-      - name: Clippy (browser-site-runtime, wasm32)
-        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-site-runtime -- -D warnings
-
-      - name: Clippy (no sandbox, wasm32)
-        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown -- -D warnings
+      - name: Download the site runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg-site
+          path: crates/impresspress-web/pkg-site
 
       # Debug build, as `e2e-build` does: the CLI only assembles static files
       # here, so its runtime speed is irrelevant and a debug compile is cheaper.
@@ -1349,10 +1417,12 @@ jobs:
       # it never runs the ~55 minute, 12.6 GB composition that would OOM this
       # runner; the steps below put the tree in place first.
       # `dev-compiler.spec.ts` and `dev-compile-tool.spec.ts` both read the
-      # manifest in `compiler/dist/`, too. Same key as `e2e-dev-compile`, which `needs`
-      # this job so the two never compose in parallel and race to upload one
-      # entry; see that job for why there are no `restore-keys` and what
-      # `--fast` costs. Skipped entirely when the release asset was fetched:
+      # manifest in `compiler/dist/`, too. Same key as `e2e-dev-compile`. The two
+      # run in parallel, so on a cold cache both compose, which is one more
+      # composition than running in series, and the second upload loses with a
+      # warning. See that job for why there are no `restore-keys` and what
+      # `--fast` costs.
+      # Skipped entirely when the release asset was fetched:
       # that tree is the same for every job and needs no cache.
       # The optimized tree the developer published for this pin, and the only
       # source of one: composing it costs ~35 minutes and 12.6 GB of RSS, which
@@ -1386,7 +1456,7 @@ jobs:
       # `--check` fails fast on a seeds/*/manifest.json that has drifted from
       # its site/** — the same check `build.sh`'s normal path runs before it
       # builds anything, surfaced as its own step so a stale manifest is
-      # reported without paying for a wasm-pack build first.
+      # reported on its own.
       - name: Check the dev-sandbox seed manifest
         run: examples/dev-sandbox/build.sh --check
 
@@ -1404,19 +1474,17 @@ jobs:
       - name: Build the bootstrap-seed bundle
         run: |
           set -o pipefail
-          BOOTSTRAP_DIST="$(examples/dev-sandbox/build.sh --seed bootstrap --out "$RUNNER_TEMP/dist-bootstrap" | tail -1)"
+          BOOTSTRAP_DIST="$(examples/dev-sandbox/build.sh --seed bootstrap --pkg-dir crates/impresspress-web/pkg-dev --site-pkg-dir crates/impresspress-web/pkg-site --out "$RUNNER_TEMP/dist-bootstrap" | tail -1)"
           echo "BOOTSTRAP_DIST=$BOOTSTRAP_DIST" >> "$GITHUB_ENV"
 
       # The NEXT deployment, for `sw-update.spec.ts`: the blank seed assembled
       # by the same script from a runtime with other bytes — a copy of the
-      # `pkg-dev/` the step above compiled, restamped
+      # downloaded `pkg-dev/`, restamped
       # (`fixtures/next-runtime-pkg.mjs` says why that is a faithful "later
-      # build" and what compiling a second one would cost). After the bootstrap
-      # build, which is what leaves `pkg-dev/` and `pkg-site/` behind, and
-      # before the blank one, which takes `dist/` and keeps it. The export
-      # shell's runtime is not what the spec updates, so `--site-pkg-dir`
-      # reuses the `pkg-site/` the step above compiled rather than compiling
-      # a third wasm.
+      # build" and what compiling a second one would cost). Before the blank
+      # build, which takes `dist/` and keeps it. The export shell's runtime is
+      # not what the spec updates, so `--site-pkg-dir` is the downloaded
+      # `pkg-site/`.
       - name: Build the next deployment's bundle
         run: |
           set -o pipefail
@@ -1429,27 +1497,12 @@ jobs:
       # runtimes, the export shell, then the sealed web flow with `[sandbox]
       # mode = "workspace"`, the welcome seed overlaid onto `dist/seed/` and
       # the export shell compared byte for byte with the site wasm. Its last
-      # stdout line is the dist path. The runtimes are the `pkg-dev/` and
-      # `pkg-site/` the bootstrap build compiled: the seed goes into the
-      # bundle, not the wasm, so compiling them here too would only repeat
-      # `wasm-opt` on the same input, about five minutes each.
+      # stdout line is the dist path.
       - name: Build the dev-sandbox bundle
         run: |
           set -o pipefail
           DIST="$(examples/dev-sandbox/build.sh --pkg-dir crates/impresspress-web/pkg-dev --site-pkg-dir crates/impresspress-web/pkg-site | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
-
-      # For `e2e-dev-compile`, which assembles its bundle from these rather
-      # than compiling the same two runtimes again.
-      - name: Upload the sandbox runtimes
-        uses: actions/upload-artifact@v4
-        with:
-          name: dev-sandbox-pkgs
-          path: |
-            crates/impresspress-web/pkg-dev/
-            crates/impresspress-web/pkg-site/
-          if-no-files-found: error
-          retention-days: 1
 
       # The other two modes' runtimes, as `E2E build` checks `none`: each
       # bundle's `sw.js` links against its real glue, and each wasm declares
@@ -1463,8 +1516,8 @@ jobs:
 
       # And `impresspress build` refuses to make a bundle around a runtime of
       # another mode, on a real runtime: the export shell's configuration
-      # (`[sandbox] mode = "site"`) around the workspace runtime `build.sh`
-      # compiled (`pkg-dev/`). In a copy of the configuration, so the
+      # (`[sandbox] mode = "site"`) around the workspace runtime (`pkg-dev/`).
+      # In a copy of the configuration, so the
       # `export-shell/dist/` the bundle above carries is left alone, and with
       # an absolute pkg dir, which the CLI resolves from its own working
       # directory. The exit code alone proves nothing — a missing directory
@@ -1554,9 +1607,8 @@ jobs:
           path: crates/impresspress-web/playwright-report/
           retention-days: 7
 
-      # `pkg/` (downloaded above), and `pkg-site/` and `pkg-dev/` (built by
-      # build.sh, above), all already exist at this point, so this only
-      # measures — it never rebuilds. Fails the job on a size-threshold breach; see measure.sh's
+      # `pkg/`, `pkg-site/` and `pkg-dev/`, all downloaded above, already exist
+      # at this point, so this only measures — it never rebuilds. Fails the job on a size-threshold breach; see measure.sh's
       # header for what's gated and why.
       - name: Measure dev-sandbox bundle sizes
         run: examples/dev-sandbox/measure.sh >> "$GITHUB_STEP_SUMMARY"
@@ -1588,31 +1640,17 @@ jobs:
 
   e2e-dev-compile:
     name: E2E dev sandbox (Rubrc compiles a block in the browser)
-    # The same wasm this repo's other browser jobs run against — the sandbox
-    # bundle is assembled from the runtimes `e2e-dev-sandbox` compiled, which
-    # it publishes as `dev-sandbox-pkgs`.
+    # The same wasm this repo's other browser jobs run against: the sandbox
+    # bundle is assembled, as `e2e-dev-sandbox` assembles its own, from the
+    # runtimes `sandbox-runtime` compiled.
     #
-    # `e2e-dev-sandbox` as well, and this dependency IS on its result — which
-    # is what `needs` means, and what it has to mean here. That artifact is
-    # one reason. The other is the compiler cache: the two jobs share
-    # one compiler cache key, so on a cold cache they would otherwise compose
-    # the toolchain twice in parallel and one of the two uploads would lose
-    # the race with a warning; serialised, the first seeds the entry and this
-    # one restores it. Letting this job run after a FAILED `e2e-dev-sandbox`
-    # would not preserve that: `actions/cache` saves in a post step declared
-    # `post-if: success()`, so a job that fails at its e2e step writes no
-    # entry at all, and this one would compose from scratch — in series,
-    # behind a job that has already reported the sandbox is broken.
-    #
-    # The cost is a skipped compile check whenever the sandbox e2e is red, on
-    # a warm cache as well: once the release asset for the pin is published,
-    # neither job composes, but this one still needs the artifact. If the lost
-    # signal ever matters more, the answer is a build job both of these
-    # consume, with a separate compiler cache key per job, not dropping the
-    # `needs`.
-    # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
-    # artifact this job downloads is already published.
-    needs: e2e-dev-sandbox
+    # In parallel with `e2e-dev-sandbox`, so a compile regression is reported
+    # even when the sandbox e2e is red. Ordered after `build-wasm.yml` by the
+    # caller, so the `impresspress-web-pkg` artifact this job downloads is
+    # already published — when it succeeded. When it did not there is no
+    # artifact, and `ci-ok` is red on the `build-wasm` result itself.
+    if: inputs.build-wasm-result == 'success'
+    needs: sandbox-runtime
     runs-on: ubuntu-latest
     # The two e2es are ~5-10 minutes between them (three real compiles and
     # four cold boots). The ceiling is for the cache miss below: composing the
@@ -1641,12 +1679,18 @@ jobs:
           name: impresspress-web-pkg
           path: crates/impresspress-web/pkg
 
-      # `pkg-dev/` and `pkg-site/`, as `e2e-dev-sandbox` compiled them.
-      - name: Download the sandbox runtimes
+      # `pkg-dev/` and `pkg-site/`, from `sandbox-runtime`.
+      - name: Download the workspace runtime
         uses: actions/download-artifact@v4
         with:
-          name: dev-sandbox-pkgs
-          path: crates/impresspress-web
+          name: impresspress-web-pkg-dev
+          path: crates/impresspress-web/pkg-dev
+
+      - name: Download the site runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg-site
+          path: crates/impresspress-web/pkg-site
 
       # Debug build, as `e2e-dev-sandbox` does: the CLI only assembles static
       # files here, so its runtime speed is irrelevant.
@@ -2396,6 +2440,8 @@ jobs:
       - browser-wasm-test
       - e2e-build
       - e2e-smoke
+      - clippy-sandbox
+      - sandbox-runtime
       - e2e-dev-sandbox
       - e2e-dev-compile
       - e2e-visual
