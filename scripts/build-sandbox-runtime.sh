@@ -5,10 +5,9 @@
 # Usage:
 #   scripts/build-sandbox-runtime.sh pkg-dev|pkg-site
 #
-# The one statement of which features make which runtime, and the command that
-# compiles it. `examples/dev-sandbox/build.sh` runs this for a deploy or a local
-# build, and the `sandbox-runtime` job in `ci-shared.yml` runs it for the e2e
-# jobs, so what CI tests is compiled the way what ships is compiled.
+# `examples/dev-sandbox/build.sh` runs this for a deploy or a local build, and
+# the `sandbox-runtime` job in `ci-shared.yml` runs it for the e2e jobs, so what
+# CI tests is compiled the way what ships is compiled.
 #
 #   pkg-dev   the workspace: the site runtime plus the workspace
 #   pkg-site  the site runtime alone, for the export shell
