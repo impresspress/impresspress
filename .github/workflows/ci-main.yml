@@ -14,6 +14,10 @@ on:
       - 'packages/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      # Part of every Rust cache key, and only this gate saves those entries:
+      # without this a toolchain-only merge would leave every pull request
+      # with no entry to restore until something else merged.
+      - 'rust-toolchain.toml'
       # `check-audit-expiry.sh` runs in the `audit` job of `audit.yml`, so a
       # change confined to it (or to any other script the shared body grows)
       # must run this workflow.
@@ -131,11 +135,6 @@ jobs:
           rustup toolchain install
           rustup target add ${{ matrix.target }}
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: cross-${{ matrix.name }}
-
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -179,6 +178,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # impresspress's build.rs `include_bytes!`s the impresspress-web wasm;
       # llvm-cov compiles the workspace, so the prebuilt pkg/ must be present.

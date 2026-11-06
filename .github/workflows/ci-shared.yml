@@ -47,6 +47,21 @@ name: CI shared
 # job in this file is missing from its `needs:`, so a new job cannot run
 # outside the required check.
 #
+# Every `Swatinem/rust-cache` step saves on `main` only (`save-if`, held by
+# `scripts/check-rust-cache-save-if.sh`). A pull request restores the entry
+# `main` saved, which any branch can read, and writes no Rust entry of its own.
+# The repository's Actions cache holds 10 GB, and an entry written from a pull
+# request can only be read from that ref while it can evict `main`'s.
+# `release.yml` and `regen-visual-baselines.yml` keep no Rust cache: both can be
+# dispatched from `main`, where this condition is true, and neither reads what
+# it would save (regen builds another branch; a tag build has no entry of its
+# own to restore).
+# That only works while the key is one `main` has saved, and the key hashes
+# every toolchain installed when the step runs: install anything floating, such
+# as `nightly`, AFTER the step. The runner image's own `stable` is in the hash
+# too, so an image update moves every key until `main`'s next run saves. That is
+# accepted: a miss costs a job a minute or two.
+#
 # Editing this file changes BOTH gates at once. Two consequences:
 #   * A comment that describes "this workflow" has to be true on a pull request
 #     and on a merge. Language like "at PR time" or "path-filtered" was true
@@ -118,6 +133,9 @@ jobs:
       - name: Lint — nothing names the removed strict-schema switch
         run: bash scripts/grep-guard-strict-schema.sh
 
+      - name: Lint — every rust-cache step saves on main only
+        run: bash scripts/check-rust-cache-save-if.sh
+
       # The D1 budget counts calls since wafer-run f9edcf43 (WR-4). The
       # compiler catches the removed items; this catches a comment, a detail
       # code string, a var or a TOML key that still names the per-statement
@@ -148,13 +166,16 @@ jobs:
           examples/dev-sandbox/test-build-guards.sh
           examples/dev-sandbox/compiler/scripts/test-build-kind.sh
 
-      - name: Install nightly rustfmt
-        run: rustup toolchain install nightly --component rustfmt
-
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # After the cache step, which hashes every installed toolchain into its
+      # key: `nightly` moves daily, and the key would move with it.
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --component rustfmt
 
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
@@ -300,6 +321,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm;
       # without it `cargo test --workspace` fails before any test runs.
@@ -421,6 +443,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test-block-dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `tests/wafer_guest_golden.rs` builds both block templates with plain
       # `cargo build --target wasm32-wasip1 --offline` and runs the resulting
@@ -493,6 +516,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test-postgres
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `package/feature` spelling because `--features` needs it whenever more
       # than one package is selected.
@@ -585,6 +609,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: cloudflare
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # build.rs prereq for any impresspress crate pulled into the cloudflare build.
       - name: Download impresspress-web pkg/
@@ -773,6 +798,8 @@ jobs:
       - name: Rust cache
         if: steps.cloudflare-changes.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-bindgen-test-runner
         if: steps.cloudflare-changes.outputs.skip != 'true'
@@ -854,6 +881,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: miniflare-outage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # worker-build at the CLI's pin (`WORKER_BUILD_VERSION` in
       # `crates/impresspress/src/cli/helpers/cloudflare/build.rs`); the harness
@@ -948,6 +976,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: browser-wasm-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
         if: steps.browser-changes.outputs.skip != 'true'
@@ -1041,6 +1070,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
@@ -1243,6 +1273,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e-dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
@@ -1598,6 +1629,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e-dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # build.rs prereq: the impresspress crate `include_bytes!`s pkg/. What the
       # tests actually serve is built from `pkg-dev/` (the feature-on wasm),
@@ -2262,6 +2294,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: migration-history
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: The checked-in migration history is what main's history generates
         run: cargo run --locked -p impresspress-core --example migration-history -- --repo . --base origin/main --check
