@@ -111,6 +111,13 @@ maud = "0.27"
 [patch.crates-io]
 js-sys = { git = "https://github.com/impresspress/js-sys", rev = "db85a1cb2b4ff9f651081b1cd688e39f2babc992" }
 
+# Dependencies get light optimization in dev and test builds, because the test
+# suites spend most of their time inside them: `impresspress-core`'s unit suite
+# runs about 2.4 times faster at level 1, and level 2 was slower than level 1.
+# Workspace crates stay unoptimized, and debug assertions stay on throughout.
+[profile.dev.package."*"]
+opt-level = 1
+
 [profile.release]
 # Size-first wasm profile (CF Worker + browser both ship from `release`).
 opt-level = "z"

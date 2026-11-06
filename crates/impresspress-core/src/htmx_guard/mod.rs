@@ -554,39 +554,32 @@ async fn every_admin_page_renders_the_admin_sidebar() {
     let infos = registered();
     let mut wrong: Vec<String> = Vec::new();
     let mut checked = 0;
-    for entry in entries() {
-        let Some(make) = entry.fixture else {
+    for RenderedPage {
+        block,
+        url,
+        path,
+        html,
+    } in rendered_pages().await
+    {
+        let Some(info) = infos.iter().find(|i| i.name == *block) else {
             continue;
         };
-        let Some(info) = infos.iter().find(|i| i.name == entry.block) else {
+        let under_admin = path.split('/').nth(3) == Some("admin") || path.starts_with("/b/admin");
+        let admin_row = info.endpoints.iter().any(|row| {
+            row.method == HttpMethod::Get
+                && row.auth == wafer_run::AuthLevel::Admin
+                && is_row_of(&row.path, path)
+        });
+        if !under_admin && !admin_row {
             continue;
-        };
-        let fixture = make().await;
-        for view in crawl(&fixture).await {
-            let page = view.page(&fixture);
-            let under_admin =
-                page.path.split('/').nth(3) == Some("admin") || page.path.starts_with("/b/admin");
-            let admin_row = info.endpoints.iter().any(|row| {
-                row.method == HttpMethod::Get
-                    && row.auth == wafer_run::AuthLevel::Admin
-                    && is_row_of(&row.path, &page.path)
-            });
-            if !under_admin && !admin_row {
-                continue;
-            }
-            let html = crate::test_support::htmx::render(&fixture, &page).await;
-            if !crate::ui::layout::is_document(&html) {
-                // An htmx fragment (a modal's body, a row): no chrome to check.
-                continue;
-            }
-            checked += 1;
-            if !html.contains(r#"data-nav="admin""#) {
-                wrong.push(format!(
-                    "{}: {} does not render the admin sidebar",
-                    entry.block,
-                    page.url()
-                ));
-            }
+        }
+        if !crate::ui::layout::is_document(html) {
+            // An htmx fragment (a modal's body, a row): no chrome to check.
+            continue;
+        }
+        checked += 1;
+        if !html.contains(r#"data-nav="admin""#) {
+            wrong.push(format!("{block}: {url} does not render the admin sidebar"));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -603,29 +596,21 @@ async fn every_admin_page_renders_the_admin_sidebar() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_page_header_holds_exactly_the_actions_it_names() {
     let mut found: Vec<String> = Vec::new();
-    for entry in entries() {
-        let Some(make) = entry.fixture else {
+    for RenderedPage { url, html, .. } in rendered_pages().await {
+        if !crate::ui::layout::is_document(html) {
             continue;
-        };
-        let fixture = make().await;
-        for view in crawl(&fixture).await {
-            let page = view.page(&fixture);
-            let html = crate::test_support::htmx::render(&fixture, &page).await;
-            if !crate::ui::layout::is_document(&html) {
-                continue;
-            }
-            let items = crate::test_support::dom::header_items(&html);
-            if !items.is_empty() {
-                found.push(format!(
-                    "{} => {}",
-                    stable_url(&page.url()),
-                    items
-                        .iter()
-                        .map(|item| stable_status(item))
-                        .collect::<Vec<_>>()
-                        .join(" | ")
-                ));
-            }
+        }
+        let items = crate::test_support::dom::header_items(html);
+        if !items.is_empty() {
+            found.push(format!(
+                "{} => {}",
+                stable_url(url),
+                items
+                    .iter()
+                    .map(|item| stable_status(item))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            ));
         }
     }
     found.sort();
@@ -655,8 +640,8 @@ async fn every_page_header_holds_exactly_the_actions_it_names() {
 async fn every_tab_is_a_text_label() {
     let mut wrong: Vec<String> = Vec::new();
     let mut checked = 0;
-    for (url, html) in rendered_pages().await {
-        for label in crate::test_support::dom::tab_labels(&html) {
+    for RenderedPage { url, html, .. } in rendered_pages().await {
+        for label in crate::test_support::dom::tab_labels(html) {
             checked += 1;
             if let Err(tab) = label {
                 wrong.push(format!("{url}: {tab} holds an element"));
@@ -685,23 +670,15 @@ async fn every_page_confirms_through_the_one_shared_dialog() {
     let mut wrong: Vec<String> = Vec::new();
     let mut allowed_seen: Vec<String> = Vec::new();
     let (mut documents, mut asked) = (0, 0);
-    for entry in entries() {
-        let Some(make) = entry.fixture else {
-            continue;
-        };
-        let fixture = make().await;
-        for view in crawl(&fixture).await {
-            let page = view.page(&fixture);
-            let html = crate::test_support::htmx::render(&fixture, &page).await;
-            if crate::ui::layout::is_document(&html) {
-                documents += 1;
-            }
-            asked += html.matches(" hx-confirm=").count();
-            for problem in crate::test_support::dom::confirm_problems(&html) {
-                wrong.push(format!("{}: {problem}", page.url()));
-            }
-            allowed_seen.extend(unconfirmed_danger_buttons(&html));
+    for RenderedPage { url, html, .. } in rendered_pages().await {
+        if crate::ui::layout::is_document(html) {
+            documents += 1;
         }
+        asked += html.matches(" hx-confirm=").count();
+        for problem in crate::test_support::dom::confirm_problems(html) {
+            wrong.push(format!("{url}: {problem}"));
+        }
+        allowed_seen.extend(unconfirmed_danger_buttons(html));
     }
     for (allowed, reason) in DANGER_WITHOUT_A_CONFIRM {
         if !allowed_seen.iter().any(|seen| seen == allowed) {
@@ -718,9 +695,26 @@ async fn every_page_confirms_through_the_one_shared_dialog() {
     assert!(asked > 10, "only {asked} hx-confirm controls were checked");
 }
 
-/// Every page the crawl renders, every entry's, as `(url, html)`: the set
-/// the layout guards below hold to the design rules.
-async fn rendered_pages() -> Vec<(String, String)> {
+/// One page the crawl rendered, and the entry whose crawl reached it.
+struct RenderedPage {
+    block: &'static str,
+    url: String,
+    path: String,
+    html: String,
+}
+
+/// Every page the crawl renders, every entry's: the set the guards that only
+/// read a page's HTML hold to the design rules. Rendered once per process,
+/// because each would otherwise repeat the whole crawl to get the same HTML:
+/// under `cargo test` the first guard here renders it and the rest wait, and
+/// under a runner with a process per test, such as nextest, each guard pays
+/// for its own.
+async fn rendered_pages() -> &'static [RenderedPage] {
+    static PAGES: tokio::sync::OnceCell<Vec<RenderedPage>> = tokio::sync::OnceCell::const_new();
+    PAGES.get_or_init(render_every_page).await
+}
+
+async fn render_every_page() -> Vec<RenderedPage> {
     let mut pages = Vec::new();
     for entry in entries() {
         let Some(make) = entry.fixture else {
@@ -730,7 +724,12 @@ async fn rendered_pages() -> Vec<(String, String)> {
         for view in crawl(&fixture).await {
             let page = view.page(&fixture);
             let html = crate::test_support::htmx::render(&fixture, &page).await;
-            pages.push((page.url(), html));
+            pages.push(RenderedPage {
+                block: entry.block,
+                url: page.url(),
+                path: page.path.to_string(),
+                html,
+            });
         }
     }
     pages
@@ -747,12 +746,12 @@ async fn rendered_pages() -> Vec<(String, String)> {
 async fn every_page_has_at_most_one_visible_primary() {
     let mut wrong = Vec::new();
     let mut checked = 0;
-    for (url, html) in rendered_pages().await {
-        if !crate::ui::layout::is_document(&html) {
+    for RenderedPage { url, html, .. } in rendered_pages().await {
+        if !crate::ui::layout::is_document(html) {
             continue;
         }
         checked += 1;
-        let (page, dialogs) = crate::test_support::dom::visible_primaries(&html);
+        let (page, dialogs) = crate::test_support::dom::visible_primaries(html);
         if page.len() > 1 {
             wrong.push(format!("{url}: {} visible primaries: {page:?}", page.len()));
         }
@@ -779,9 +778,9 @@ async fn every_page_has_at_most_one_visible_primary() {
 async fn no_card_level_surface_inside_a_card() {
     let mut wrong = Vec::new();
     let mut checked = 0;
-    for (url, html) in rendered_pages().await {
+    for RenderedPage { url, html, .. } in rendered_pages().await {
         checked += 1;
-        for nested in crate::test_support::dom::card_level_inside_card(&html) {
+        for nested in crate::test_support::dom::card_level_inside_card(html) {
             wrong.push(format!("{url}: {nested}"));
         }
     }
@@ -801,12 +800,12 @@ async fn no_card_level_surface_inside_a_card() {
 async fn headings_descend_without_skipping() {
     let mut wrong = Vec::new();
     let mut checked = 0;
-    for (url, html) in rendered_pages().await {
-        if !crate::ui::layout::is_document(&html) {
+    for RenderedPage { url, html, .. } in rendered_pages().await {
+        if !crate::ui::layout::is_document(html) {
             continue;
         }
         checked += 1;
-        let outline = crate::test_support::dom::heading_outline(&html);
+        let outline = crate::test_support::dom::heading_outline(html);
         let h1s = outline.iter().filter(|(level, _)| *level == 1).count();
         if h1s != 1 {
             wrong.push(format!("{url}: {h1s} h1s in {outline:?}"));
@@ -864,8 +863,8 @@ async fn every_label_is_in_sentence_case() {
     let mut wrong: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     let mut seen_data: BTreeSet<(&str, &str)> = BTreeSet::new();
     let mut checked = 0;
-    for (url, html) in rendered_pages().await {
-        for (kind, text) in crate::test_support::dom::ui_labels(&html) {
+    for RenderedPage { url, html, .. } in rendered_pages().await {
+        for (kind, text) in crate::test_support::dom::ui_labels(html) {
             checked += 1;
             // Counts follow the schema, so a data label is matched with
             // each number written `N` ("admin impresspress N").
@@ -881,7 +880,7 @@ async fn every_label_is_in_sentence_case() {
                 wrong
                     .entry(format!("{kind} {text:?}"))
                     .or_default()
-                    .push(stable_url(&url));
+                    .push(stable_url(url));
             }
         }
     }
