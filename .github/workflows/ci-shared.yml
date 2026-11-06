@@ -190,7 +190,7 @@ jobs:
 
       # `-D warnings`, because without it this step only *printed* findings and
       # passed. The two crate-scoped clippy steps (`Clippy (block-dev)` below
-      # and `Clippy (browser-devtools, wasm32)` in the `e2e-dev-sandbox` job)
+      # and `Clippy (browser-devtools, wasm32)` in the `clippy-sandbox` job)
       # were the only enforcing ones, and no `RUSTFLAGS` supplies the flag
       # anywhere in `.github/workflows/`, so every warning in every other crate
       # printed and passed.
@@ -219,7 +219,7 @@ jobs:
       # workspace manifest keeps it out of `default-members`), and
       # `impresspress-web` is a browser cdylib over `web-sys`. Each is linted
       # for wasm32 by its own step instead — `impresspress-cloudflare` in the
-      # `cloudflare` job, `impresspress-web` in `e2e-dev-sandbox`.
+      # `cloudflare` job, `impresspress-web` in `clippy-sandbox`.
       - name: Run clippy
         run: cargo clippy --locked --workspace --exclude impresspress-web --exclude impresspress-cloudflare --all-targets -- -D warnings
 
@@ -636,7 +636,7 @@ jobs:
       # Deliberately NOT `--no-deps`: impresspress-core is a workspace member,
       # so leaving it in scope lints core under `cfg(target_arch = "wasm32")`
       # for the feature set a Worker actually builds. (The `browser-devtools`
-      # clippy step in `e2e-dev-sandbox` covers core's wasm32 code under the
+      # clippy step in `clippy-sandbox` covers core's wasm32 code under the
       # browser's feature set; between them nothing in core's wasm32 half is
       # compiled without lints.)
       #
@@ -1236,13 +1236,63 @@ jobs:
           path: crates/impresspress-web/playwright-report/
           retention-days: 7
 
+  # The lint of the sandbox's wasm32 code. A job of its own so that it reports
+  # whatever `sandbox-runtime` concludes, and adds nothing to the e2e jobs.
+  clippy-sandbox:
+    name: Clippy (sandbox, wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: clippy-sandbox
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The only `--features browser-devtools` lint in CI.
+      #
+      # It used to carry `--no-deps` because the un-scoped command was red on
+      # six pre-existing impresspress-core warnings. Five were
+      # `arc_with_non_send_sync` on `Arc`s wafer-run's own API dictates, now
+      # stated once as a `cfg_attr(target_arch = "wasm32", ...)` allow in each
+      # affected crate's `lib.rs`; the sixth was a real wasm32-only defect in
+      # `blocks/dev/zip.rs` (a `usize` archive-size ceiling that equals
+      # `usize::MAX` on a 32-bit target, so it never refused anything there).
+      # With both addressed there is nothing left to scope out, and dropping
+      # the flag is what makes this the gate on impresspress-core's
+      # `browser-devtools` code under wasm32 — which nothing else lints.
+      - name: Clippy (browser-devtools, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
+
+      # The other two configurations `impresspress-web` has. Each compiles its
+      # own block of `runtime_factory.rs`'s const assertions — that its
+      # features agree with the sandbox mode `impresspress-core` compiled
+      # (`SandboxMode::COMPILED`) and, for a site build, that the factory
+      # routes no `/b/dev` path — so these
+      # steps are what check that wiring, and they are where a site build's
+      # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
+      # are linted at all. `build-wasm` and `sandbox-runtime` compile all three
+      # with wasm-pack, so each block of assertions runs there too, but lint
+      # none of them.
+      - name: Clippy (browser-site-runtime, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-site-runtime -- -D warnings
+
+      - name: Clippy (no sandbox, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown -- -D warnings
+
   # The two runtimes the dev-sandbox e2e jobs assemble their bundles from, built
   # side by side here rather than one after the other inside those jobs:
   # `wasm-opt` is most of what a build costs, about five minutes each, and
   # neither e2e job needs anything else from the other. Only those two jobs
-  # depend on this one, so a failure here costs them and nothing else.
+  # depend on this one, so a failure here skips them and nothing else. It skips
+  # itself when they will not run.
   sandbox-runtime:
     name: Build sandbox runtime (${{ matrix.pkg }})
+    if: inputs.build-wasm-result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -1285,9 +1335,8 @@ jobs:
   # so no host test can run a line of either; this job is where they run, in
   # the `browser-devtools` build (an export still boots that build with the
   # workspace switched off). It is also the only place `impresspress-web`'s
-  # sandbox features are linted at all, the runtimes themselves being compiled
-  # by `sandbox-runtime`: the three wasm32 clippy steps below lint no features,
-  # `browser-site-runtime` and `browser-devtools`. On the
+  # sandbox features are exercised at all: `sandbox-runtime` compiles them and
+  # `clippy-sandbox` lints them. On the
   # core side, `block-dev` itself is covered by the `Clippy (block-dev)` step
   # and the `test-block-dev` job above, which lint and run
   # `impresspress-core`'s half on the host, and its runtime half alone by
@@ -1341,37 +1390,6 @@ jobs:
           name: impresspress-web-pkg-site
           path: crates/impresspress-web/pkg-site
 
-      # The only `--features browser-devtools` gate in CI.
-      #
-      # It used to carry `--no-deps` because the un-scoped command was red on
-      # six pre-existing impresspress-core warnings. Five were
-      # `arc_with_non_send_sync` on `Arc`s wafer-run's own API dictates, now
-      # stated once as a `cfg_attr(target_arch = "wasm32", ...)` allow in each
-      # affected crate's `lib.rs`; the sixth was a real wasm32-only defect in
-      # `blocks/dev/zip.rs` (a `usize` archive-size ceiling that equals
-      # `usize::MAX` on a 32-bit target, so it never refused anything there).
-      # With both addressed there is nothing left to scope out, and dropping
-      # the flag is what makes this the gate on impresspress-core's
-      # `browser-devtools` code under wasm32 — which nothing else lints.
-      - name: Clippy (browser-devtools, wasm32)
-        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
-
-      # The other two configurations `impresspress-web` has. Each compiles its
-      # own block of `runtime_factory.rs`'s const assertions — that its
-      # features agree with the sandbox mode `impresspress-core` compiled
-      # (`SandboxMode::COMPILED`) and, for a site build, that the factory
-      # routes no `/b/dev` path — so these
-      # steps are what check that wiring, and they are where a site build's
-      # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
-      # are linted at all. `build-wasm` and `sandbox-runtime` compile all three
-      # with wasm-pack, so each block of assertions runs there too, but lint
-      # none of them.
-      - name: Clippy (browser-site-runtime, wasm32)
-        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-site-runtime -- -D warnings
-
-      - name: Clippy (no sandbox, wasm32)
-        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown -- -D warnings
-
       # Debug build, as `e2e-build` does: the CLI only assembles static files
       # here, so its runtime speed is irrelevant and a debug compile is cheaper.
       - name: Install impresspress CLI (debug)
@@ -1400,9 +1418,10 @@ jobs:
       # runner; the steps below put the tree in place first.
       # `dev-compiler.spec.ts` and `dev-compile-tool.spec.ts` both read the
       # manifest in `compiler/dist/`, too. Same key as `e2e-dev-compile`. The two
-      # run in parallel, so on a cold cache both compose and the second upload
-      # loses with a warning, which costs nothing: the tree is the same. See
-      # that job for why there are no `restore-keys` and what `--fast` costs.
+      # run in parallel, so on a cold cache both compose, which is one more
+      # composition than running in series, and the second upload loses with a
+      # warning. See that job for why there are no `restore-keys` and what
+      # `--fast` costs.
       # Skipped entirely when the release asset was fetched:
       # that tree is the same for every job and needs no cache.
       # The optimized tree the developer published for this pin, and the only
@@ -2421,6 +2440,7 @@ jobs:
       - browser-wasm-test
       - e2e-build
       - e2e-smoke
+      - clippy-sandbox
       - sandbox-runtime
       - e2e-dev-sandbox
       - e2e-dev-compile

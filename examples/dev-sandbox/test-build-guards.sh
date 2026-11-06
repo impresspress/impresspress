@@ -17,7 +17,8 @@
 #     `seeds/` and `compiler/PIN.json`, a fake `compiler/build-compiler.sh`
 #     and a stub `compiler/scripts/verify-compiler-assets.mjs` that accepts
 #     any tree, so a current tree gets past `check_compiler`;
-#   * `scripts/wasm-pack-locked.sh` and the `check-cargo-lock.sh` it runs;
+#   * `scripts/build-sandbox-runtime.sh`, `scripts/wasm-pack-locked.sh` and the
+#     `check-cargo-lock.sh` it runs;
 #   * a two-crate cargo workspace at the root — `crates/impresspress-web`
 #     depending by path on `crates/lockdep` — with a committed-style
 #     `Cargo.lock` that is current. Path dependencies only, so cargo never
@@ -337,6 +338,14 @@ else
   ok "a current dist: compiler/build-compiler.sh not run"
 fi
 built "build.sh" 2 pkg-dev pkg-site
+# The features are what make a runtime the one its directory names.
+for runtime in "pkg-dev browser-devtools" "pkg-site browser-site-runtime"; do
+  if calls_of wasm-pack | grep -q -- "--out-dir ${runtime% *} -- --features ${runtime#* }\( \|$\)"; then
+    ok "build.sh: ${runtime% *} is built with --features ${runtime#* }"
+  else
+    fail "build.sh: ${runtime% *} is not built with --features ${runtime#* }"
+  fi
+done
 
 # The same current tree with a stale lock: refused by build.sh's own check,
 # ahead of its first wasm-pack step, and the lock is untouched.

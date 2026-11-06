@@ -35,6 +35,8 @@ on:
       # tool's own `--locked` would.
       - 'scripts/check-cargo-lock.sh'
       - 'scripts/wasm-pack-locked.sh'
+      # What `build.sh` compiles the deployed runtimes with.
+      - 'scripts/build-sandbox-runtime.sh'
       - '.github/workflows/deploy-dev-sandbox.yml'
   workflow_dispatch:
 
