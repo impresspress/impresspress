@@ -1573,12 +1573,12 @@ jobs:
     # entry at all, and this one would compose from scratch — in series,
     # behind a job that has already reported the sandbox is broken.
     #
-    # The cost is a skipped compile check when the sandbox e2e is red. It is
-    # only paid on a cold cache: once the release asset for the pin is
-    # published, neither job composes and this is pure ordering. If the lost
-    # signal ever matters more than the double compose, the answer is a
-    # separate cache key per job and a build job both of these consume, not
-    # dropping the `needs`.
+    # The cost is a skipped compile check whenever the sandbox e2e is red, on
+    # a warm cache as well: once the release asset for the pin is published,
+    # neither job composes, but this one still needs the artifact. If the lost
+    # signal ever matters more, the answer is a build job both of these
+    # consume, with a separate compiler cache key per job, not dropping the
+    # `needs`.
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
     # artifact this job downloads is already published.
     needs: e2e-dev-sandbox
