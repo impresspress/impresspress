@@ -704,9 +704,11 @@ struct RenderedPage {
 }
 
 /// Every page the crawl renders, every entry's: the set the guards that only
-/// read a page's HTML hold to the design rules. The first of them to get here
-/// renders it and the rest wait, because each would otherwise repeat the whole
-/// crawl to get the same HTML.
+/// read a page's HTML hold to the design rules. Rendered once per process,
+/// because each would otherwise repeat the whole crawl to get the same HTML:
+/// under `cargo test` the first guard here renders it and the rest wait, and
+/// under a runner with a process per test, such as nextest, each guard pays
+/// for its own.
 async fn rendered_pages() -> &'static [RenderedPage] {
     static PAGES: tokio::sync::OnceCell<Vec<RenderedPage>> = tokio::sync::OnceCell::const_new();
     PAGES.get_or_init(render_every_page).await
