@@ -71,12 +71,6 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: e2e
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:

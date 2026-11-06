@@ -51,10 +51,16 @@ name: CI shared
 # `scripts/check-rust-cache-save-if.sh`). A pull request restores the entry
 # `main` saved, which any branch can read, and writes no Rust entry of its own.
 # The repository's Actions cache holds 10 GB, and an entry written from a pull
-# request or a tag can only be read from that ref while it can evict `main`'s.
+# request can only be read from that ref while it can evict `main`'s.
+# `release.yml` and `regen-visual-baselines.yml` keep no Rust cache: both can be
+# dispatched from `main`, where this condition is true, and neither reads what
+# it would save (regen builds another branch; a tag build has no entry of its
+# own to restore).
 # That only works while the key is one `main` has saved, and the key hashes
 # every toolchain installed when the step runs: install anything floating, such
-# as `nightly`, AFTER the step.
+# as `nightly`, AFTER the step. The runner image's own `stable` is in the hash
+# too, so an image update moves every key until `main`'s next run saves. That is
+# accepted: a miss costs a job a minute or two.
 #
 # Editing this file changes BOTH gates at once. Two consequences:
 #   * A comment that describes "this workflow" has to be true on a pull request

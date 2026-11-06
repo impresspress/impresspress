@@ -7,7 +7,7 @@
 # that evict `main`'s. See the note in `.github/workflows/ci-shared.yml`.
 set -euo pipefail
 
-python3 - .github/workflows/*.yml <<'PY'
+python3 - .github/workflows/* <<'PY'
 import sys
 import yaml
 
@@ -20,7 +20,8 @@ for path in sys.argv[1:]:
         jobs = yaml.safe_load(f).get("jobs", {})
     for job_id, job in jobs.items():
         for step in job.get("steps", []):
-            if not str(step.get("uses", "")).startswith("Swatinem/rust-cache@"):
+            # GitHub resolves action owners case-insensitively.
+            if not str(step.get("uses", "")).lower().startswith("swatinem/rust-cache@"):
                 continue
             checked += 1
             if (step.get("with") or {}).get("save-if") != expected:
