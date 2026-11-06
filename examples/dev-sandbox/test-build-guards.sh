@@ -146,7 +146,7 @@ fake_tree() {
   cp -R "$WORKSPACE" "$ROOT"
   mkdir -p "$CALLS" "$SANDBOX/compiler/scripts" "$ROOT/scripts"
   cp "$HERE/build.sh" "$HERE/measure.sh" "$SANDBOX/"
-  cp "$REPO/scripts/wasm-pack-locked.sh" "$REPO/scripts/check-cargo-lock.sh" "$ROOT/scripts/"
+  cp "$REPO/scripts/build-sandbox-runtime.sh" "$REPO/scripts/wasm-pack-locked.sh" "$REPO/scripts/check-cargo-lock.sh" "$ROOT/scripts/"
   cp -R "$HERE/seeds" "$SANDBOX/seeds"
   rm -rf "$SANDBOX/seeds/__pycache__"
   cp "$HERE/compiler/PIN.json" "$SANDBOX/compiler/PIN.json"

@@ -32,8 +32,7 @@ name: CI shared
 # `build-wasm` is not here; it is `build-wasm.yml`, which both callers run
 # before calling this file. See that file for why it is separate. Every job
 # below that needs the wasm downloads the `impresspress-web-pkg` artifact it
-# publishes (the dev-sandbox e2es also its two sandbox runtimes), and is ordered
-# after it by the caller's `needs:`. The callers call
+# publishes, and is ordered after it by the caller's `needs:`. The callers call
 # this file whatever `build-wasm` concluded (short of a cancelled run) and pass
 # that conclusion in as `build-wasm-result`: the jobs that download the
 # artifact run only on `success`, every other job runs regardless, and `ci-ok`
@@ -1237,6 +1236,48 @@ jobs:
           path: crates/impresspress-web/playwright-report/
           retention-days: 7
 
+  # The two runtimes the dev-sandbox e2e jobs assemble their bundles from, built
+  # side by side here rather than one after the other inside those jobs:
+  # `wasm-opt` is most of what a build costs, about five minutes each, and
+  # neither e2e job needs anything else from the other. Only those two jobs
+  # depend on this one, so a failure here costs them and nothing else.
+  sandbox-runtime:
+    name: Build sandbox runtime (${{ matrix.pkg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [pkg-dev, pkg-site]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: sandbox-${{ matrix.pkg }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          # Pinned for the same reason as `build-wasm` — see the note there.
+          version: 'v0.15.0'
+
+      - name: Build the runtime
+        run: scripts/build-sandbox-runtime.sh ${{ matrix.pkg }}
+
+      - name: Upload the runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: impresspress-web-${{ matrix.pkg }}
+          path: crates/impresspress-web/${{ matrix.pkg }}/
+          if-no-files-found: error
+          retention-days: 1
+
   # The job that boots and exercises the browser development sandbox. `impresspress-web/src/site_runtime.rs` — wasmi `inspect`, the
   # runtime rebuild, `replace_wafer`, boot convergence, seed-on-boot — and
   # `impresspress-web/src/dev_runtime.rs` — the `probe`, the announcement to
@@ -1245,7 +1286,7 @@ jobs:
   # the `browser-devtools` build (an export still boots that build with the
   # workspace switched off). It is also the only place `impresspress-web`'s
   # sandbox features are linted at all, the runtimes themselves being compiled
-  # in `build-wasm.yml`: the three wasm32 clippy steps below lint no features,
+  # by `sandbox-runtime`: the three wasm32 clippy steps below lint no features,
   # `browser-site-runtime` and `browser-devtools`. On the
   # core side, `block-dev` itself is covered by the `Clippy (block-dev)` step
   # and the `test-block-dev` job above, which lint and run
@@ -1258,6 +1299,7 @@ jobs:
     # When it did not there is no artifact, and `ci-ok` is red on the
     # `build-wasm` result itself.
     if: inputs.build-wasm-result == 'success'
+    needs: sandbox-runtime
     runs-on: ubuntu-latest
     # The e2e itself is a few minutes. The ceiling is for the case where
     # neither the release asset nor the cache is there and this job composes
@@ -1286,7 +1328,7 @@ jobs:
           name: impresspress-web-pkg
           path: crates/impresspress-web/pkg
 
-      # `pkg-dev/` and `pkg-site/`, which `build-wasm.yml` compiled alongside it.
+      # `pkg-dev/` and `pkg-site/`, from `sandbox-runtime`.
       - name: Download the workspace runtime
         uses: actions/download-artifact@v4
         with:
@@ -1321,8 +1363,9 @@ jobs:
       # routes no `/b/dev` path — so these
       # steps are what check that wiring, and they are where a site build's
       # `site_runtime.rs` (without `dev_runtime.rs`) and a no-sandbox build
-      # are linted at all. `build-wasm.yml` compiles all three with wasm-pack,
-      # so each block of assertions runs there too, but lints none of them.
+      # are linted at all. `build-wasm` and `sandbox-runtime` compile all three
+      # with wasm-pack, so each block of assertions runs there too, but lint
+      # none of them.
       - name: Clippy (browser-site-runtime, wasm32)
         run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-site-runtime -- -D warnings
 
@@ -1356,11 +1399,11 @@ jobs:
       # it never runs the ~55 minute, 12.6 GB composition that would OOM this
       # runner; the steps below put the tree in place first.
       # `dev-compiler.spec.ts` and `dev-compile-tool.spec.ts` both read the
-      # manifest in `compiler/dist/`, too. Its own key, as `e2e-dev-compile` has
-      # its own: the two run in parallel, and with one key a cold cache would
-      # have them race to upload one entry. See that job for why there are no
-      # `restore-keys` and what `--fast` costs. Skipped entirely when the
-      # release asset was fetched:
+      # manifest in `compiler/dist/`, too. Same key as `e2e-dev-compile`. The two
+      # run in parallel, so on a cold cache both compose and the second upload
+      # loses with a warning, which costs nothing: the tree is the same. See
+      # that job for why there are no `restore-keys` and what `--fast` costs.
+      # Skipped entirely when the release asset was fetched:
       # that tree is the same for every job and needs no cache.
       # The optimized tree the developer published for this pin, and the only
       # source of one: composing it costs ~35 minutes and 12.6 GB of RSS, which
@@ -1382,7 +1425,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: examples/dev-sandbox/compiler/dist
-          key: compiler-dist-sandbox-${{ hashFiles('examples/dev-sandbox/compiler/PIN.json', 'examples/dev-sandbox/compiler/src/**', 'examples/dev-sandbox/compiler/scripts/**', 'examples/dev-sandbox/compiler/package.json', 'examples/dev-sandbox/compiler/package-lock.json', 'examples/dev-sandbox/compiler/tsconfig.json', 'examples/dev-sandbox/compiler/vite.config.ts', 'examples/dev-sandbox/compiler/build-compiler.sh') }}
+          key: compiler-dist-${{ hashFiles('examples/dev-sandbox/compiler/PIN.json', 'examples/dev-sandbox/compiler/src/**', 'examples/dev-sandbox/compiler/scripts/**', 'examples/dev-sandbox/compiler/package.json', 'examples/dev-sandbox/compiler/package-lock.json', 'examples/dev-sandbox/compiler/tsconfig.json', 'examples/dev-sandbox/compiler/vite.config.ts', 'examples/dev-sandbox/compiler/build-compiler.sh') }}
 
       - name: Allow a --fast compiler tree in this job only
         run: echo "IMPRESSPRESS_COMPILER_ALLOW_FAST=1" >> "$GITHUB_ENV"
@@ -1580,14 +1623,15 @@ jobs:
     name: E2E dev sandbox (Rubrc compiles a block in the browser)
     # The same wasm this repo's other browser jobs run against: the sandbox
     # bundle is assembled, as `e2e-dev-sandbox` assembles its own, from the
-    # runtimes `build-wasm.yml` compiled.
+    # runtimes `sandbox-runtime` compiled.
     #
     # In parallel with `e2e-dev-sandbox`, so a compile regression is reported
     # even when the sandbox e2e is red. Ordered after `build-wasm.yml` by the
-    # caller, so the artifacts this job downloads are already published — when
-    # it succeeded. When it did not there are none, and `ci-ok` is red on the
-    # `build-wasm` result itself.
+    # caller, so the `impresspress-web-pkg` artifact this job downloads is
+    # already published — when it succeeded. When it did not there is no
+    # artifact, and `ci-ok` is red on the `build-wasm` result itself.
     if: inputs.build-wasm-result == 'success'
+    needs: sandbox-runtime
     runs-on: ubuntu-latest
     # The two e2es are ~5-10 minutes between them (three real compiles and
     # four cold boots). The ceiling is for the cache miss below: composing the
@@ -1616,7 +1660,7 @@ jobs:
           name: impresspress-web-pkg
           path: crates/impresspress-web/pkg
 
-      # `pkg-dev/` and `pkg-site/`, which `build-wasm.yml` compiled alongside it.
+      # `pkg-dev/` and `pkg-site/`, from `sandbox-runtime`.
       - name: Download the workspace runtime
         uses: actions/download-artifact@v4
         with:
@@ -1677,7 +1721,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: examples/dev-sandbox/compiler/dist
-          key: compiler-dist-compile-${{ hashFiles('examples/dev-sandbox/compiler/PIN.json', 'examples/dev-sandbox/compiler/src/**', 'examples/dev-sandbox/compiler/scripts/**', 'examples/dev-sandbox/compiler/package.json', 'examples/dev-sandbox/compiler/package-lock.json', 'examples/dev-sandbox/compiler/tsconfig.json', 'examples/dev-sandbox/compiler/vite.config.ts', 'examples/dev-sandbox/compiler/build-compiler.sh') }}
+          key: compiler-dist-${{ hashFiles('examples/dev-sandbox/compiler/PIN.json', 'examples/dev-sandbox/compiler/src/**', 'examples/dev-sandbox/compiler/scripts/**', 'examples/dev-sandbox/compiler/package.json', 'examples/dev-sandbox/compiler/package-lock.json', 'examples/dev-sandbox/compiler/tsconfig.json', 'examples/dev-sandbox/compiler/vite.config.ts', 'examples/dev-sandbox/compiler/build-compiler.sh') }}
 
       # This job — and ONLY this job — may run against a component composed
       # without `wasm-opt`. `verify-compiler-assets.mjs` refuses a `--fast`
@@ -2377,6 +2421,7 @@ jobs:
       - browser-wasm-test
       - e2e-build
       - e2e-smoke
+      - sandbox-runtime
       - e2e-dev-sandbox
       - e2e-dev-compile
       - e2e-visual

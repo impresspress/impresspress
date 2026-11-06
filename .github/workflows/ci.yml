@@ -26,8 +26,6 @@ permissions:
 jobs:
   build-wasm:
     uses: ./.github/workflows/build-wasm.yml
-    with:
-      sandbox-runtimes: true
 
   # `needs: build-wasm` orders the seven jobs inside `ci-shared.yml` that
   # download the `impresspress-web-pkg` artifact after it. A job cannot depend

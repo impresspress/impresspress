@@ -59,9 +59,10 @@
 # built without compiling one twice: `sw-update.spec.ts` deploys one bundle
 # over another, and the second is assembled from a restamped copy of
 # `pkg-dev/` (`crates/impresspress-web/tests/e2e/fixtures/next-runtime-pkg.mjs`).
-# It is also how CI builds every bundle: `build-wasm.yml` compiles the runtimes
-# once, in parallel, and the e2e jobs hand them here as downloaded artifacts.
-# Everything after step 1 is the same recipe either way.
+# It is also how CI's e2e jobs build their bundles, from the runtimes the
+# `sandbox-runtime` job compiled; a deploy compiles here, through the same
+# `scripts/build-sandbox-runtime.sh`. Everything after step 1 is the same recipe
+# either way.
 #
 # `--site-pkg-dir DIR` does the same for step 1b: DIR is a wasm-pack output of
 # `impresspress-web` built with `--features browser-site-runtime` — `pkg-site/`
@@ -383,8 +384,10 @@ check_compiler
 #    tree that has just built the ordinary bundle must not be disturbed by
 #    this script, and vice versa.
 #    `--pkg-dir` names one that already exists, and nothing is compiled.
-#    Both builds go through `scripts/wasm-pack-locked.sh`, which refuses a
-#    `Cargo.lock` that is out of date before wasm-pack can rewrite it. The
+#    Both builds go through `scripts/build-sandbox-runtime.sh`, which is also
+#    what CI compiles them with, and on to `scripts/wasm-pack-locked.sh`,
+#    which refuses a `Cargo.lock` that is out of date before wasm-pack can
+#    rewrite it. The
 #    same check runs here first, unconditionally, so a run handed both
 #    `--pkg-dir` and `--site-pkg-dir` (which compiles nothing) refuses a
 #    stale lock too, and the CLI install this script suggests below is never
@@ -395,7 +398,7 @@ if [ -n "$PKG_DIR" ]; then
 else
   PKG_DIR="$REPO/crates/impresspress-web/pkg-dev"
   log "wasm-pack build --features browser-devtools -> $PKG_DIR" # lock-guard: allow (log text; the run below is wrapped)
-  "$REPO/scripts/wasm-pack-locked.sh" "$REPO/crates/impresspress-web" build --target web --release --out-dir pkg-dev -- --features browser-devtools
+  "$REPO/scripts/build-sandbox-runtime.sh" pkg-dev
 fi
 
 # 1b. The site runtime — the sandbox's runtime half alone, with no workspace
@@ -406,7 +409,7 @@ if [ -n "$SITE_PKG_DIR" ]; then
 else
   SITE_PKG_DIR="$REPO/crates/impresspress-web/pkg-site"
   log "wasm-pack build --features browser-site-runtime -> $SITE_PKG_DIR" # lock-guard: allow (log text; the run below is wrapped)
-  "$REPO/scripts/wasm-pack-locked.sh" "$REPO/crates/impresspress-web" build --target web --release --out-dir pkg-site -- --features browser-site-runtime
+  "$REPO/scripts/build-sandbox-runtime.sh" pkg-site
 fi
 
 # 1c. The guarantee the feature split is for, checked on the two artifacts:

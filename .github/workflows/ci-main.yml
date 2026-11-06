@@ -81,8 +81,6 @@ env:
 jobs:
   build-wasm:
     uses: ./.github/workflows/build-wasm.yml
-    with:
-      sandbox-runtimes: true
 
   # See `ci.yml` for why this call carries `needs: build-wasm` and runs
   # `if: !cancelled()`. `cross-compile` and `coverage` below depend on
