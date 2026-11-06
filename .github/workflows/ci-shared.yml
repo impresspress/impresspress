@@ -323,29 +323,11 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 
-      # `tests/wafer_guest_golden.rs` builds both block templates with plain
-      # `cargo build --target wasm32-wasip1 --offline` and runs the resulting
-      # modules under wasmi. Without the target installed it would skip;
-      # `rust-toolchain.toml` lists the target, and IMPRESSPRESS_GUEST_GOLDEN
-      # below turns that skip into a failure should it ever go missing.
-      #
-      # `--workspace` above does run the `#![cfg(feature = "block-dev")]`
-      # integration tests — `crates/impresspress`'s dev-dependency turns the
-      # feature on for this crate — but without `wasm`. This step runs them
-      # with it, and `wasm` is load-bearing rather than incidental:
-      # `tests/lockfile_e2e.rs` needs wafer-run built with wasmi,
-      # `tests/wafer_guest_golden.rs` runs the compiled templates through it,
-      # and `-p impresspress-core --features block-dev` alone leaves it red.
-      - name: Run the block-dev suite
-        env:
-          IMPRESSPRESS_GUEST_GOLDEN: "1"
-        run: cargo test --locked -p impresspress-core --features block-dev,wasm
-
       # `tests/site_runtime.rs` is `#![cfg(all(feature = "site-runtime",
       # not(feature = "block-dev")))]`: it proves the dev block's runtime half
       # boots a seed into a live site with no workspace code compiled in. No
       # other step runs it — `--workspace` unifies `block-dev` on, the
-      # block-dev suite asks for `block-dev`, and `Clippy (site-runtime)`
+      # `test-block-dev` job asks for `block-dev`, and `Clippy (site-runtime)`
       # compiles the file but runs nothing — so it runs here, in its own `-p`
       # invocation. A compiled-out file reports `0 passed` and exits 0, so the
       # grep is what makes this step fail if the file ever stops running (a
@@ -419,6 +401,44 @@ jobs:
       # chat the server refuses shows the refusal's message, not "No response".
       - name: Run LLM chat unit tests (node --test)
         run: node --test crates/impresspress-core/src/blocks/llm/assets/test/*.test.mjs
+
+  # A job of its own because this one command recompiles `impresspress-core`
+  # under other features and reruns its whole unit suite, about a quarter of an
+  # hour, and as a step of `test` that time was added to `test`'s. It shares
+  # nothing with `test`: `impresspress-core` does not depend on the
+  # `impresspress` crate, so unlike `test` it needs no `impresspress-web-pkg`
+  # and runs whatever `build-wasm` concluded.
+  test-block-dev:
+    name: Tests (block-dev)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: test-block-dev
+
+      # `tests/wafer_guest_golden.rs` builds both block templates with plain
+      # `cargo build --target wasm32-wasip1 --offline` and runs the resulting
+      # modules under wasmi. Without the target installed it would skip;
+      # `rust-toolchain.toml` lists the target, and IMPRESSPRESS_GUEST_GOLDEN
+      # below turns that skip into a failure should it ever go missing.
+      #
+      # `--workspace` in `test` does run the `#![cfg(feature = "block-dev")]`
+      # integration tests — `crates/impresspress`'s dev-dependency turns the
+      # feature on for this crate — but without `wasm`. This step runs them
+      # with it, and `wasm` is load-bearing rather than incidental:
+      # `tests/lockfile_e2e.rs` needs wafer-run built with wasmi,
+      # `tests/wafer_guest_golden.rs` runs the compiled templates through it,
+      # and `-p impresspress-core --features block-dev` alone leaves it red.
+      - name: Run the block-dev suite
+        env:
+          IMPRESSPRESS_GUEST_GOLDEN: "1"
+        run: cargo test --locked -p impresspress-core --features block-dev,wasm
 
   # Every `#[cfg(feature = "postgres")]` assertion in the repo — the seven
   # migration tests that check each block's `*.postgres.sql` twin is the one
@@ -1196,8 +1216,8 @@ jobs:
   # workspace switched off). It is also the only place `impresspress-web`'s
   # sandbox features are compiled at all: the three wasm32 clippy steps below
   # lint no features, `browser-site-runtime` and `browser-devtools`. On the
-  # core side, `block-dev` itself is covered by the `Clippy (block-dev)` and
-  # `Run the block-dev suite` steps above, which lint and run
+  # core side, `block-dev` itself is covered by the `Clippy (block-dev)` step
+  # and the `test-block-dev` job above, which lint and run
   # `impresspress-core`'s half on the host, and its runtime half alone by
   # `Clippy (site-runtime)` and `Run the site-runtime tests`.
   e2e-dev-sandbox:
@@ -1374,17 +1394,31 @@ jobs:
           UPDATE_DIST="$(examples/dev-sandbox/build.sh --pkg-dir "$RUNNER_TEMP/pkg-next" --site-pkg-dir crates/impresspress-web/pkg-site --out "$RUNNER_TEMP/dist-update" | tail -1)"
           echo "UPDATE_DIST=$UPDATE_DIST" >> "$GITHUB_ENV"
 
-      # One script, shared with local runs: wasm-pack with `browser-devtools`
-      # and with `browser-site-runtime`, the marker check between the two, the
-      # export shell, then the sealed web flow with `[sandbox] mode =
-      # "workspace"`, the welcome seed overlaid onto `dist/seed/` and the
-      # export shell compared byte for byte with the site wasm. Its last
-      # stdout line is the dist path.
+      # One script, shared with local runs: the marker check between the two
+      # runtimes, the export shell, then the sealed web flow with `[sandbox]
+      # mode = "workspace"`, the welcome seed overlaid onto `dist/seed/` and
+      # the export shell compared byte for byte with the site wasm. Its last
+      # stdout line is the dist path. The runtimes are the `pkg-dev/` and
+      # `pkg-site/` the bootstrap build compiled: the seed goes into the
+      # bundle, not the wasm, so compiling them here too would only repeat
+      # `wasm-opt` on the same input, about five minutes each.
       - name: Build the dev-sandbox bundle
         run: |
           set -o pipefail
-          DIST="$(examples/dev-sandbox/build.sh | tail -1)"
+          DIST="$(examples/dev-sandbox/build.sh --pkg-dir crates/impresspress-web/pkg-dev --site-pkg-dir crates/impresspress-web/pkg-site | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
+
+      # For `e2e-dev-compile`, which assembles its bundle from these rather
+      # than compiling the same two runtimes again.
+      - name: Upload the sandbox runtimes
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-sandbox-pkgs
+          path: |
+            crates/impresspress-web/pkg-dev/
+            crates/impresspress-web/pkg-site/
+          if-no-files-found: error
+          retention-days: 1
 
       # The other two modes' runtimes, as `E2E build` checks `none`: each
       # bundle's `sw.js` links against its real glue, and each wasm declares
@@ -1524,10 +1558,12 @@ jobs:
   e2e-dev-compile:
     name: E2E dev sandbox (Rubrc compiles a block in the browser)
     # The same wasm this repo's other browser jobs run against — the sandbox
-    # bundle is built from `pkg/` the way `e2e-dev-sandbox` builds it.
+    # bundle is assembled from the runtimes `e2e-dev-sandbox` compiled, which
+    # it publishes as `dev-sandbox-pkgs`.
     #
     # `e2e-dev-sandbox` as well, and this dependency IS on its result — which
-    # is what `needs` means, and what it has to mean here. The two jobs share
+    # is what `needs` means, and what it has to mean here. That artifact is
+    # one reason. The other is the compiler cache: the two jobs share
     # one compiler cache key, so on a cold cache they would otherwise compose
     # the toolchain twice in parallel and one of the two uploads would lose
     # the race with a warning; serialised, the first seeds the entry and this
@@ -1537,11 +1573,12 @@ jobs:
     # entry at all, and this one would compose from scratch — in series,
     # behind a job that has already reported the sandbox is broken.
     #
-    # The cost is a skipped compile check when the sandbox e2e is red. It is
-    # only paid on a cold cache: once the release asset for the pin is
-    # published, neither job composes and this is pure ordering. If the lost
-    # signal ever matters more than the double compose, the answer is a
-    # separate cache key per job, not dropping the `needs`.
+    # The cost is a skipped compile check whenever the sandbox e2e is red, on
+    # a warm cache as well: once the release asset for the pin is published,
+    # neither job composes, but this one still needs the artifact. If the lost
+    # signal ever matters more, the answer is a build job both of these
+    # consume, with a separate compiler cache key per job, not dropping the
+    # `needs`.
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
     # artifact this job downloads is already published.
     needs: e2e-dev-sandbox
@@ -1562,12 +1599,6 @@ jobs:
         with:
           prefix-key: e2e-dev
 
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
-        with:
-          # Pinned for the same reason as `build-wasm` — see the note there.
-          version: 'v0.15.0'
-
       # build.rs prereq: the impresspress crate `include_bytes!`s pkg/. What the
       # tests actually serve is built from `pkg-dev/` (the feature-on wasm),
       # substituted through IMPRESSPRESS_WEB_WASM / IMPRESSPRESS_WEB_JS by the
@@ -1577,6 +1608,13 @@ jobs:
         with:
           name: impresspress-web-pkg
           path: crates/impresspress-web/pkg
+
+      # `pkg-dev/` and `pkg-site/`, as `e2e-dev-sandbox` compiled them.
+      - name: Download the sandbox runtimes
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-sandbox-pkgs
+          path: crates/impresspress-web
 
       # Debug build, as `e2e-dev-sandbox` does: the CLI only assembles static
       # files here, so its runtime speed is irrelevant.
@@ -1664,12 +1702,12 @@ jobs:
 
       # `compiler_is_current` matches PIN.json against the tree above — a
       # mismatch would make `build.sh` refuse, never rebuild the compiler; it
-      # builds the wasm and assembles the bundle, with `compiler/dist/`
-      # overlaid at `/__impresspress_dev/compiler/`.
+      # assembles the bundle from the downloaded runtimes, with
+      # `compiler/dist/` overlaid at `/__impresspress_dev/compiler/`.
       - name: Build the dev-sandbox bundle
         run: |
           set -o pipefail
-          DIST="$(examples/dev-sandbox/build.sh | tail -1)"
+          DIST="$(examples/dev-sandbox/build.sh --pkg-dir crates/impresspress-web/pkg-dev --site-pkg-dir crates/impresspress-web/pkg-site | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
 
       - name: Cache Playwright browsers
@@ -2317,6 +2355,7 @@ jobs:
     needs:
       - check
       - test
+      - test-block-dev
       - test-postgres
       - cloudflare
       - cloudflare-wasm-test

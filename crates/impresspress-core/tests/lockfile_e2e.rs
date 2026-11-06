@@ -10,8 +10,8 @@
 //! works in impresspress's build.
 //!
 //! Compiled only with the `wasm` feature: without it the runtime has no
-//! wasm loader, so the lockfile entry has nothing to load it with. CI's core
-//! job runs with `--features block-dev,wasm`.
+//! wasm loader, so the lockfile entry has nothing to load it with. CI's
+//! `test-block-dev` job runs it, with `--features block-dev,wasm`.
 
 #![cfg(feature = "wasm")]
 

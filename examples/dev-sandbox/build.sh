@@ -59,13 +59,17 @@
 # built without compiling one twice: `sw-update.spec.ts` deploys one bundle
 # over another, and the second is assembled from a restamped copy of
 # `pkg-dev/` (`crates/impresspress-web/tests/e2e/fixtures/next-runtime-pkg.mjs`).
-# Everything after step 1 is the same recipe either way.
+# It is also how CI builds another bundle from the SAME runtime, in the job
+# that compiled it or, through the `dev-sandbox-pkgs` artifact, in
+# `e2e-dev-compile`: compiling again would only repeat `wasm-opt` on the same
+# input. Everything after step 1 is the same recipe either way.
 #
 # `--site-pkg-dir DIR` does the same for step 1b: DIR is a wasm-pack output of
 # `impresspress-web` built with `--features browser-site-runtime` — `pkg-site/`
 # as an earlier run left it — and the export shell is assembled from that.
 # The two are independent: the next deployment `sw-update.spec.ts` deploys
-# needs another sandbox runtime, not another site runtime, so CI passes both.
+# needs another sandbox runtime, not another site runtime, so CI hands that
+# build a restamped `--pkg-dir` and the ordinary `--site-pkg-dir`.
 #
 # `IMPRESSPRESS=/path/to/impresspress` overrides which CLI binary assembles
 # the bundle. Default is whatever is on `PATH`, which is the trap this
