@@ -135,6 +135,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: cross-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -179,6 +180,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # impresspress's build.rs `include_bytes!`s the impresspress-web wasm;
       # llvm-cov compiles the workspace, so the prebuilt pkg/ must be present.

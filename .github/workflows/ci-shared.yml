@@ -47,6 +47,14 @@ name: CI shared
 # job in this file is missing from its `needs:`, so a new job cannot run
 # outside the required check.
 #
+# Every `Swatinem/rust-cache` step in the CI workflows saves on `main` only
+# (`save-if`). A pull request restores the entry `main` saved, which any branch
+# can read, and writes nothing. The repository's Actions cache holds 10 GB and
+# one full set of `main`'s entries is about that, so every entry a pull request
+# wrote used to evict one of `main`'s. `e2e-dev-sandbox` and `e2e-dev-compile`
+# share one entry (`shared-key`) for the same reason: the second only ever
+# starts after the first has saved.
+#
 # Editing this file changes BOTH gates at once. Two consequences:
 #   * A comment that describes "this workflow" has to be true on a pull request
 #     and on a merge. Language like "at PR time" or "path-filtered" was true
@@ -155,6 +163,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
@@ -300,6 +309,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm;
       # without it `cargo test --workspace` fails before any test runs.
@@ -421,6 +431,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test-block-dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `tests/wafer_guest_golden.rs` builds both block templates with plain
       # `cargo build --target wasm32-wasip1 --offline` and runs the resulting
@@ -493,6 +504,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test-postgres
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `package/feature` spelling because `--features` needs it whenever more
       # than one package is selected.
@@ -585,6 +597,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: cloudflare
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # build.rs prereq for any impresspress crate pulled into the cloudflare build.
       - name: Download impresspress-web pkg/
@@ -773,6 +786,8 @@ jobs:
       - name: Rust cache
         if: steps.cloudflare-changes.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-bindgen-test-runner
         if: steps.cloudflare-changes.outputs.skip != 'true'
@@ -854,6 +869,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: miniflare-outage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # worker-build at the CLI's pin (`WORKER_BUILD_VERSION` in
       # `crates/impresspress/src/cli/helpers/cloudflare/build.rs`); the harness
@@ -948,6 +964,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: browser-wasm-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
         if: steps.browser-changes.outputs.skip != 'true'
@@ -1041,6 +1058,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
@@ -1243,6 +1261,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e-dev
+          shared-key: e2e-dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
@@ -1598,6 +1618,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: e2e-dev
+          shared-key: e2e-dev
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # build.rs prereq: the impresspress crate `include_bytes!`s pkg/. What the
       # tests actually serve is built from `pkg-dev/` (the feature-on wasm),
@@ -2262,6 +2284,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: migration-history
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: The checked-in migration history is what main's history generates
         run: cargo run --locked -p impresspress-core --example migration-history -- --repo . --base origin/main --check
