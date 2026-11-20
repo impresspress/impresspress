@@ -25,22 +25,37 @@ pub const DEFAULT_PROBE_JITTER_MS: u64 = 30_000;
 /// backs off from here ([`unreadable_retry_window_ms`]).
 pub const RETRY_AFTER_UNREADABLE_MS: u64 = 30_000;
 
-/// (base, jitter width) in ms for the retry after the `consecutive_failures`th
-/// unreadable read in a row (1 = the first).
+/// (base, jitter width) in ms for the next probe after an unreadable read,
+/// given how long the outage has lasted (`outage_ms`, since the first failed
+/// read in this isolate) and the normal probe window (floor, jitter).
 ///
-/// The base doubles per failure from [`RETRY_AFTER_UNREADABLE_MS`] and is
-/// capped at the normal probe floor, so a long outage (a spent daily quota
-/// lasts until UTC midnight) settles at the normal probe rate instead of
-/// every isolate retrying every 30s. Jitter is half the base, so isolates
-/// that failed together spread out instead of retrying in lockstep. The first
-/// success resets the count.
-pub fn unreadable_retry_window_ms(consecutive_failures: u32, probe_floor_ms: u64) -> (u64, u64) {
-    let doublings = consecutive_failures.clamp(1, 16) - 1;
-    let cap = probe_floor_ms.max(RETRY_AFTER_UNREADABLE_MS);
-    let base = RETRY_AFTER_UNREADABLE_MS
-        .saturating_mul(1u64 << doublings)
-        .min(cap);
-    (base, (base / 2).max(1))
+/// Time-based, not count-based: many concurrent reads failing in the same
+/// second do not escalate it, so a brief blip is re-checked soon. The delay
+/// follows the outage's age, at least [`RETRY_AFTER_UNREADABLE_MS`], which
+/// grows geometrically (each retry roughly doubles the elapsed time). Once the
+/// outage is as long as the normal floor, this IS the normal window, jitter
+/// included, so a retry never waits longer than an ordinary probe (and the
+/// admin UI's propagation bound holds). With the default 30-60s window there is
+/// nothing to back off to: the normal rate is already ~30s.
+pub fn unreadable_retry_window_ms(outage_ms: u64, probe_window: (u64, u64)) -> (u64, u64) {
+    let (floor, jitter) = probe_window;
+    if outage_ms >= floor {
+        return (floor, jitter.max(1));
+    }
+    let base = outage_ms
+        .max(RETRY_AFTER_UNREADABLE_MS)
+        .min(floor.max(RETRY_AFTER_UNREADABLE_MS));
+    (base, (base / 2).min(jitter).max(1))
+}
+
+/// The isolate's outage start after a config-version read at `now`: the first
+/// failure starts it, later failures keep it, any success clears it.
+pub fn next_outage_start(previous: Option<u64>, now: u64, read_ok: bool) -> Option<u64> {
+    if read_ok {
+        None
+    } else {
+        Some(previous.unwrap_or(now))
+    }
 }
 
 /// Upper bound on KV's own propagation of a new version stamp, used only for
@@ -147,21 +162,44 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_retries_back_off_to_the_probe_floor_with_jitter() {
-        let floor = 600_000;
-        assert_eq!(unreadable_retry_window_ms(1, floor), (30_000, 15_000));
-        assert_eq!(unreadable_retry_window_ms(2, floor), (60_000, 30_000));
-        assert_eq!(unreadable_retry_window_ms(3, floor), (120_000, 60_000));
-        assert_eq!(unreadable_retry_window_ms(5, floor), (480_000, 240_000));
-        // Capped at the normal probe floor, however long the outage.
-        assert_eq!(unreadable_retry_window_ms(6, floor), (600_000, 300_000));
+    fn unreadable_retries_follow_the_outage_age_then_the_normal_window() {
+        let normal = (600_000, 60_000);
+        // A fresh outage (or a burst of failures in the same second): 30s.
+        assert_eq!(unreadable_retry_window_ms(0, normal), (30_000, 15_000));
+        assert_eq!(unreadable_retry_window_ms(5_000, normal), (30_000, 15_000));
+        // Grows with the outage, jitter never above the normal jitter.
         assert_eq!(
-            unreadable_retry_window_ms(u32::MAX, floor),
-            (600_000, 300_000)
+            unreadable_retry_window_ms(120_000, normal),
+            (120_000, 60_000)
         );
-        // 0 is treated as the first failure; a floor below 30s never shortens it.
-        assert_eq!(unreadable_retry_window_ms(0, floor), (30_000, 15_000));
-        assert_eq!(unreadable_retry_window_ms(4, 30_000), (30_000, 15_000));
+        assert_eq!(
+            unreadable_retry_window_ms(300_000, normal),
+            (300_000, 60_000)
+        );
+        // At or past the floor: exactly the normal window, never longer.
+        assert_eq!(unreadable_retry_window_ms(600_000, normal), normal);
+        assert_eq!(unreadable_retry_window_ms(u64::MAX, normal), normal);
+        // Default window: already ~30s, nothing to back off to.
+        assert_eq!(
+            unreadable_retry_window_ms(10_000, (30_000, 30_000)),
+            (30_000, 15_000)
+        );
+        assert_eq!(
+            unreadable_retry_window_ms(40_000, (30_000, 30_000)),
+            (30_000, 30_000)
+        );
+    }
+
+    #[test]
+    fn the_outage_starts_on_the_first_failure_and_clears_on_success() {
+        assert_eq!(next_outage_start(None, 100, false), Some(100));
+        assert_eq!(
+            next_outage_start(Some(100), 900, false),
+            Some(100),
+            "later failures keep the start"
+        );
+        assert_eq!(next_outage_start(Some(100), 900, true), None);
+        assert_eq!(next_outage_start(None, 900, true), None);
     }
 
     #[test]

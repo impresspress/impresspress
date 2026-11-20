@@ -378,9 +378,11 @@ const VERSION_UNAVAILABLE: &str = impresspress_core::config_probe::VERSION_UNAVA
 /// failing is not missed for a whole (possibly hour-long) window.
 fn probe_deadline_after(now: u64, version: &str) -> u64 {
     if version == VERSION_UNAVAILABLE {
-        let failures = UNREADABLE_STREAK.with(Cell::get);
+        let outage_ms = OUTAGE_STARTED_AT
+            .with(Cell::get)
+            .map_or(0, |started| now.saturating_sub(started));
         let (base, jitter_width) =
-            impresspress_core::config_probe::unreadable_retry_window_ms(failures, probe_window().0);
+            impresspress_core::config_probe::unreadable_retry_window_ms(outage_ms, probe_window());
         now + base + random_below(jitter_width)
     } else {
         next_probe_deadline_ms(now)
@@ -388,9 +390,11 @@ fn probe_deadline_after(now: u64, version: &str) -> u64 {
 }
 
 thread_local! {
-    /// Consecutive unreadable config-version reads in this isolate; drives the
-    /// retry backoff. Reset by the first successful read.
-    static UNREADABLE_STREAK: Cell<u32> = const { Cell::new(0) };
+    /// When this isolate's current run of unreadable config-version reads
+    /// began (ms), or None while KV is answering. Drives the retry backoff
+    /// (`config_probe::unreadable_retry_window_ms`); time-based, so a burst
+    /// of concurrent failed reads does not escalate it.
+    static OUTAGE_STARTED_AT: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// A random value in 0..width (0 if the RNG is unavailable).
@@ -415,12 +419,13 @@ fn random_below(width: u64) -> u64 {
 /// comment.
 async fn current_version(kv: &Arc<dyn impresspress_core::kv::KvBackend>) -> String {
     let read = kv.get(CONFIG_VERSION_KEY).await;
-    UNREADABLE_STREAK.with(|streak| {
-        streak.set(if read.is_err() {
-            streak.get().saturating_add(1)
-        } else {
-            0
-        })
+    let now = impresspress_core::util::now_millis();
+    OUTAGE_STARTED_AT.with(|started| {
+        started.set(impresspress_core::config_probe::next_outage_start(
+            started.get(),
+            now,
+            read.is_ok(),
+        ))
     });
     match read {
         Ok(Some(v)) => v,
@@ -712,8 +717,9 @@ async fn hydrate_prepared_runtime<F, G>(
     register_post_build: G,
     environment_identity: String,
     started_at: u64,
-    // The generation this hydration was checked against, when one was read:
-    // an UNREADABLE one (the plan was trusted) gets the short retry.
+    // The generation a runtime that will be STORED was checked against: an
+    // UNREADABLE one (the plan was trusted) gets the unreadable-retry
+    // deadline. None for request-local runtimes and when nothing was read.
     observed_config_version: Option<&str>,
 ) -> Result<(Rc<ReadyRuntime>, u32, u64), Box<dyn std::error::Error>>
 where
@@ -992,7 +998,7 @@ where
             register_post_build,
             environment_identity,
             now,
-            Some(&config_version),
+            None, // request-local, never stored: no probe deadline to set
         )
         .await?;
         tracing::info!(
