@@ -21,8 +21,27 @@ pub const DEFAULT_PROBE_JITTER_MS: u64 = 30_000;
 
 /// After an UNREADABLE probe, look again this soon rather than waiting a
 /// whole (possibly long) interval: KV usually recovers, and a change made
-/// meanwhile should not wait for the next full window.
+/// meanwhile should not wait for the next full window. The first retry; it
+/// backs off from here ([`unreadable_retry_window_ms`]).
 pub const RETRY_AFTER_UNREADABLE_MS: u64 = 30_000;
+
+/// (base, jitter width) in ms for the retry after the `consecutive_failures`th
+/// unreadable read in a row (1 = the first).
+///
+/// The base doubles per failure from [`RETRY_AFTER_UNREADABLE_MS`] and is
+/// capped at the normal probe floor, so a long outage (a spent daily quota
+/// lasts until UTC midnight) settles at the normal probe rate instead of
+/// every isolate retrying every 30s. Jitter is half the base, so isolates
+/// that failed together spread out instead of retrying in lockstep. The first
+/// success resets the count.
+pub fn unreadable_retry_window_ms(consecutive_failures: u32, probe_floor_ms: u64) -> (u64, u64) {
+    let doublings = consecutive_failures.clamp(1, 16) - 1;
+    let cap = probe_floor_ms.max(RETRY_AFTER_UNREADABLE_MS);
+    let base = RETRY_AFTER_UNREADABLE_MS
+        .saturating_mul(1u64 << doublings)
+        .min(cap);
+    (base, (base / 2).max(1))
+}
 
 /// Upper bound on KV's own propagation of a new version stamp, used only for
 /// what the admin UI tells people (Cloudflare documents ~60s).
@@ -125,6 +144,24 @@ mod tests {
         assert_eq!(probe_window_ms(Some("5")), (30_000, 30_000));
         assert_eq!(probe_window_ms(Some("30")), (30_000, 30_000));
         assert_eq!(probe_window_ms(Some("999999")), (3_600_000, 360_000));
+    }
+
+    #[test]
+    fn unreadable_retries_back_off_to_the_probe_floor_with_jitter() {
+        let floor = 600_000;
+        assert_eq!(unreadable_retry_window_ms(1, floor), (30_000, 15_000));
+        assert_eq!(unreadable_retry_window_ms(2, floor), (60_000, 30_000));
+        assert_eq!(unreadable_retry_window_ms(3, floor), (120_000, 60_000));
+        assert_eq!(unreadable_retry_window_ms(5, floor), (480_000, 240_000));
+        // Capped at the normal probe floor, however long the outage.
+        assert_eq!(unreadable_retry_window_ms(6, floor), (600_000, 300_000));
+        assert_eq!(
+            unreadable_retry_window_ms(u32::MAX, floor),
+            (600_000, 300_000)
+        );
+        // 0 is treated as the first failure; a floor below 30s never shortens it.
+        assert_eq!(unreadable_retry_window_ms(0, floor), (30_000, 15_000));
+        assert_eq!(unreadable_retry_window_ms(4, 30_000), (30_000, 15_000));
     }
 
     #[test]
