@@ -24,46 +24,37 @@ use std::{
 
 use impresspress_core::{cache_key::CONFIG_VERSION_KEY, metrics::CacheOutcome, IsolateCell};
 
-/// Floor of the isolate-local warm-hit probe window (ms) — see
-/// [`next_probe_deadline_ms`]. The default; a Worker can set its own with
-/// [`PROBE_INTERVAL_VAR`].
-const PROBE_INTERVAL_FLOOR_MS: u64 = 30_000;
-/// Width of the jitter added on top of the floor (ms) — see
-/// [`next_probe_deadline_ms`].
-const PROBE_INTERVAL_JITTER_MS: u64 = 30_000;
-
 /// Worker var: seconds between config-version probes per isolate (clamped to
-/// 30..=3600). Each probe is one KV read, and on Workers Free KV reads are
-/// capped at 100k/day account-wide, so a site that rarely edits config can
-/// trade freshness for reads. An admin edit is still seen at once by the
-/// isolate that made it (`mark_dirty`); other isolates see it within one
-/// interval. Unset keeps the 30-60s default.
+/// 30..=3600; rules in `impresspress_core::config_probe`). Each probe is one
+/// KV read, so a site that rarely edits config can trade freshness for reads.
+/// An admin edit is still seen at once by the isolate that made it
+/// (`mark_dirty`); other isolates see it within one window. Unset keeps the
+/// 30-60s default.
 pub(crate) const PROBE_INTERVAL_VAR: &str = impresspress_core::config_vars::CONFIG_PROBE_INTERVAL_KEY;
 
-/// The probe window this isolate uses, as (floor, jitter) in ms. Set from the
-/// Worker's env on each request entry ([`configure_probe_interval`]); env vars
-/// are fixed per deployment, so this only ever moves on a new version.
-static PROBE_FLOOR_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(PROBE_INTERVAL_FLOOR_MS);
-static PROBE_JITTER_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(PROBE_INTERVAL_JITTER_MS);
-
-/// (floor, jitter) in ms for a [`PROBE_INTERVAL_VAR`] value. None or an
-/// unparsable value keeps the default; a set value gets 10% jitter.
-fn probe_window_ms(value: Option<&str>) -> (u64, u64) {
-    match impresspress_core::config_vars::config_probe_interval_secs(value) {
-        Some(secs) => {
-            let floor = secs * 1000;
-            (floor, floor / 10)
-        }
-        None => (PROBE_INTERVAL_FLOOR_MS, PROBE_INTERVAL_JITTER_MS),
-    }
+thread_local! {
+    /// This isolate's probe window as (floor, jitter) ms. Worker vars are
+    /// fixed per deployment, and an isolate serves exactly one deployment, so
+    /// it is read from env once, on the first request, not on every request.
+    static PROBE_WINDOW: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
 }
 
 fn configure_probe_interval(env: &worker::Env) {
+    if PROBE_WINDOW.with(|w| w.get()).is_some() {
+        return;
+    }
     let value = env.var(PROBE_INTERVAL_VAR).ok().map(|v| v.to_string());
-    let (floor, jitter) = probe_window_ms(value.as_deref());
-    PROBE_FLOOR_MS.store(floor, std::sync::atomic::Ordering::Relaxed);
-    PROBE_JITTER_MS.store(jitter.max(1), std::sync::atomic::Ordering::Relaxed);
+    let window = impresspress_core::config_probe::probe_window_ms(value.as_deref());
+    PROBE_WINDOW.with(|w| w.set(Some(window)));
 }
+
+fn probe_window() -> (u64, u64) {
+    PROBE_WINDOW.with(|w| w.get()).unwrap_or((
+        impresspress_core::config_probe::DEFAULT_PROBE_FLOOR_MS,
+        impresspress_core::config_probe::DEFAULT_PROBE_JITTER_MS,
+    ))
+}
+
 /// Maximum time an isolate-local build slot may remain owned.
 ///
 /// Normal Rust cancellation drops [`BuildGuard`], but Cloudflare can hard-stop
@@ -329,17 +320,7 @@ fn bypass_prepared(identity: String) {
     PREPARED_BYPASS.with(|slot| slot.set(identity));
 }
 
-/// Did the config change? An UNREADABLE version is not a change.
-///
-/// [`current_version`] returns [`VERSION_UNAVAILABLE`] on a KV read error,
-/// meaning to hold the current generation. Comparing it like a real stamp did
-/// the opposite: it never matches, so every probe during a KV failure (on
-/// Workers Free that includes the daily 100k-read cap running out) abandoned
-/// the runtime for the multi-second dynamic build, which cannot fit the CPU
-/// budget. One KV quota day took the whole site down (2026-11-05/06).
-fn config_version_changed(cached: &str, observed: &str) -> bool {
-    observed != VERSION_UNAVAILABLE && cached != observed
-}
+use impresspress_core::config_probe::config_version_changed;
 
 fn prepared_probe_requires_fallback(
     dirty: bool,
@@ -349,20 +330,17 @@ fn prepared_probe_requires_fallback(
     dirty || config_version_changed(cached_config_version, observed_config_version)
 }
 
-/// Is the packaged plan's generation current? With KV unreadable there is
-/// nothing newer to compare against, so a BOUND plan is trusted (it was
-/// current when deployed) rather than bypassed for the dynamic build.
+/// See `impresspress_core::config_probe::prepared_plan_usable`, including the
+/// deliberate availability-over-freshness trade while KV is unreadable.
 fn prepared_generation_matches(plan_generation: &str, observed_generation: &str) -> bool {
-    plan_generation != impresspress_core::UNBOUND_CONFIG_GENERATION
-        && (observed_generation == VERSION_UNAVAILABLE || plan_generation == observed_generation)
+    impresspress_core::config_probe::prepared_plan_usable(plan_generation, observed_generation)
 }
 
 /// A fresh probe deadline: `now` plus a jittered window (30-60s by default,
 /// see [`PROBE_INTERVAL_VAR`]). Jitter avoids every isolate that warmed at the
 /// same instant re-probing KV in lockstep after exactly the same interval.
 fn next_probe_deadline_ms(now: u64) -> u64 {
-    let floor = PROBE_FLOOR_MS.load(std::sync::atomic::Ordering::Relaxed);
-    let jitter_width = PROBE_JITTER_MS.load(std::sync::atomic::Ordering::Relaxed).max(1);
+    let (floor, jitter_width) = probe_window();
     let mut buf = [0u8; 4];
     let jitter_ms = if getrandom::getrandom(&mut buf).is_ok() {
         u64::from(u32::from_le_bytes(buf)) % jitter_width
@@ -398,7 +376,18 @@ fn store_if_current(guard: &BuildGuard, rt: Rc<ReadyRuntime>) -> bool {
 /// A constant, deliberately: every isolate that hits a KV error converges on
 /// the same value, so a KV outage costs at most one rebuild per isolate rather
 /// than one per probe.
-const VERSION_UNAVAILABLE: &str = "<kv-unavailable>";
+const VERSION_UNAVAILABLE: &str = impresspress_core::config_probe::VERSION_UNAVAILABLE;
+
+/// The next probe deadline after observing `version`: a full window normally,
+/// but a short retry after an UNREADABLE read, so a change made while KV was
+/// failing is not missed for a whole (possibly hour-long) window.
+fn probe_deadline_after(now: u64, version: &str) -> u64 {
+    if version == VERSION_UNAVAILABLE {
+        now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS
+    } else {
+        next_probe_deadline_ms(now)
+    }
+}
 
 /// Current KV config-version stamp. Missing key ⇒ stamp a fresh one so all
 /// isolates converge on the same generation.
@@ -585,7 +574,7 @@ where
                 && !environment_changed
                 && !config_version_changed(&rt.version, &version)
             {
-                rt.probe_deadline_ms.set(next_probe_deadline_ms(now));
+                rt.probe_deadline_ms.set(probe_deadline_after(now, &version));
                 return Ok((rt, CacheOutcome::ProbedFresh));
             }
             tracing::info!(old = %rt.version, new = %version, dirty, environment_changed, "config version, Worker environment, or local state changed; rebuilding runtime");
@@ -809,7 +798,7 @@ where
     if let Some(rt) = cached() {
         if rt.environment_identity == environment_identity
             && rt.config_version.is_none()
-            && rt.version == probed_version
+            && !config_version_changed(&rt.version, &probed_version)
         {
             return Ok((rt, CacheOutcome::Hit));
         }
@@ -953,7 +942,10 @@ where
         if let Some(rt) = cached() {
             if rt.environment_identity == environment_identity
                 && rt.version == plan_generation
-                && rt.config_version.as_deref() == Some(config_version.as_str())
+                && rt
+                    .config_version
+                    .as_deref()
+                    .is_some_and(|cached| !config_version_changed(cached, &config_version))
             {
                 return Ok((rt, CacheOutcome::Hit));
             }
@@ -1035,7 +1027,7 @@ where
                     cached_config_version,
                     &observed_config_version,
                 ) {
-                    rt.probe_deadline_ms.set(next_probe_deadline_ms(now));
+                    rt.probe_deadline_ms.set(probe_deadline_after(now, &observed_config_version));
                     return Ok((rt, CacheOutcome::ProbedFresh));
                 }
 
@@ -1257,35 +1249,6 @@ mod tests {
     #[wasm_bindgen_test]
     fn moved_config_version_forces_prepared_fallback() {
         assert!(prepared_probe_requires_fallback(false, "v1", "v2"));
-    }
-
-    #[wasm_bindgen_test]
-    fn unreadable_config_version_holds_the_current_runtime() {
-        // A KV read error (on Workers Free, the daily read cap) is not a
-        // config change: hold the runtime instead of falling back to the
-        // dynamic build on every probe.
-        assert!(!config_version_changed("v1", VERSION_UNAVAILABLE));
-        assert!(!prepared_probe_requires_fallback(false, "v1", VERSION_UNAVAILABLE));
-        // A local write still forces the rebuild.
-        assert!(prepared_probe_requires_fallback(true, "v1", VERSION_UNAVAILABLE));
-        // A bound plan is trusted when KV cannot say otherwise; an unbound
-        // one never is.
-        let v1 = "1".repeat(32);
-        assert!(prepared_generation_matches(&v1, VERSION_UNAVAILABLE));
-        assert!(!prepared_generation_matches(
-            impresspress_core::UNBOUND_CONFIG_GENERATION,
-            VERSION_UNAVAILABLE,
-        ));
-    }
-
-    #[wasm_bindgen_test]
-    fn probe_window_defaults_and_clamps() {
-        assert_eq!(probe_window_ms(None), (PROBE_INTERVAL_FLOOR_MS, PROBE_INTERVAL_JITTER_MS));
-        assert_eq!(probe_window_ms(Some("not a number")), (PROBE_INTERVAL_FLOOR_MS, PROBE_INTERVAL_JITTER_MS));
-        assert_eq!(probe_window_ms(Some("600")), (600_000, 60_000));
-        assert_eq!(probe_window_ms(Some(" 600 ")), (600_000, 60_000));
-        assert_eq!(probe_window_ms(Some("5")), (30_000, 3_000));
-        assert_eq!(probe_window_ms(Some("999999")), (3_600_000, 360_000));
     }
 
     #[wasm_bindgen_test]

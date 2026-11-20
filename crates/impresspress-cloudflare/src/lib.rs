@@ -1158,6 +1158,17 @@ where
             request_log.to_string(),
         );
     }
+    // The config-probe interval is read by the runtime cache straight from
+    // env (`runtime_cache.rs`). It is threaded here too, explicitly and for
+    // the same reason as REQUEST_LOG, so the admin Variables page reads the
+    // SAME value through `config_get` and can say how long a save takes to
+    // reach every server.
+    if let Ok(interval) = env.var(impresspress_core::config_vars::CONFIG_PROBE_INTERVAL_KEY) {
+        cfg_svc_map.insert(
+            impresspress_core::config_vars::CONFIG_PROBE_INTERVAL_KEY.to_string(),
+            interval.to_string(),
+        );
+    }
     cfg_svc_map.insert(
         impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY.to_string(),
         block_settings.to_config_json(),
