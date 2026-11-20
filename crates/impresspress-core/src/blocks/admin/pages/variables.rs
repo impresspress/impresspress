@@ -18,7 +18,13 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Markup {
     let tab = msg.query("tab");
     let active_tab = if tab == "all" { "all" } else { "blocks" };
 
+    let propagation =
+        propagation_notice(ctx.config_get(crate::config_vars::CONFIG_PROBE_INTERVAL_KEY));
+
     html! {
+        @if let Some(notice) = propagation {
+            p .text-muted style="font-size:13px;margin:0 0 0.75rem" { (notice) }
+        }
         div style="margin-bottom:0.75rem" {
             button .btn .btn-primary .btn-sm onclick="openModal('create-var')" {
                 (icons::plus()) " Add Variable"
@@ -85,6 +91,26 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Markup {
             }
         }
     }
+}
+
+/// How long a saved change can take to show everywhere, when the host sets a
+/// config-probe interval ([`crate::config_vars::CONFIG_PROBE_INTERVAL_KEY`]):
+/// the worst case, a full jittered window plus KV propagation
+/// ([`crate::config_probe::worst_case_propagation_secs`]). None when the
+/// interval is not set: then the page says nothing (on Cloudflare the
+/// default delay is about a minute).
+fn propagation_notice(interval: Option<&str>) -> Option<String> {
+    let secs = crate::config_probe::worst_case_propagation_secs(interval)?;
+    let wait = if secs <= 120 {
+        "about two minutes".to_string()
+    } else {
+        format!("up to {} minutes", secs.div_ceil(60))
+    };
+    Some(format!(
+        "Saved changes apply at once on the server that handled the save, and can take {wait} \
+         to reach every server. Pages cached at the edge can show the old value a little \
+         longer. A redeploy applies changes everywhere immediately."
+    ))
 }
 
 /// Full settings page for variables — used by mutation handlers that need to
@@ -607,6 +633,25 @@ pub async fn handle_update_variable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Variables page says how long a save takes to reach every server,
+    /// and only when the host batches config checks.
+    #[test]
+    fn propagation_notice_states_the_configured_wait() {
+        assert_eq!(propagation_notice(None), None);
+        assert_eq!(propagation_notice(Some("nonsense")), None);
+        // 600s interval: 600 + 60 jitter + 60 KV propagation = 12 minutes.
+        let ten = propagation_notice(Some("600")).unwrap();
+        assert!(ten.contains("up to 12 minutes"), "{ten}");
+        assert!(ten.contains("redeploy"), "{ten}");
+        assert!(ten.contains("cached at the edge"), "{ten}");
+        assert!(propagation_notice(Some("30"))
+            .unwrap()
+            .contains("about two minutes"));
+        assert!(propagation_notice(Some("99999"))
+            .unwrap()
+            .contains("up to 67 minutes"));
+    }
 
     /// The icon-only edit button must carry an accessible name derived from
     /// the row key (2026-07-11 review: 49 unlabeled icon buttons on the

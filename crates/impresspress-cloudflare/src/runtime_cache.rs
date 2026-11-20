@@ -24,12 +24,38 @@ use std::{
 
 use impresspress_core::{cache_key::CONFIG_VERSION_KEY, metrics::CacheOutcome, IsolateCell};
 
-/// Floor of the isolate-local warm-hit probe window (ms) — see
-/// [`next_probe_deadline_ms`].
-const PROBE_INTERVAL_FLOOR_MS: u64 = 30_000;
-/// Width of the jitter added on top of the floor (ms) — see
-/// [`next_probe_deadline_ms`].
-const PROBE_INTERVAL_JITTER_MS: u64 = 30_000;
+/// Worker var: seconds between config-version probes per isolate (clamped to
+/// 30..=3600; rules in `impresspress_core::config_probe`). Each probe is one
+/// KV read, so a site that rarely edits config can trade freshness for reads.
+/// An admin edit is still seen at once by the isolate that made it
+/// (`mark_dirty`); other isolates see it within one window. Unset keeps the
+/// 30-60s default.
+pub(crate) const PROBE_INTERVAL_VAR: &str =
+    impresspress_core::config_vars::CONFIG_PROBE_INTERVAL_KEY;
+
+thread_local! {
+    /// This isolate's probe window as (floor, jitter) ms. Worker vars are
+    /// fixed per deployment, and an isolate serves exactly one deployment, so
+    /// it is read from env once, on the first request, not on every request.
+    static PROBE_WINDOW: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+fn configure_probe_interval(env: &worker::Env) {
+    if PROBE_WINDOW.with(|w| w.get()).is_some() {
+        return;
+    }
+    let value = env.var(PROBE_INTERVAL_VAR).ok().map(|v| v.to_string());
+    let window = impresspress_core::config_probe::probe_window_ms(value.as_deref());
+    PROBE_WINDOW.with(|w| w.set(Some(window)));
+}
+
+fn probe_window() -> (u64, u64) {
+    PROBE_WINDOW.with(|w| w.get()).unwrap_or((
+        impresspress_core::config_probe::DEFAULT_PROBE_FLOOR_MS,
+        impresspress_core::config_probe::DEFAULT_PROBE_JITTER_MS,
+    ))
+}
+
 /// Maximum time an isolate-local build slot may remain owned.
 ///
 /// Normal Rust cancellation drops [`BuildGuard`], but Cloudflare can hard-stop
@@ -295,30 +321,34 @@ fn bypass_prepared(identity: String) {
     PREPARED_BYPASS.with(|slot| slot.set(identity));
 }
 
+use impresspress_core::config_probe::config_version_changed;
+
 fn prepared_probe_requires_fallback(
     dirty: bool,
     cached_config_version: &str,
     observed_config_version: &str,
 ) -> bool {
-    dirty || cached_config_version != observed_config_version
+    dirty || config_version_changed(cached_config_version, observed_config_version)
 }
 
+/// See `impresspress_core::config_probe::prepared_plan_usable`, including the
+/// deliberate availability-over-freshness trade while KV is unreadable.
 fn prepared_generation_matches(plan_generation: &str, observed_generation: &str) -> bool {
-    plan_generation != impresspress_core::UNBOUND_CONFIG_GENERATION
-        && plan_generation == observed_generation
+    impresspress_core::config_probe::prepared_plan_usable(plan_generation, observed_generation)
 }
 
-/// A fresh probe deadline: `now` plus a jittered 30-60s window. Jitter
-/// avoids every isolate that warmed at the same instant re-probing KV in
-/// lockstep after exactly the same interval.
+/// A fresh probe deadline: `now` plus a jittered window (30-60s by default,
+/// see [`PROBE_INTERVAL_VAR`]). Jitter avoids every isolate that warmed at the
+/// same instant re-probing KV in lockstep after exactly the same interval.
 fn next_probe_deadline_ms(now: u64) -> u64 {
-    let mut buf = [0u8; 2];
+    let (floor, jitter_width) = probe_window();
+    let mut buf = [0u8; 4];
     let jitter_ms = if getrandom::getrandom(&mut buf).is_ok() {
-        u64::from(u16::from_le_bytes(buf)) % PROBE_INTERVAL_JITTER_MS
+        u64::from(u32::from_le_bytes(buf)) % jitter_width
     } else {
         0
     };
-    now + PROBE_INTERVAL_FLOOR_MS + jitter_ms
+    now + floor + jitter_ms
 }
 
 fn cached() -> Option<Rc<ReadyRuntime>> {
@@ -347,7 +377,18 @@ fn store_if_current(guard: &BuildGuard, rt: Rc<ReadyRuntime>) -> bool {
 /// A constant, deliberately: every isolate that hits a KV error converges on
 /// the same value, so a KV outage costs at most one rebuild per isolate rather
 /// than one per probe.
-const VERSION_UNAVAILABLE: &str = "<kv-unavailable>";
+const VERSION_UNAVAILABLE: &str = impresspress_core::config_probe::VERSION_UNAVAILABLE;
+
+/// The next probe deadline after observing `version`: a full window normally,
+/// but a short retry after an UNREADABLE read, so a change made while KV was
+/// failing is not missed for a whole (possibly hour-long) window.
+fn probe_deadline_after(now: u64, version: &str) -> u64 {
+    if version == VERSION_UNAVAILABLE {
+        now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS
+    } else {
+        next_probe_deadline_ms(now)
+    }
+}
 
 /// Current KV config-version stamp. Missing key ⇒ stamp a fresh one so all
 /// isolates converge on the same generation.
@@ -404,6 +445,7 @@ where
         Arc<dyn wafer_core::interfaces::storage::service::StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
+    configure_probe_interval(env);
     // The `IMPRESSPRESS_PREPARED_PLAN_DISABLED` escape hatch that used to sit
     // here is GONE, and should not come back. Its own comment said to remove it
     // "once the hang is understood"; it now is.
@@ -531,9 +573,10 @@ where
             if !dirty
                 && rt.config_version.is_none()
                 && !environment_changed
-                && rt.version == version
+                && !config_version_changed(&rt.version, &version)
             {
-                rt.probe_deadline_ms.set(next_probe_deadline_ms(now));
+                rt.probe_deadline_ms
+                    .set(probe_deadline_after(now, &version));
                 return Ok((rt, CacheOutcome::ProbedFresh));
             }
             tracing::info!(old = %rt.version, new = %version, dirty, environment_changed, "config version, Worker environment, or local state changed; rebuilding runtime");
@@ -589,12 +632,14 @@ where
     });
     let duration_ms = impresspress_core::util::now_millis().saturating_sub(built_at);
 
+    // Built while KV was unreadable: look again soon, not after a full window.
+    let probe_deadline = probe_deadline_after(built_at, &probed_version);
     let rt = Rc::new(ReadyRuntime {
         wafer: built.wafer,
         version: probed_version,
         config_version: None,
         environment_identity,
-        probe_deadline_ms: Cell::new(next_probe_deadline_ms(built_at)),
+        probe_deadline_ms: Cell::new(probe_deadline),
     });
     if !store_if_current(&build_guard, rt.clone()) {
         // The runtime is complete and internally consistent; only the right to
@@ -757,7 +802,7 @@ where
     if let Some(rt) = cached() {
         if rt.environment_identity == environment_identity
             && rt.config_version.is_none()
-            && rt.version == probed_version
+            && !config_version_changed(&rt.version, &probed_version)
         {
             return Ok((rt, CacheOutcome::Hit));
         }
@@ -805,12 +850,14 @@ where
         next
     });
     let duration_ms = impresspress_core::util::now_millis().saturating_sub(started_at);
+    // Built while KV was unreadable: look again soon, not after a full window.
+    let probe_deadline = probe_deadline_after(started_at, &probed_version);
     let rt = Rc::new(ReadyRuntime {
         wafer: built.wafer,
         version: probed_version,
         config_version: None,
         environment_identity,
-        probe_deadline_ms: Cell::new(next_probe_deadline_ms(started_at)),
+        probe_deadline_ms: Cell::new(probe_deadline),
     });
     tracing::info!(
         build_ordinal,
@@ -843,6 +890,7 @@ where
         Arc<dyn wafer_core::interfaces::storage::service::StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
+    configure_probe_interval(env);
     let environment_identity = crate::runtime_environment_identity(env, request_config);
     let plan_generation = plan.plan_hash.clone();
     let prepared_identity = prepared_cache_identity(&plan_generation, &environment_identity);
@@ -900,7 +948,10 @@ where
         if let Some(rt) = cached() {
             if rt.environment_identity == environment_identity
                 && rt.version == plan_generation
-                && rt.config_version.as_deref() == Some(config_version.as_str())
+                && rt
+                    .config_version
+                    .as_deref()
+                    .is_some_and(|cached| !config_version_changed(cached, &config_version))
             {
                 return Ok((rt, CacheOutcome::Hit));
             }
@@ -916,6 +967,12 @@ where
             now,
         )
         .await?;
+        // Hydrated against an UNREADABLE generation (the plan was trusted):
+        // check again soon instead of after a full window.
+        if config_version == VERSION_UNAVAILABLE {
+            rt.probe_deadline_ms
+                .set(now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS);
+        }
         tracing::info!(
             build_ordinal,
             duration_ms,
@@ -982,7 +1039,8 @@ where
                     cached_config_version,
                     &observed_config_version,
                 ) {
-                    rt.probe_deadline_ms.set(next_probe_deadline_ms(now));
+                    rt.probe_deadline_ms
+                        .set(probe_deadline_after(now, &observed_config_version));
                     return Ok((rt, CacheOutcome::ProbedFresh));
                 }
 
@@ -1043,6 +1101,12 @@ where
         now,
     )
     .await?;
+    // Hydrated against an UNREADABLE generation (the plan was trusted):
+    // check again soon instead of after a full window.
+    if config_version == VERSION_UNAVAILABLE {
+        rt.probe_deadline_ms
+            .set(now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS);
+    }
     if !store_if_current(&build_guard, rt.clone()) {
         // Same reasoning as the dynamic path: the hydrated runtime is complete,
         // only the right to publish it was lost. Serve it request-locally rather

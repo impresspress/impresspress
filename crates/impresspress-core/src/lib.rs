@@ -11,6 +11,7 @@ pub mod boot;
 pub mod builder;
 pub mod cache;
 pub mod cache_key;
+pub mod config_probe;
 pub mod config_source;
 pub mod config_vars;
 pub mod crypto;

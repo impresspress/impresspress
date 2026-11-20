@@ -19,6 +19,22 @@ use wafer_run::{ConfigVar, InputType};
 /// `WAFER_RUN_SHARED__*` entry.
 pub const DEPLOY_TOKEN_KEY: &str = "IMPRESSPRESS_DEPLOY_TOKEN";
 
+/// Worker var: seconds between config-version checks per server instance
+/// (Cloudflare's runtime cache, `impresspress-cloudflare` `runtime_cache.rs`).
+/// It bounds how long a saved admin change takes to reach every instance:
+/// the instance that saved it sees it at once, the rest within one interval.
+/// Each check is one KV read, which is what a site on Workers Free trades
+/// against (100k reads/day account-wide). Unset: 30-60s.
+pub const CONFIG_PROBE_INTERVAL_KEY: &str = "IMPRESSPRESS_CONFIG_PROBE_INTERVAL_SECS";
+
+/// The configured interval in seconds, clamped to 30..=3600, or None when
+/// unset or unparsable (the runtime then uses its 30-60s default).
+pub fn config_probe_interval_secs(value: Option<&str>) -> Option<u64> {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|secs| secs.clamp(30, 3600))
+}
+
 /// Shared config key: cross-origin origins allowed to call the API.
 ///
 /// Fed to the `wafer-run/cors` middleware block's `allowed_origins` at boot
@@ -419,5 +435,20 @@ mod screaming_block_tests {
             key_block_prefix("WAFER_RUN__AUTH__JWT_SECRET"),
             screaming_block("wafer-run/auth")
         );
+    }
+}
+
+#[cfg(test)]
+mod probe_interval_tests {
+    use super::config_probe_interval_secs;
+
+    #[test]
+    fn interval_parses_clamps_and_ignores_garbage() {
+        assert_eq!(config_probe_interval_secs(None), None);
+        assert_eq!(config_probe_interval_secs(Some("")), None);
+        assert_eq!(config_probe_interval_secs(Some("ten")), None);
+        assert_eq!(config_probe_interval_secs(Some(" 600 ")), Some(600));
+        assert_eq!(config_probe_interval_secs(Some("1")), Some(30));
+        assert_eq!(config_probe_interval_secs(Some("100000")), Some(3600));
     }
 }
