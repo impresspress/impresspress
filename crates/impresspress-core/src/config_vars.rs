@@ -30,7 +30,9 @@ pub const CONFIG_PROBE_INTERVAL_KEY: &str = "IMPRESSPRESS_CONFIG_PROBE_INTERVAL_
 /// The configured interval in seconds, clamped to 30..=3600, or None when
 /// unset or unparsable (the runtime then uses its 30-60s default).
 pub fn config_probe_interval_secs(value: Option<&str>) -> Option<u64> {
-    value.and_then(|v| v.trim().parse::<u64>().ok()).map(|secs| secs.clamp(30, 3600))
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|secs| secs.clamp(30, 3600))
 }
 
 /// Shared config key: cross-origin origins allowed to call the API.

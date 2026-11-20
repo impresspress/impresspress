@@ -18,9 +18,8 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Markup {
     let tab = msg.query("tab");
     let active_tab = if tab == "all" { "all" } else { "blocks" };
 
-    let propagation = propagation_notice(
-        ctx.config_get(crate::config_vars::CONFIG_PROBE_INTERVAL_KEY).map(|v| v.to_string()).as_deref(),
-    );
+    let propagation =
+        propagation_notice(ctx.config_get(crate::config_vars::CONFIG_PROBE_INTERVAL_KEY));
 
     html! {
         @if let Some(notice) = propagation {
@@ -102,7 +101,11 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Markup {
 /// default delay is about a minute).
 fn propagation_notice(interval: Option<&str>) -> Option<String> {
     let secs = crate::config_probe::worst_case_propagation_secs(interval)?;
-    let wait = if secs < 120 { "about two minutes".to_string() } else { format!("up to {} minutes", secs.div_ceil(60)) };
+    let wait = if secs <= 120 {
+        "about two minutes".to_string()
+    } else {
+        format!("up to {} minutes", secs.div_ceil(60))
+    };
     Some(format!(
         "Saved changes apply at once on the server that handled the save, and can take {wait} \
          to reach every server. Pages cached at the edge can show the old value a little \
@@ -642,8 +645,12 @@ mod tests {
         assert!(ten.contains("up to 12 minutes"), "{ten}");
         assert!(ten.contains("redeploy"), "{ten}");
         assert!(ten.contains("cached at the edge"), "{ten}");
-        assert!(propagation_notice(Some("30")).unwrap().contains("about two minutes"));
-        assert!(propagation_notice(Some("99999")).unwrap().contains("up to 67 minutes"));
+        assert!(propagation_notice(Some("30"))
+            .unwrap()
+            .contains("about two minutes"));
+        assert!(propagation_notice(Some("99999"))
+            .unwrap()
+            .contains("up to 67 minutes"));
     }
 
     /// The icon-only edit button must carry an accessible name derived from

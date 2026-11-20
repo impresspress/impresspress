@@ -30,7 +30,8 @@ use impresspress_core::{cache_key::CONFIG_VERSION_KEY, metrics::CacheOutcome, Is
 /// An admin edit is still seen at once by the isolate that made it
 /// (`mark_dirty`); other isolates see it within one window. Unset keeps the
 /// 30-60s default.
-pub(crate) const PROBE_INTERVAL_VAR: &str = impresspress_core::config_vars::CONFIG_PROBE_INTERVAL_KEY;
+pub(crate) const PROBE_INTERVAL_VAR: &str =
+    impresspress_core::config_vars::CONFIG_PROBE_INTERVAL_KEY;
 
 thread_local! {
     /// This isolate's probe window as (floor, jitter) ms. Worker vars are
@@ -574,7 +575,8 @@ where
                 && !environment_changed
                 && !config_version_changed(&rt.version, &version)
             {
-                rt.probe_deadline_ms.set(probe_deadline_after(now, &version));
+                rt.probe_deadline_ms
+                    .set(probe_deadline_after(now, &version));
                 return Ok((rt, CacheOutcome::ProbedFresh));
             }
             tracing::info!(old = %rt.version, new = %version, dirty, environment_changed, "config version, Worker environment, or local state changed; rebuilding runtime");
@@ -630,12 +632,14 @@ where
     });
     let duration_ms = impresspress_core::util::now_millis().saturating_sub(built_at);
 
+    // Built while KV was unreadable: look again soon, not after a full window.
+    let probe_deadline = probe_deadline_after(built_at, &probed_version);
     let rt = Rc::new(ReadyRuntime {
         wafer: built.wafer,
         version: probed_version,
         config_version: None,
         environment_identity,
-        probe_deadline_ms: Cell::new(next_probe_deadline_ms(built_at)),
+        probe_deadline_ms: Cell::new(probe_deadline),
     });
     if !store_if_current(&build_guard, rt.clone()) {
         // The runtime is complete and internally consistent; only the right to
@@ -846,12 +850,14 @@ where
         next
     });
     let duration_ms = impresspress_core::util::now_millis().saturating_sub(started_at);
+    // Built while KV was unreadable: look again soon, not after a full window.
+    let probe_deadline = probe_deadline_after(started_at, &probed_version);
     let rt = Rc::new(ReadyRuntime {
         wafer: built.wafer,
         version: probed_version,
         config_version: None,
         environment_identity,
-        probe_deadline_ms: Cell::new(next_probe_deadline_ms(started_at)),
+        probe_deadline_ms: Cell::new(probe_deadline),
     });
     tracing::info!(
         build_ordinal,
@@ -961,6 +967,12 @@ where
             now,
         )
         .await?;
+        // Hydrated against an UNREADABLE generation (the plan was trusted):
+        // check again soon instead of after a full window.
+        if config_version == VERSION_UNAVAILABLE {
+            rt.probe_deadline_ms
+                .set(now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS);
+        }
         tracing::info!(
             build_ordinal,
             duration_ms,
@@ -1027,7 +1039,8 @@ where
                     cached_config_version,
                     &observed_config_version,
                 ) {
-                    rt.probe_deadline_ms.set(probe_deadline_after(now, &observed_config_version));
+                    rt.probe_deadline_ms
+                        .set(probe_deadline_after(now, &observed_config_version));
                     return Ok((rt, CacheOutcome::ProbedFresh));
                 }
 
@@ -1088,6 +1101,12 @@ where
         now,
     )
     .await?;
+    // Hydrated against an UNREADABLE generation (the plan was trusted):
+    // check again soon instead of after a full window.
+    if config_version == VERSION_UNAVAILABLE {
+        rt.probe_deadline_ms
+            .set(now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS);
+    }
     if !store_if_current(&build_guard, rt.clone()) {
         // Same reasoning as the dynamic path: the hydrated runtime is complete,
         // only the right to publish it was lost. Serve it request-locally rather

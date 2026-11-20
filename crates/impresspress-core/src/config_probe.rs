@@ -34,6 +34,12 @@ pub const KV_PROPAGATION_ALLOWANCE_SECS: u64 = 60;
 /// probe during a KV failure used to abandon the runtime for the slow dynamic
 /// build, which cannot fit the Workers CPU budget: a KV outage became a site
 /// outage. Holding the current runtime is the safe reading.
+///
+/// A runtime that was itself TAGGED with the sentinel (a dynamic build made
+/// while KV was unreadable) does count as changed once a real stamp is read:
+/// it cannot know what it missed, so it rebuilds once. Prepared runtimes are
+/// tagged with their plan's generation instead, so on the normal path KV
+/// recovery causes no rebuild at all.
 pub fn config_version_changed(cached: &str, observed: &str) -> bool {
     observed != VERSION_UNAVAILABLE && cached != observed
 }
@@ -52,14 +58,20 @@ pub fn prepared_plan_usable(plan_generation: &str, observed_generation: &str) ->
         && (observed_generation == VERSION_UNAVAILABLE || plan_generation == observed_generation)
 }
 
+/// (floor, jitter) in ms for an interval in seconds (already clamped).
+/// Jitter is 10% of the floor but never less than the default 30s, so a
+/// short setting is never probed more often, or more in lockstep, than
+/// leaving the variable unset.
+fn window_for_secs(secs: u64) -> (u64, u64) {
+    let floor = secs * 1000;
+    (floor, (floor / 10).max(DEFAULT_PROBE_JITTER_MS))
+}
+
 /// (floor, jitter) in ms for a configured interval value: the default 30s +
-/// 0..30s when unset or unparsable, else the clamped interval + 0..10%.
+/// 0..30s when unset or unparsable.
 pub fn probe_window_ms(interval: Option<&str>) -> (u64, u64) {
     match config_probe_interval_secs(interval) {
-        Some(secs) => {
-            let floor = secs * 1000;
-            (floor, (floor / 10).max(1))
-        }
+        Some(secs) => window_for_secs(secs),
         None => (DEFAULT_PROBE_FLOOR_MS, DEFAULT_PROBE_JITTER_MS),
     }
 }
@@ -68,8 +80,7 @@ pub fn probe_window_ms(interval: Option<&str>) -> (u64, u64) {
 /// one full jittered window plus KV's own propagation. None when the interval
 /// is not configured (the admin UI then says nothing).
 pub fn worst_case_propagation_secs(interval: Option<&str>) -> Option<u64> {
-    config_probe_interval_secs(interval)?;
-    let (floor, jitter) = probe_window_ms(interval);
+    let (floor, jitter) = window_for_secs(config_probe_interval_secs(interval)?);
     Some((floor + jitter).div_ceil(1000) + KV_PROPAGATION_ALLOWANCE_SECS)
 }
 
@@ -94,8 +105,14 @@ mod tests {
         assert!(prepared_plan_usable(&v1, &v1));
         assert!(!prepared_plan_usable(&v1, &v2));
         assert!(prepared_plan_usable(&v1, VERSION_UNAVAILABLE));
-        assert!(!prepared_plan_usable(UNBOUND_CONFIG_GENERATION, VERSION_UNAVAILABLE));
-        assert!(!prepared_plan_usable(UNBOUND_CONFIG_GENERATION, UNBOUND_CONFIG_GENERATION));
+        assert!(!prepared_plan_usable(
+            UNBOUND_CONFIG_GENERATION,
+            VERSION_UNAVAILABLE
+        ));
+        assert!(!prepared_plan_usable(
+            UNBOUND_CONFIG_GENERATION,
+            UNBOUND_CONFIG_GENERATION
+        ));
     }
 
     #[test]
@@ -103,7 +120,10 @@ mod tests {
         assert_eq!(probe_window_ms(None), (30_000, 30_000));
         assert_eq!(probe_window_ms(Some("garbage")), (30_000, 30_000));
         assert_eq!(probe_window_ms(Some("600")), (600_000, 60_000));
-        assert_eq!(probe_window_ms(Some("5")), (30_000, 3_000));
+        // A short setting keeps the default jitter: never more frequent or
+        // more lockstep than unset.
+        assert_eq!(probe_window_ms(Some("5")), (30_000, 30_000));
+        assert_eq!(probe_window_ms(Some("30")), (30_000, 30_000));
         assert_eq!(probe_window_ms(Some("999999")), (3_600_000, 360_000));
     }
 
@@ -112,6 +132,6 @@ mod tests {
         assert_eq!(worst_case_propagation_secs(None), None);
         // 600s + 60s jitter + 60s KV = 720s, i.e. 12 minutes.
         assert_eq!(worst_case_propagation_secs(Some("600")), Some(720));
-        assert_eq!(worst_case_propagation_secs(Some("30")), Some(93));
+        assert_eq!(worst_case_propagation_secs(Some("30")), Some(120));
     }
 }
