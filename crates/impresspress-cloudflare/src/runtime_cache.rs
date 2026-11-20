@@ -342,13 +342,7 @@ fn prepared_generation_matches(plan_generation: &str, observed_generation: &str)
 /// same instant re-probing KV in lockstep after exactly the same interval.
 fn next_probe_deadline_ms(now: u64) -> u64 {
     let (floor, jitter_width) = probe_window();
-    let mut buf = [0u8; 4];
-    let jitter_ms = if getrandom::getrandom(&mut buf).is_ok() {
-        u64::from(u32::from_le_bytes(buf)) % jitter_width
-    } else {
-        0
-    };
-    now + floor + jitter_ms
+    now + floor + random_below(jitter_width)
 }
 
 fn cached() -> Option<Rc<ReadyRuntime>> {
@@ -384,9 +378,32 @@ const VERSION_UNAVAILABLE: &str = impresspress_core::config_probe::VERSION_UNAVA
 /// failing is not missed for a whole (possibly hour-long) window.
 fn probe_deadline_after(now: u64, version: &str) -> u64 {
     if version == VERSION_UNAVAILABLE {
-        now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS
+        let outage_ms = OUTAGE_STARTED_AT
+            .with(Cell::get)
+            .map_or(0, |started| now.saturating_sub(started));
+        let (base, jitter_width) =
+            impresspress_core::config_probe::unreadable_retry_window_ms(outage_ms, probe_window());
+        now + base + random_below(jitter_width)
     } else {
         next_probe_deadline_ms(now)
+    }
+}
+
+thread_local! {
+    /// When this isolate's current run of unreadable config-version reads
+    /// began (ms), or None while KV is answering. Drives the retry backoff
+    /// (`config_probe::unreadable_retry_window_ms`); time-based, so a burst
+    /// of concurrent failed reads does not escalate it.
+    static OUTAGE_STARTED_AT: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// A random value in 0..width (0 if the RNG is unavailable).
+fn random_below(width: u64) -> u64 {
+    let mut buf = [0u8; 4];
+    if getrandom::getrandom(&mut buf).is_ok() {
+        u64::from(u32::from_le_bytes(buf)) % width.max(1)
+    } else {
+        0
     }
 }
 
@@ -401,7 +418,16 @@ fn probe_deadline_after(now: u64, version: &str) -> u64 {
 /// above described the intended behaviour; the match arm was wider than the
 /// comment.
 async fn current_version(kv: &Arc<dyn impresspress_core::kv::KvBackend>) -> String {
-    match kv.get(CONFIG_VERSION_KEY).await {
+    let read = kv.get(CONFIG_VERSION_KEY).await;
+    let now = impresspress_core::util::now_millis();
+    OUTAGE_STARTED_AT.with(|started| {
+        started.set(impresspress_core::config_probe::next_outage_start(
+            started.get(),
+            now,
+            read.is_ok(),
+        ))
+    });
+    match read {
         Ok(Some(v)) => v,
         Err(e) => {
             tracing::warn!(
@@ -691,6 +717,10 @@ async fn hydrate_prepared_runtime<F, G>(
     register_post_build: G,
     environment_identity: String,
     started_at: u64,
+    // The generation a runtime that will be STORED was checked against: an
+    // UNREADABLE one (the plan was trusted) gets the unreadable-retry
+    // deadline. None for request-local runtimes and when nothing was read.
+    observed_config_version: Option<&str>,
 ) -> Result<(Rc<ReadyRuntime>, u32, u64), Box<dyn std::error::Error>>
 where
     F: FnOnce(
@@ -739,7 +769,10 @@ where
         version: plan.plan_hash.clone(),
         config_version: Some(plan.config_generation.clone()),
         environment_identity,
-        probe_deadline_ms: Cell::new(next_probe_deadline_ms(started_at)),
+        probe_deadline_ms: Cell::new(match observed_config_version {
+            Some(observed) => probe_deadline_after(started_at, observed),
+            None => next_probe_deadline_ms(started_at),
+        }),
     });
     Ok((rt, build_ordinal, duration_ms))
 }
@@ -965,14 +998,9 @@ where
             register_post_build,
             environment_identity,
             now,
+            None, // request-local, never stored: no probe deadline to set
         )
         .await?;
-        // Hydrated against an UNREADABLE generation (the plan was trusted):
-        // check again soon instead of after a full window.
-        if config_version == VERSION_UNAVAILABLE {
-            rt.probe_deadline_ms
-                .set(now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS);
-        }
         tracing::info!(
             build_ordinal,
             duration_ms,
@@ -1007,6 +1035,7 @@ where
             register_post_build,
             environment_identity,
             now,
+            None,
         )
         .await?;
         tracing::info!(
@@ -1099,14 +1128,9 @@ where
         register_post_build,
         environment_identity,
         now,
+        Some(&config_version),
     )
     .await?;
-    // Hydrated against an UNREADABLE generation (the plan was trusted):
-    // check again soon instead of after a full window.
-    if config_version == VERSION_UNAVAILABLE {
-        rt.probe_deadline_ms
-            .set(now + impresspress_core::config_probe::RETRY_AFTER_UNREADABLE_MS);
-    }
     if !store_if_current(&build_guard, rt.clone()) {
         // Same reasoning as the dynamic path: the hydrated runtime is complete,
         // only the right to publish it was lost. Serve it request-locally rather
